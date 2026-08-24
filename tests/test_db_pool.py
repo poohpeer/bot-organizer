@@ -33,3 +33,14 @@ async def test_only_one_active_session_per_chat(db_pool):
             "INSERT INTO sessions (chat_id, activity_type, status) "
             "VALUES (1, 'birthday', 'active')"
         )
+
+
+async def test_jsonb_columns_round_trip_as_python_dicts(db_pool):
+    await db_pool.execute(
+        "INSERT INTO decision_log (chat_id, stage, decision) VALUES ($1, $2, $3)",
+        1, "test", {"tool": "list_add", "args": {"name": "tomatoes"}},
+    )
+
+    row = await db_pool.fetchrow("SELECT decision FROM decision_log WHERE chat_id = 1")
+
+    assert row["decision"] == {"tool": "list_add", "args": {"name": "tomatoes"}}

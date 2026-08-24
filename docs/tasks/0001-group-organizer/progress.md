@@ -9,7 +9,7 @@
 ## Units
 | Unit | Branch | Status | Commits | Verification | PR | Notes |
 |------|--------|--------|---------|--------------|----|-------|
-| S1 | 0001-S1-data-model | in_progress | d6416ad..a550ead | review clean (2 findings fixed) | — | tester pending |
+| S1 | 0001-S1-data-model | complete | d6416ad..(pre-PR) | review clean; tester PASS | — | |
 | S2 | — | pending | — | — | — | |
 | S3 | — | blocked | — | — | — | waits on S1 |
 | S4 | — | blocked | — | — | — | waits on S1, S2 |
@@ -25,3 +25,6 @@
 
 ## Log
 - 2026-08-24: Design merged to main. Test Postgres started. Beginning S1.
+- 2026-08-24: S1 implemented (2 tasks), code-review clean (2 findings
+  fixed: db_pool fixture leak on early failure, progress ledger staleness),
+  tester PASS (see test-report.md). Opening PR.
