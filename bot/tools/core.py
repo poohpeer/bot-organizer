@@ -1,5 +1,23 @@
 import functools
+import logging
 from datetime import datetime, timezone
+
+log = logging.getLogger(__name__)
+
+# Actions the model is never allowed to perform directly (R10). Each is
+# proposed as a pending_confirmation and only executed after an explicit human
+# "yes" in chat.
+_CONFIRMATION_PROMPTS = {
+    "list_remove_item": "delete {name!r} from the list",
+    "broadcast_message": "send this to the whole chat: {text!r}",
+}
+
+
+async def _session_row(pool, session_id, columns="chat_id"):
+    """Fetch a session, or None. Tools take session_id from the model, so a
+    hallucinated or stale id must produce a usable result rather than a
+    TypeError on None subscripting."""
+    return await pool.fetchrow(f"SELECT {columns} FROM sessions WHERE id = $1", session_id)
 
 
 async def remember_fact(pool, session_id, key, value) -> dict:
@@ -33,9 +51,12 @@ async def propose_confirmation(pool, *, chat_id, session_id, action_type, action
     return {
         "status": "pending_confirmation",
         "confirmation_id": row["id"],
+        # Relayed verbatim into the group chat, so it must read as a sentence
+        # rather than a dumped params dict.
         "message_for_user": (
-            f"This needs your confirmation before I do it ({action_type}: {action_params}). "
-            "Reply yes to confirm or no to cancel."
+            "Just to confirm — you want me to "
+            + _CONFIRMATION_PROMPTS.get(action_type, action_type).format(**action_params)
+            + "? Reply yes to go ahead, or no to cancel."
         ),
     }
 
@@ -52,27 +73,58 @@ async def get_pending_confirmation(pool, chat_id):
 
 
 async def resolve_confirmation(pool, confirmation_id, *, confirmed: bool):
+    """Resolve a pending confirmation, returning the row, or None if it was
+    already resolved.
+
+    The `status = 'pending'` guard is what stops a gated destructive action
+    running twice: two "yes" messages processed concurrently (or one update
+    redelivered) would otherwise both resolve the same row and both execute.
+    """
     return await pool.fetchrow(
         """
         UPDATE pending_confirmations SET status = $2
-        WHERE id = $1 RETURNING *
+        WHERE id = $1 AND status = 'pending' RETURNING *
         """,
         confirmation_id, "confirmed" if confirmed else "rejected",
     )
 
 
 async def execute_confirmed_action(pool, bot, confirmation) -> dict:
+    """Perform an action a human has just confirmed.
+
+    Refuses anything not in the 'confirmed' state, so it can't be replayed
+    against an already-executed or rejected row even if a caller passes one in.
+    """
+    if confirmation is None:
+        return {"status": "already_resolved"}
+    if confirmation["status"] != "confirmed":
+        return {"status": "not_confirmed"}
+
     action_type = confirmation["action_type"]
     params = confirmation["action_params"]
+
     if action_type == "list_remove_item":
-        await pool.execute(
-            "DELETE FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
+        # Deletes exactly one row: two separate `list_add("tomatoes")` calls
+        # are two distinct entries, and confirming removal of one shouldn't
+        # silently take the other with it.
+        deleted = await pool.fetchrow(
+            """
+            DELETE FROM list_items WHERE id = (
+                SELECT id FROM list_items
+                WHERE session_id = $1 AND lower(name) = lower($2)
+                ORDER BY created_at LIMIT 1
+            ) RETURNING name
+            """,
             confirmation["session_id"], params["name"],
         )
-        return {"status": "executed"}
+        # The item may have been renamed or already removed between proposal
+        # and confirmation — don't claim a deletion that didn't happen.
+        return {"status": "executed"} if deleted else {"status": "not_found"}
+
     if action_type == "broadcast_message":
         await bot.send_message(chat_id=confirmation["chat_id"], text=params["text"])
         return {"status": "executed"}
+
     return {"status": "unknown_action_type"}
 
 
@@ -101,11 +153,23 @@ async def list_check_off(pool, session_id, name) -> dict:
         """,
         session_id, name,
     )
-    return {"status": "ok"} if row else {"status": "not_found"}
+    if row:
+        return {"status": "ok"}
+    # Distinguish "already done" from "never on the list" — two people both
+    # saying "I got the cucumbers" shouldn't be told cucumbers aren't listed.
+    existing = await pool.fetchrow(
+        "SELECT status FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
+        session_id, name,
+    )
+    if existing is not None:
+        return {"status": "already_checked"}
+    return {"status": "not_found"}
 
 
 async def list_remove_item(pool, session_id, name) -> dict:
-    session_row = await pool.fetchrow("SELECT chat_id FROM sessions WHERE id = $1", session_id)
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"status": "unknown_session"}
     return await propose_confirmation(
         pool, chat_id=session_row["chat_id"], session_id=session_id,
         action_type="list_remove_item", action_params={"name": name},
@@ -113,23 +177,34 @@ async def list_remove_item(pool, session_id, name) -> dict:
 
 
 async def set_participant(pool, session_id, display_name, status, user_id=None) -> dict:
+    """Record or update one participant's status.
+
+    Identity is deliberately fuzzy: someone is first mentioned by name in the
+    group ("Masha is coming"), and only later replies in DM where a real
+    telegram user_id is known. Matching on user_id alone would create a second
+    row for the same person — get_participants would then report Masha twice
+    with conflicting statuses, and the nudge would DM someone who had already
+    confirmed. So: match on user_id first, fall back to the name, and backfill
+    the user_id onto the existing row once it becomes known.
+    """
+    row = None
     if user_id is not None:
-        result = await pool.execute(
-            """
-            UPDATE participants SET status = $3, display_name = $4, responded_at = now()
-            WHERE session_id = $1 AND user_id = $2
-            """,
-            session_id, user_id, status, display_name,
+        row = await pool.fetchrow(
+            "SELECT id FROM participants WHERE session_id = $1 AND user_id = $2",
+            session_id, user_id,
         )
-    else:
-        result = await pool.execute(
+    if row is None:
+        row = await pool.fetchrow(
             """
-            UPDATE participants SET status = $3, responded_at = now()
-            WHERE session_id = $1 AND user_id IS NULL AND lower(display_name) = lower($2)
+            SELECT id FROM participants
+            WHERE session_id = $1 AND lower(display_name) = lower($2)
+              AND (user_id IS NULL OR user_id = $3::bigint)
+            ORDER BY (user_id IS NULL) LIMIT 1
             """,
-            session_id, display_name, status,
+            session_id, display_name, user_id,
         )
-    if result == "UPDATE 0":
+
+    if row is None:
         await pool.execute(
             """
             INSERT INTO participants (session_id, user_id, display_name, status, responded_at)
@@ -137,6 +212,19 @@ async def set_participant(pool, session_id, display_name, status, user_id=None) 
             """,
             session_id, user_id, display_name, status,
         )
+        return {"status": "ok"}
+
+    await pool.execute(
+        """
+        UPDATE participants SET
+            status = $2,
+            display_name = $3,
+            user_id = COALESCE($4::bigint, user_id),
+            responded_at = now()
+        WHERE id = $1
+        """,
+        row["id"], status, display_name, user_id,
+    )
     return {"status": "ok"}
 
 
@@ -152,49 +240,94 @@ async def get_participants(pool, session_id) -> dict:
 
 
 async def nudge_unconfirmed_participants(pool, telegram_bot, session_id) -> dict:
-    session_row = await pool.fetchrow("SELECT activity_type FROM sessions WHERE id = $1", session_id)
+    """DM every participant whose status is still unknown.
+
+    Each send is isolated: Telegram refuses (Forbidden) to DM anyone who has
+    never started a private chat with the bot, which is the normal state for
+    most group members. Letting that propagate would abort the run, lose the
+    record of who was already reached, and re-DM them all on a retry. Instead
+    every failure is collected so the model can tell the group who it could
+    not reach.
+    """
+    session_row = await _session_row(pool, session_id, columns="activity_type")
+    if session_row is None:
+        return {"status": "unknown_session"}
+
     rows = await pool.fetch(
         "SELECT user_id, display_name FROM participants WHERE session_id = $1 AND status = 'unknown'",
         session_id,
     )
-    nudged, skipped = [], []
+    nudged, skipped, failed = [], [], []
     for r in rows:
         if r["user_id"] is None:
             skipped.append(r["display_name"])
             continue
-        await telegram_bot.send_message(
-            chat_id=r["user_id"],
-            text=f"Hey {r['display_name']}, are you in for the {session_row['activity_type']}?",
-        )
-        nudged.append(r["display_name"])
-    return {"nudged": nudged, "skipped_no_user_id": skipped}
+        try:
+            await telegram_bot.send_message(
+                chat_id=r["user_id"],
+                text=f"Hey {r['display_name']}, are you in for the {session_row['activity_type']}?",
+            )
+            nudged.append(r["display_name"])
+        except Exception as e:
+            log.warning("Could not DM participant %s: %s", r["display_name"], e)
+            failed.append(r["display_name"])
+    return {"nudged": nudged, "skipped_no_user_id": skipped, "failed_to_reach": failed}
 
 
-async def reminder_set(pool, session_id, chat_id, message, remind_at, target_user_id=None) -> dict:
-    when = datetime.fromisoformat(remind_at)
+async def reminder_set(pool, session_id, message, remind_at, target_user_id=None) -> dict:
+    """Queue a reminder for later delivery by the worker.
+
+    chat_id is derived from the session rather than taken from the model: a
+    hallucinated chat_id would post this chat's reminder into a different
+    group.
+    """
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"status": "unknown_session"}
+
+    try:
+        when = datetime.fromisoformat(remind_at)
+    except (TypeError, ValueError):
+        return {"status": "bad_datetime", "detail": f"could not parse {remind_at!r} as ISO-8601"}
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)  # a naive ISO string is treated as UTC
+        # No per-chat timezone exists yet (see the story's implementation
+        # notes), so a naive timestamp is read as UTC.
+        when = when.replace(tzinfo=timezone.utc)
+
     row = await pool.fetchrow(
         """
         INSERT INTO reminders (session_id, chat_id, target_user_id, message, remind_at)
         VALUES ($1, $2, $3, $4, $5) RETURNING id
         """,
-        session_id, chat_id, target_user_id, message, when,
+        session_id, session_row["chat_id"], target_user_id, message, when,
     )
     return {"status": "ok", "reminder_id": row["id"]}
 
 
-async def reminder_cancel(pool, reminder_id) -> dict:
+async def reminder_cancel(pool, session_id, reminder_id) -> dict:
+    """Cancel a pending reminder belonging to this session.
+
+    Scoped by session_id on purpose: reminder_id is a global BIGSERIAL supplied
+    by the model, so an unscoped cancel could silently kill another chat's
+    reminder.
+    """
     result = await pool.execute(
-        "UPDATE reminders SET status = 'cancelled' WHERE id = $1 AND status = 'pending'",
-        reminder_id,
+        "UPDATE reminders SET status = 'cancelled' WHERE id = $1 AND session_id = $2 AND status = 'pending'",
+        reminder_id, session_id,
     )
     return {"status": "ok"} if result == "UPDATE 1" else {"status": "not_found"}
 
 
-async def broadcast_message(pool, session_id, chat_id, text) -> dict:
+async def broadcast_message(pool, session_id, text) -> dict:
+    """Propose sending an arbitrary message to the whole chat. Gated (R10) —
+    this only files a confirmation, it never sends. chat_id comes from the
+    session so the gate is always asked of, and the text always lands in, the
+    chat the session belongs to."""
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"status": "unknown_session"}
     return await propose_confirmation(
-        pool, chat_id=chat_id, session_id=session_id,
+        pool, chat_id=session_row["chat_id"], session_id=session_id,
         action_type="broadcast_message", action_params={"text": text},
     )
 
