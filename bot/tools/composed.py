@@ -24,3 +24,18 @@ async def resolve_and_save_place(pool, session_id, place_query) -> dict:
         "found": True, "name": looked_up["name"], "address": looked_up["address"],
         "lat": looked_up["lat"], "lon": looked_up["lon"], "cached": False,
     }
+
+
+async def send_location(pool, telegram_bot, session_id, chat_id, place_name) -> dict:
+    row = await pool.fetchrow(
+        "SELECT name, address, lat, lon FROM places WHERE session_id = $1 AND lower(name) = lower($2)",
+        session_id, place_name,
+    )
+    if row is None:
+        return {"status": "not_found"}
+
+    await telegram_bot.send_venue(
+        chat_id=chat_id, latitude=row["lat"], longitude=row["lon"],
+        title=row["name"], address=row["address"] or "",
+    )
+    return {"status": "ok"}

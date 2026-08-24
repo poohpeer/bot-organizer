@@ -58,3 +58,29 @@ async def test_resolve_and_save_place_not_found(db_pool):
 
     assert result == {"found": False}
     assert await db_pool.fetchrow("SELECT * FROM places WHERE session_id = $1", session_id) is None
+
+
+async def test_send_location_sends_venue_for_saved_place(db_pool):
+    session_id = await _new_session(db_pool)
+    await db_pool.execute(
+        "INSERT INTO places (session_id, name, address, lat, lon) VALUES ($1, 'Hanania Meadow', 'Route 1', 32.79, 35.05)",
+        session_id,
+    )
+    telegram_bot = AsyncMock()
+
+    result = await composed.send_location(db_pool, telegram_bot, session_id, chat_id=1, place_name="hanania meadow")
+
+    assert result == {"status": "ok"}
+    telegram_bot.send_venue.assert_awaited_once_with(
+        chat_id=1, latitude=32.79, longitude=35.05, title="Hanania Meadow", address="Route 1",
+    )
+
+
+async def test_send_location_not_found_for_unresolved_place(db_pool):
+    session_id = await _new_session(db_pool)
+    telegram_bot = AsyncMock()
+
+    result = await composed.send_location(db_pool, telegram_bot, session_id, chat_id=1, place_name="nowhere")
+
+    assert result == {"status": "not_found"}
+    telegram_bot.send_venue.assert_not_awaited()
