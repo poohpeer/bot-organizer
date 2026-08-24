@@ -11,9 +11,9 @@
 |------|--------|--------|---------|--------------|----|-------|
 | S1 | 0001-S1-data-model | complete | squashed as 10248da | review clean; tester PASS | #2 (merged) | |
 | S2 | 0001-S2-ai-layer | complete | dabe8d7..5b1da69 | review: 7 findings fixed; tester PASS | — | classifier + tool loop verified against live API |
-| S3 | — | blocked | — | — | — | waits on S1 |
-| S4 | — | blocked | — | — | — | waits on S1, S2 |
-| S5 | — | blocked | — | — | — | waits on S2 |
+| S3 | 0001-S3-session-lifecycle | complete | c72cc37..d996cf0 | review: 3 defects fixed; tester PASS | — | R4 re-ask loop caught + fixed |
+| S4 | — | ready | — | — | — | S1+S2 merged |
+| S5 | — | ready | — | — | — | S2 merged |
 | S6 | — | blocked | — | — | — | waits on S1, S5 |
 | S7 | — | blocked | — | — | — | waits on S1, S2, S3 |
 | S8 | — | blocked | — | — | — | waits on S1, S3 |
@@ -36,3 +36,10 @@
   and R5 classification verified against the live Gemini API, not mocks.
   A real 429 during verification exercised the new mid-conversation
   fallback path and recovered. Suite: 23 passed.
+- 2026-08-24: S3 implemented (3 tasks, clean first pass). Code review found
+  8 issues; 3 fixed as real defects (all reproduced against a real DB first):
+  an R4-violating closing-question re-ask loop, a non-idempotent close that
+  overwrote closed_reason on a race, and a select-then-mark double-post race.
+  Added closing_question_snoozed_until to the schema and atomic claim_*
+  helpers (S8's story updated to match). 2 findings deferred with rationale
+  (timezone, dedup-before-handler). Tester PASS. Suite: 50 passed.

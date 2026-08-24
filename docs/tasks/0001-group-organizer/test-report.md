@@ -5,5 +5,6 @@ per story rather than overwritten on each run. Latest first.
 
 | Story | Report | Verdict |
 |-------|--------|---------|
+| S3 — Session lifecycle | [test-report-S3.md](test-report-S3.md) | PASS |
 | S2 — AI layer | [test-report-S2.md](test-report-S2.md) | PASS |
 | S1 — Data model & persistence | [test-report-S1.md](test-report-S1.md) | PASS |

@@ -26,7 +26,13 @@ CREATE TABLE IF NOT EXISTS sessions (
                                      )),
     last_activity_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     closing_question_asked_at   TIMESTAMPTZ,
-    closing_question_retries    INT NOT NULL DEFAULT 0
+    closing_question_retries    INT NOT NULL DEFAULT 0,
+    -- Set when someone answers the closing question with "not yet": every
+    -- due-check below ignores the session until this passes. Without it a
+    -- session whose event_date is in the past re-qualifies on the very next
+    -- worker tick and the bot asks again forever (R4: "no further closing
+    -- question is asked until conditions change").
+    closing_question_snoozed_until TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_session_per_chat
@@ -152,6 +158,17 @@ async def create_pool(dsn: str, *, init=None) -> asyncpg.Pool:
     return await asyncpg.create_pool(dsn, init=_init_connection, setup=init)
 
 
+# Columns added after a database may already have been created. `CREATE TABLE
+# IF NOT EXISTS` is a no-op on an existing table, so it would never add them;
+# these idempotent ALTERs keep an already-provisioned database in step with
+# _SCHEMA_SQL. Still plain DDL — no migration framework, per the epic's
+# constraints — and safe to run on every startup.
+_ALTERS_SQL = """
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS closing_question_snoozed_until TIMESTAMPTZ;
+"""
+
+
 async def init_db(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(_SCHEMA_SQL)
+        await conn.execute(_ALTERS_SQL)

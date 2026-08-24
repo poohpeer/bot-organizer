@@ -178,9 +178,18 @@ only touches the `reminders` table directly — no S4 import)
 - Create: `tests/test_worker_closing.py`
 
 **Interfaces:**
-- Consumes: `bot.session.sessions_needing_closing_question`,
-  `bot.session.mark_closing_question_asked`,
-  `bot.session.sessions_needing_auto_close`, `bot.session.close_session` (S3).
+- Consumes: `bot.session.claim_sessions_for_closing_question`,
+  `bot.session.claim_sessions_for_auto_close` (S3).
+
+  **Interface note (changed during S3 implementation):** the original design
+  had this story call `sessions_needing_closing_question` and then
+  `mark_closing_question_asked` as two steps. Code review caught that
+  select-then-mark lets two pollers (or a tick overlapping a slow send) claim
+  the same session and post the closing question twice. S3 now exposes
+  `claim_sessions_*` helpers that mark/close atomically in a single
+  `UPDATE ... RETURNING`, so the worker just posts to whatever it is handed.
+  The read-only `sessions_needing_*` functions still exist for tests and
+  diagnostics — do not use them for sending.
 - Produces: `async worker.closing.fire_closing_questions(pool, telegram_bot) -> list[int]` (session ids asked),
   `async worker.closing.fire_auto_closes(pool, telegram_bot) -> list[int]` (session ids auto-closed).
   Both consumed by `worker/main.py` (Task 3).
@@ -271,20 +280,21 @@ only touches the `reminders` table directly — no S4 import)
 
 
   async def fire_closing_questions(pool, telegram_bot) -> list[int]:
-      due = await session.sessions_needing_closing_question(pool)
+      # Claimed (and marked) atomically before sending — see the interface
+      # note above. A send that fails costs one skipped question rather than
+      # a duplicated one.
+      claimed = await session.claim_sessions_for_closing_question(pool)
       asked = []
-      for row in due:
+      for row in claimed:
           await telegram_bot.send_message(chat_id=row["chat_id"], text=_CLOSING_QUESTION_TEXT)
-          await session.mark_closing_question_asked(pool, row["id"])
           asked.append(row["id"])
       return asked
 
 
   async def fire_auto_closes(pool, telegram_bot) -> list[int]:
-      due = await session.sessions_needing_auto_close(pool)
+      claimed = await session.claim_sessions_for_auto_close(pool)
       closed = []
-      for row in due:
-          await session.close_session(pool, row["id"], reason="auto_close_silence")
+      for row in claimed:
           await telegram_bot.send_message(chat_id=row["chat_id"], text=_AUTO_CLOSE_NOTICE)
           closed.append(row["id"])
       return closed
