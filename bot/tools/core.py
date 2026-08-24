@@ -70,3 +70,39 @@ async def execute_confirmed_action(pool, bot, confirmation) -> dict:
         await bot.send_message(chat_id=confirmation["chat_id"], text=params["text"])
         return {"status": "executed"}
     return {"status": "unknown_action_type"}
+
+
+async def list_add(pool, session_id, name) -> dict:
+    row = await pool.fetchrow(
+        "INSERT INTO list_items (session_id, name) VALUES ($1, $2) RETURNING id",
+        session_id, name,
+    )
+    return {"status": "ok", "item_id": row["id"]}
+
+
+async def list_show(pool, session_id) -> dict:
+    rows = await pool.fetch(
+        "SELECT name, status FROM list_items WHERE session_id = $1 ORDER BY created_at",
+        session_id,
+    )
+    return {"items": [{"name": r["name"], "status": r["status"]} for r in rows]}
+
+
+async def list_check_off(pool, session_id, name) -> dict:
+    row = await pool.fetchrow(
+        """
+        UPDATE list_items SET status = 'checked', checked_at = now()
+        WHERE session_id = $1 AND lower(name) = lower($2) AND status = 'pending'
+        RETURNING id
+        """,
+        session_id, name,
+    )
+    return {"status": "ok"} if row else {"status": "not_found"}
+
+
+async def list_remove_item(pool, session_id, name) -> dict:
+    session_row = await pool.fetchrow("SELECT chat_id FROM sessions WHERE id = $1", session_id)
+    return await propose_confirmation(
+        pool, chat_id=session_row["chat_id"], session_id=session_id,
+        action_type="list_remove_item", action_params={"name": name},
+    )

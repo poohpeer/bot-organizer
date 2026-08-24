@@ -125,3 +125,45 @@ async def test_execute_confirmed_action_sends_broadcast(db_pool):
 
     assert result["status"] == "executed"
     bot.send_message.assert_awaited_once_with(chat_id=1, text="Reminder: bring meat")
+
+
+async def test_list_add_and_show(db_pool):
+    session_id = await _new_session(db_pool)
+
+    await core.list_add(db_pool, session_id, "tomatoes")
+    await core.list_add(db_pool, session_id, "cucumbers")
+    shown = await core.list_show(db_pool, session_id)
+
+    names = {i["name"] for i in shown["items"]}
+    assert names == {"tomatoes", "cucumbers"}
+    assert all(i["status"] == "pending" for i in shown["items"])
+
+
+async def test_list_check_off_matches_by_name_case_insensitively(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "Cucumbers")
+
+    result = await core.list_check_off(db_pool, session_id, "cucumbers")
+
+    assert result["status"] == "ok"
+    shown = await core.list_show(db_pool, session_id)
+    assert shown["items"][0]["status"] == "checked"
+
+
+async def test_list_check_off_missing_item(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.list_check_off(db_pool, session_id, "nonexistent")
+
+    assert result["status"] == "not_found"
+
+
+async def test_list_remove_item_is_gated_not_immediate(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "tomatoes")
+
+    result = await core.list_remove_item(db_pool, session_id, "tomatoes")
+
+    assert result["status"] == "pending_confirmation"
+    shown = await core.list_show(db_pool, session_id)
+    assert len(shown["items"]) == 1  # not actually removed yet
