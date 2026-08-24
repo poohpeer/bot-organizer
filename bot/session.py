@@ -1,5 +1,7 @@
 import asyncpg
 
+import bot.timezones as timezones
+
 # How long a "not yet, we're still going" reply defers the closing question.
 # R4 says the bot must not keep asking once someone has answered; without a
 # deferral a session whose event_date has passed re-qualifies on the very next
@@ -63,11 +65,17 @@ async def touch_activity(pool, session_id: int) -> None:
 # Every branch is gated on the snooze: a session someone has said "not yet"
 # about is off-limits until the snooze expires, whichever branch would
 # otherwise have matched.
-_DUE_FOR_CLOSING_QUESTION = """
+# `current_date` is the *server's* date. "The day after the event" has to mean
+# the day after in the group's own timezone, or a chat several hours from UTC
+# gets asked on the wrong calendar day. chats.timezone is NULL for most chats,
+# hence the fallback to the configured default.
+_LOCAL_DATE = "(now() AT TIME ZONE COALESCE(c.timezone, $1))::date"
+
+_DUE_FOR_CLOSING_QUESTION = f"""
     status = 'active'
     AND (closing_question_snoozed_until IS NULL OR closing_question_snoozed_until <= now())
     AND (
-        (event_date IS NOT NULL AND event_date < current_date AND closing_question_asked_at IS NULL)
+        (event_date IS NOT NULL AND event_date < {_LOCAL_DATE} AND closing_question_asked_at IS NULL)
         OR (event_date IS NULL AND closing_question_asked_at IS NULL
             AND last_activity_at < now() - interval '7 days')
         OR (closing_question_asked_at IS NOT NULL AND closing_question_retries = 0
@@ -104,7 +112,7 @@ async def claim_sessions_for_closing_question(pool):
             SELECT id,
                    closing_question_asked_at AS prev_asked_at,
                    closing_question_retries  AS prev_retries
-            FROM sessions WHERE {_DUE_FOR_CLOSING_QUESTION} FOR UPDATE SKIP LOCKED
+            FROM sessions JOIN chats c USING (chat_id) WHERE {_DUE_FOR_CLOSING_QUESTION} FOR UPDATE SKIP LOCKED
         )
         UPDATE sessions s SET
             closing_question_retries = CASE
@@ -114,7 +122,8 @@ async def claim_sessions_for_closing_question(pool):
             closing_question_asked_at = now()
         FROM due WHERE s.id = due.id
         RETURNING s.*, due.prev_asked_at, due.prev_retries
-        """
+        """,
+        timezones.DEFAULT_TIMEZONE,
     )
 
 
@@ -146,7 +155,10 @@ async def release_closing_question_claim(pool, session_id: int, prev_asked_at, p
 async def sessions_needing_closing_question(pool):
     """Read-only view of what's due, for tests and diagnostics. The worker uses
     claim_sessions_for_closing_question so it can't double-send."""
-    return await pool.fetch(f"SELECT * FROM sessions WHERE {_DUE_FOR_CLOSING_QUESTION}")
+    return await pool.fetch(
+        f"SELECT s.* FROM sessions s JOIN chats c USING (chat_id) WHERE {_DUE_FOR_CLOSING_QUESTION}",
+        timezones.DEFAULT_TIMEZONE,
+    )
 
 
 async def sessions_needing_auto_close(pool):

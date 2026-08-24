@@ -19,10 +19,11 @@
 | S8 | 0001-S8-background-worker | complete | 02a44e6..HEAD | review: 5 defects fixed; tester PASS | — | R4 auto-close-without-asking caught |
 | S9 | — | blocked | — | — | — | brief rewritten for the addressing gate |
 | S10 | — | blocked | — | — | — | waits on S8, S9 |
+| S11 | 0001-S11-per-chat-timezone | complete | see PR | tester PASS | — | added mid-epic; closes the timezone debt from S3/S4/S8 |
 
 ## Findings to address
-- Deferred (S3/S4): no per-chat timezone. Affects event_date and reminder
-  delivery times. The main outstanding user-visible debt.
+- RESOLVED in S11: per-chat timezone. Reminders and the closing question now
+  use the chat's own zone.
 - Deferred (S4): nothing writes the 'expired' status on stale
   pending_confirmations.
 - Limitation (S6): Places returns no review snippets on this key (needs the
@@ -118,3 +119,15 @@
   telegram.Bot outside `async with` is fine on PTB 22.8. Suite: 165 passed.
   NOTE: the per-chat timezone debt is now VISIBLE — S8 is what delivers at
   the wrong local time. Fix before real use.
+- 2026-08-24: S11 (added mid-epic at the user's request) closes the timezone
+  debt carried since S3. Telegram exposes no timezone, so it is resolved in
+  layers: DEFAULT_TIMEZONE env -> chats.timezone -> a free Open-Meteo lookup
+  at a resolved place's coordinates -> an explicit set_timezone tool. Layer 3
+  is called from CODE on place resolution, not from weather_lookup: that tool
+  only runs when the model thinks weather matters, and never when a reminder
+  is set before a place is chosen. Per the user, reminder_set now reports
+  timezone_assumed so the bot names its assumption and asks for a rough
+  location, and set_timezone re-anchors already-scheduled reminders from the
+  stored wall-clock time (exact across DST). Closing questions now follow the
+  chat's local day, not the server's. The local-day test was confirmed to fail
+  against the old current_date logic. Suite: 181 passed.

@@ -6,6 +6,10 @@ _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS chats (
     chat_id    BIGINT PRIMARY KEY,
     title      TEXT,
+    -- IANA name ("Europe/Moscow"), or NULL to use DEFAULT_TIMEZONE. Telegram
+    -- never tells us this, so it is learned from a resolved place or stated by
+    -- a human; see bot/timezones.py.
+    timezone   TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -78,6 +82,12 @@ CREATE TABLE IF NOT EXISTS reminders (
     target_user_id  BIGINT,
     message         TEXT NOT NULL,
     remind_at       TIMESTAMPTZ NOT NULL,
+    -- The wall-clock time as it was asked for ("9 утра"), plus the zone that
+    -- was assumed when it had to be guessed. Keeping the local time — rather
+    -- than just an offset — is what makes re-anchoring exact once the real
+    -- zone is known, including across a DST boundary.
+    local_time      TIMESTAMP,
+    assumed_timezone TEXT,
     status          TEXT NOT NULL DEFAULT 'pending'
                          CHECK (status IN ('pending', 'sent', 'cancelled', 'failed')),
     -- Delivery attempts. A reminder to someone who has blocked the bot can
@@ -169,6 +179,9 @@ _ALTERS_SQL = """
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS closing_question_snoozed_until TIMESTAMPTZ;
 ALTER TABLE places ADD COLUMN IF NOT EXISTS query TEXT;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS timezone TEXT;
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS local_time TIMESTAMP;
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS assumed_timezone TEXT;
 -- Widening a CHECK needs the old one dropped first; there is no
 -- ADD CONSTRAINT IF NOT EXISTS. Both statements are idempotent together.
 ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_status_check;

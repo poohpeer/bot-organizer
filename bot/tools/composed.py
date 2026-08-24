@@ -1,6 +1,7 @@
 import functools
 from datetime import date
 
+import bot.timezones as timezones
 from bot.tools.external import maps_lookup
 
 _HALF_LIFE_DAYS = 180
@@ -27,6 +28,10 @@ async def _session_row(pool, session_id, columns="chat_id"):
 
 
 async def resolve_and_save_place(pool, session_id, place_query) -> dict:
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"found": False, "status": "unknown_session"}
+
     cached = await pool.fetchrow(_PLACE_MATCH, session_id, place_query)
     if cached:
         return {
@@ -49,6 +54,13 @@ async def resolve_and_save_place(pool, session_id, place_query) -> dict:
         """,
         session_id, looked_up["name"], looked_up["address"],
         looked_up["lat"], looked_up["lon"], place_query,
+    )
+    # A resolved place is the one moment we can learn the group's timezone for
+    # free, so reminders land at the right local time. Done here in code rather
+    # than left to weather_lookup, which only runs when the model decides the
+    # weather is relevant — neither guaranteed nor predictable.
+    await timezones.learn_timezone_from_coordinates(
+        pool, session_row["chat_id"], looked_up["lat"], looked_up["lon"]
     )
     return {
         "found": True, "name": looked_up["name"], "address": looked_up["address"],

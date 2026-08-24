@@ -5,6 +5,7 @@ per story rather than overwritten on each run. Latest first.
 
 | Story | Report | Verdict |
 |-------|--------|---------|
+| S11 — Per-chat timezone | [test-report-S11.md](test-report-S11.md) | PASS |
 | S8 — Background worker | [test-report-S8.md](test-report-S8.md) | PASS (5 defects fixed) |
 | S7 — Addressing gate | [test-report-S7.md](test-report-S7.md) | PASS (replaced the proactive trigger) |
 | S6 — Composed flows | [test-report-S6.md](test-report-S6.md) | PASS (maps verified live) |
