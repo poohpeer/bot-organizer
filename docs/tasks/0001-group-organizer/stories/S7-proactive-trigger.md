@@ -295,3 +295,50 @@ active-mode pipeline on ordinary chatter.
   git add bot/proactive.py tests/test_proactive.py
   git commit -m "Add proactive suggestion response resolution (accept/decline)"
   ```
+
+---
+
+## Implementation notes (added during S7, after code review)
+
+The brief was transcribed faithfully and its 9 tests passed on the first pass.
+Verification against a real database then found three defects in the design
+itself, each reproduced before it was fixed.
+
+1. **[High — broke R5] The weekly rate limit was not actually enforced.**
+   `maybe_suggest` read the 7-day window, then inserted in a separate
+   statement. Two messages arriving together both saw an empty window and both
+   suggested. Reproduced with `asyncio.gather` on two candidate messages:
+   **2 rows, 2 Telegram messages** in the same week. R5 is explicit that this
+   limit is enforced in code, so a check a race walks straight through does not
+   satisfy it. The claim is now taken inside a transaction under
+   `pg_advisory_xact_lock(chat_id)`, with the 7-day window re-tested as part of
+   a conditional `INSERT ... WHERE NOT EXISTS`. The pre-checks are kept ahead
+   of it: they produce the precise reason codes and, per R5's last criterion,
+   keep the model call off the rate-limited path.
+
+2. **[High — broke R5] A suggestion that failed to send still silenced the
+   chat.** The row was inserted before `send_message`. Reproduced with a
+   Telegram refusal (`Forbidden: bot was blocked`): the exception propagated
+   out of `maybe_suggest`, a row for a message **nobody ever saw** stayed in
+   the table, the chat was rate-limited for 7 days, and
+   `get_pending_suggestion` returned that row — so the next unrelated message
+   in the chat would have been read as a reply to an invisible suggestion. The
+   send is now wrapped: on failure the claim is deleted and
+   `{"suggested": False, "reason": "send_failed"}` is returned. It deliberately
+   does not re-raise — S9 calls `maybe_suggest` for *every* message in a
+   dormant chat, so letting this escape would take ordinary message handling
+   down with it, which R10's "fail toward inaction" forbids.
+
+3. **[Low] `resolve_suggestion` accepted values the schema rejects.**
+   Reproduced: `resolve_suggestion(pool, id, "maybe")` raised
+   `CheckViolationError` from inside asyncpg. Now validated against
+   `_RESPONSES` and raised as a `ValueError` at the call site.
+
+**Verified correct, no change needed:** R5's "the rate limit is enforced in
+code before any model call" — with a spy on `classify`, both the rate-limited
+and topic-suppressed paths make **zero** model calls. Locked in by two tests
+rather than left as an assumption, since it is the criterion most likely to
+regress silently.
+
+Each of the three regression tests was confirmed to fail against the original
+implementation (`git stash` on `bot/proactive.py`) before being kept.
