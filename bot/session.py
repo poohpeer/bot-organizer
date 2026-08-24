@@ -36,3 +36,60 @@ async def close_session(pool, session_id: int, reason: str) -> None:
 
 async def touch_activity(pool, session_id: int) -> None:
     await pool.execute("UPDATE sessions SET last_activity_at = now() WHERE id = $1", session_id)
+
+
+_NEEDS_CLOSING_QUESTION_SQL = """
+SELECT * FROM sessions
+WHERE status = 'active'
+  AND (
+    (event_date IS NOT NULL AND event_date < current_date AND closing_question_asked_at IS NULL)
+    OR (event_date IS NULL AND closing_question_asked_at IS NULL
+        AND last_activity_at < now() - interval '7 days')
+    OR (closing_question_asked_at IS NOT NULL AND closing_question_retries = 0
+        AND closing_question_asked_at < now() - interval '2 days')
+  )
+"""
+
+_NEEDS_AUTO_CLOSE_SQL = """
+SELECT * FROM sessions
+WHERE status = 'active'
+  AND closing_question_asked_at IS NOT NULL
+  AND closing_question_retries >= 1
+  AND closing_question_asked_at < now() - interval '2 days'
+"""
+
+
+async def sessions_needing_closing_question(pool):
+    return await pool.fetch(_NEEDS_CLOSING_QUESTION_SQL)
+
+
+async def mark_closing_question_asked(pool, session_id: int) -> None:
+    await pool.execute(
+        """
+        UPDATE sessions SET
+            closing_question_retries = CASE
+                WHEN closing_question_asked_at IS NULL THEN 0
+                ELSE closing_question_retries + 1
+            END,
+            closing_question_asked_at = now()
+        WHERE id = $1
+        """,
+        session_id,
+    )
+
+
+async def sessions_needing_auto_close(pool):
+    return await pool.fetch(_NEEDS_AUTO_CLOSE_SQL)
+
+
+async def record_closing_reply(pool, session_id: int, continued: bool) -> None:
+    if not continued:
+        await close_session(pool, session_id, reason="closing_question_yes")
+        return
+    await pool.execute(
+        """
+        UPDATE sessions SET closing_question_asked_at = NULL, closing_question_retries = 0
+        WHERE id = $1
+        """,
+        session_id,
+    )
