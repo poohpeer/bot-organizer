@@ -11,6 +11,43 @@ fabricating an answer when a source has nothing.
 
 ---
 
+## Implementation notes (added during S5, after code review)
+
+`bot/tools/external.py` is hardened well beyond the briefs below, because
+these three tools are the "don't hallucinate" layer (R7/R10) and their whole
+value is being honest when a source has nothing.
+
+**Failure handling.** Every tool returns `found=False` — never raises — for
+non-200 responses, transport failures (`ConnectError`, `ReadTimeout`, DNS),
+malformed JSON, and responses missing the fields we need. All three also have
+timeouts, so a hung upstream cannot block the tool loop and with it the
+user's reply.
+
+**Fixes on top of the briefs:**
+
+1. **`web_search` walks a model chain.** The brief pinned `MODELS[0]`.
+   Observed for real during verification: once the shared API key hit its
+   quota, every search returned "couldn't find anything" while the rest of the
+   bot degraded fine to a later model. It now walks `SEARCH_MODELS` —
+   deliberately the Gemini-only subset, since Gemma has no Google Search
+   tool — retrying on 429/5xx and stopping on a non-retryable error.
+2. **`maps_lookup` requires a usable name.** A Places result with no
+   `displayName` produced `{"found": True, "name": None}`; S6 inserts that
+   straight into `places.name`, which is `TEXT NOT NULL`, so the row would
+   have failed to insert — and `None` also breaks S6's `lower(name)` cache
+   lookup. Now falls back to `formattedAddress` and reports not-found if
+   neither exists.
+3. **`weather_lookup` doesn't report an empty forecast as found.** Open-Meteo
+   returns nulls for variables it can't supply (a date past the forecast
+   horizon), so an all-null row was being handed back as a real forecast.
+4. **One shared `httpx.AsyncClient`**, per the epic's constraint, created
+   lazily and reused, with `aclose()` for shutdown. The briefs opened a fresh
+   client per call.
+5. Review snippets with no text no longer contribute `null` entries.
+
+
+---
+
 ### Task 1: Web search
 
 **Satisfies:** R6, R10

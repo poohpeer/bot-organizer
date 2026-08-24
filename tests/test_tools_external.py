@@ -253,3 +253,117 @@ async def test_weather_lookup_not_found_when_daily_arrays_short(monkeypatch):
     result = await external.weather_lookup(32.79, 35.05, "2026-09-01")
 
     assert result == {"found": False}
+
+
+# --- regression tests for code-review findings ---
+
+async def test_web_search_falls_back_to_the_next_model_on_429(monkeypatch):
+    """The API key's quota is shared process-wide. Pinning MODELS[0] meant that
+    once the primary model was rate-limited, every search reported 'couldn't
+    find anything' while the rest of the bot degraded gracefully."""
+    from google.genai import errors
+
+    calls = []
+
+    async def flaky(*args, model=None, **kwargs):
+        calls.append(model)
+        if len(calls) == 1:
+            raise errors.APIError(code=429, response_json={"error": {"code": 429}}, response=None)
+        return _resp("Grilling is allowed.", ["https://example.com/x"])
+
+    monkeypatch.setattr(external.gemini.aio.models, "generate_content", flaky)
+
+    result = await external.web_search("can we grill there")
+
+    assert result["found"] is True
+    assert calls == external.SEARCH_MODELS[:2]
+
+
+async def test_web_search_excludes_models_without_search_support():
+    """Gemma has no Google Search tool, so it must not appear in the chain."""
+    assert external.SEARCH_MODELS
+    assert all(m.startswith("gemini-") for m in external.SEARCH_MODELS)
+
+
+async def test_web_search_stops_on_a_non_retryable_error(monkeypatch):
+    from google.genai import errors
+
+    calls = []
+
+    async def bad_request(*args, model=None, **kwargs):
+        calls.append(model)
+        raise errors.APIError(code=400, response_json={"error": {"code": 400}}, response=None)
+
+    monkeypatch.setattr(external.gemini.aio.models, "generate_content", bad_request)
+
+    assert await external.web_search("x") == {"found": False, "summary": None, "sources": []}
+    assert len(calls) == 1  # did not burn the rest of the chain
+
+
+async def test_web_search_fails_closed_on_transport_error(monkeypatch):
+    """httpx errors are not APIError subclasses; the documented contract is
+    that any failure yields found=False."""
+    async def boom(*args, **kwargs):
+        raise httpx.ConnectError("dns failure")
+
+    monkeypatch.setattr(external.gemini.aio.models, "generate_content", boom)
+
+    assert await external.web_search("x") == {"found": False, "summary": None, "sources": []}
+
+
+async def test_maps_lookup_rejects_a_result_with_no_usable_name(monkeypatch):
+    """places.name is TEXT NOT NULL and is the cache key S6 matches on, so a
+    nameless result must be not-found rather than a row that fails to insert."""
+    body = {"places": [{"location": {"latitude": 1.0, "longitude": 2.0}}]}
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=_http_response(body)))
+
+    assert await external.maps_lookup("nameless") == {"found": False}
+
+
+async def test_maps_lookup_falls_back_to_address_when_display_name_missing(monkeypatch):
+    body = {"places": [{
+        "formattedAddress": "Route 1, North District",
+        "location": {"latitude": 1.0, "longitude": 2.0},
+    }]}
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=_http_response(body)))
+
+    result = await external.maps_lookup("x")
+
+    assert result["found"] is True
+    assert result["name"] == "Route 1, North District"
+
+
+async def test_maps_lookup_drops_reviews_with_no_text(monkeypatch):
+    body = {"places": [{
+        "displayName": {"text": "Somewhere"},
+        "location": {"latitude": 1.0, "longitude": 2.0},
+        "reviews": [{"text": {"text": "Nice"}}, {"rating": 4}, {"text": {}}],
+    }]}
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=_http_response(body)))
+
+    result = await external.maps_lookup("x")
+
+    assert result["review_snippets"] == ["Nice"]
+
+
+async def test_weather_lookup_not_found_when_the_row_is_all_nulls(monkeypatch):
+    """Open-Meteo returns nulls past the forecast horizon; reporting
+    temp_max_c=None as a found forecast is the confident-but-empty answer R10
+    forbids."""
+    body = {"daily": {
+        "time": ["2026-09-01"], "weathercode": [None],
+        "temperature_2m_max": [None], "temperature_2m_min": [None],
+        "precipitation_probability_max": [None],
+    }}
+    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=_http_response(body)))
+
+    assert await external.weather_lookup(1.0, 2.0, "2026-09-01") == {"found": False}
+
+
+async def test_http_tools_share_one_client():
+    """The epic specifies a single shared AsyncClient rather than one per call."""
+    first = external._client()
+    second = external._client()
+
+    assert first is second
+    await external.aclose()
