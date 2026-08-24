@@ -106,18 +106,6 @@ CREATE INDEX IF NOT EXISTS idx_places_session ON places (session_id);
 CREATE UNIQUE INDEX IF NOT EXISTS one_place_name_per_session
     ON places (session_id, lower(name));
 
-CREATE TABLE IF NOT EXISTS proactive_suggestions (
-    id            BIGSERIAL PRIMARY KEY,
-    chat_id       BIGINT NOT NULL,
-    topic_key     TEXT NOT NULL,
-    suggested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    response      TEXT CHECK (response IN ('accepted', 'declined', 'ignored'))
-);
-CREATE INDEX IF NOT EXISTS idx_proactive_chat_time
-    ON proactive_suggestions (chat_id, suggested_at);
-CREATE INDEX IF NOT EXISTS idx_proactive_topic
-    ON proactive_suggestions (chat_id, topic_key, suggested_at);
-
 CREATE TABLE IF NOT EXISTS seen_updates (
     update_id  BIGINT PRIMARY KEY,
     seen_at    TIMESTAMPTZ NOT NULL DEFAULT now()
