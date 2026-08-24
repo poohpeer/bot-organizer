@@ -1,6 +1,8 @@
 import datetime as dt
 from unittest.mock import AsyncMock, patch
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
+
+import pytest
 
 import bot.timezones as timezones
 import bot.tools.core as core
@@ -206,3 +208,48 @@ async def test_the_closing_question_follows_the_chats_local_day(db_pool):
 
     assert set(over) <= due, "an event that ended yesterday locally must be asked about"
     assert not (set(not_over) & due), "an event still happening today locally must not be"
+
+
+async def _due_at_local_hour(db_pool, hour, monkeypatch):
+    """Put a chat in whichever zone makes it `hour` o'clock there right now,
+    give it an event that ended yesterday locally, and ask whether the bot
+    would speak. Shifting the chat rather than the clock keeps this a real
+    query against a real database."""
+    import bot.session as session
+
+    monkeypatch.setattr(session, "QUIET_UNTIL_HOUR", 9)
+    monkeypatch.setattr(session, "QUIET_FROM_HOUR", 21)
+
+    for zone in available_timezones():
+        if dt.datetime.now(ZoneInfo(zone)).hour == hour:
+            break
+    else:
+        pytest.skip(f"no IANA zone is currently at {hour}:00")
+
+    local_today = dt.datetime.now(ZoneInfo(zone)).date()
+    session_id = await _dated_session(db_pool, 1, zone, local_today - dt.timedelta(days=1))
+    due = {r["id"] for r in await session.sessions_needing_closing_question(db_pool)}
+    return session_id in due, zone
+
+
+async def test_the_bot_does_not_start_a_conversation_at_local_midnight(db_pool, monkeypatch):
+    """Getting the local day right made the question come due the moment the
+    date rolls over — around local midnight, which is a rude time to message a
+    group."""
+    would_speak, zone = await _due_at_local_hour(db_pool, 0, monkeypatch)
+
+    assert would_speak is False, f"bot would have posted at 00:00 in {zone}"
+
+
+async def test_the_bot_does_not_start_a_conversation_late_at_night(db_pool, monkeypatch):
+    would_speak, zone = await _due_at_local_hour(db_pool, 22, monkeypatch)
+
+    assert would_speak is False, f"bot would have posted at 22:00 in {zone}"
+
+
+async def test_the_question_goes_out_once_the_group_is_awake(db_pool, monkeypatch):
+    """Delayed, not skipped: the worker polls every minute, so a question that
+    came due overnight goes out at the start of the window."""
+    would_speak, zone = await _due_at_local_hour(db_pool, 10, monkeypatch)
+
+    assert would_speak is True, f"bot stayed silent at 10:00 in {zone}"

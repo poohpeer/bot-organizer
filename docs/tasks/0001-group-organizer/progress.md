@@ -131,3 +131,9 @@
   stored wall-clock time (exact across DST). Closing questions now follow the
   chat's local day, not the server's. The local-day test was confirmed to fail
   against the old current_date logic. Suite: 181 passed.
+- 2026-08-25: Added quiet hours to S11 before moving on. Fixing the local day
+  had made the closing question due at local midnight; QUIET_UNTIL_HOUR=9 /
+  QUIET_FROM_HOUR=21 now gate it and the auto-close notice in the chat's own
+  zone, delaying rather than skipping. Tested by placing a chat in whichever
+  IANA zone is currently at the hour under test — no faked clocks. Both
+  "stay silent" tests confirmed to fail with the window removed. Suite: 184.
