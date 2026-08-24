@@ -81,3 +81,21 @@ async def maybe_suggest(pool, telegram_bot, chat_id: int, text: str) -> dict:
     )
     await telegram_bot.send_message(chat_id=chat_id, text=_SUGGESTION_TEXT)
     return {"suggested": True, "suggestion_id": row["id"]}
+
+
+async def get_pending_suggestion(pool, chat_id: int):
+    return await pool.fetchrow(
+        """
+        SELECT * FROM proactive_suggestions
+        WHERE chat_id = $1 AND response IS NULL AND suggested_at > now() - interval '2 days'
+        ORDER BY suggested_at DESC LIMIT 1
+        """,
+        chat_id,
+    )
+
+
+async def resolve_suggestion(pool, suggestion_id: int, response: str) -> None:
+    await pool.execute(
+        "UPDATE proactive_suggestions SET response = $2 WHERE id = $1",
+        suggestion_id, response,
+    )

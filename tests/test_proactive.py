@@ -69,3 +69,32 @@ async def test_maybe_suggest_topic_suppressed_after_decline(monkeypatch, db_pool
     )
 
     assert result == {"suggested": False, "reason": "topic_suppressed"}
+
+
+async def test_get_pending_suggestion_returns_unresolved_one(db_pool):
+    row = await db_pool.fetchrow(
+        "INSERT INTO proactive_suggestions (chat_id, topic_key) VALUES (1, 'lets_go') RETURNING id"
+    )
+
+    found = await proactive.get_pending_suggestion(db_pool, chat_id=1)
+
+    assert found["id"] == row["id"]
+
+
+async def test_get_pending_suggestion_none_when_already_resolved(db_pool):
+    await db_pool.execute(
+        "INSERT INTO proactive_suggestions (chat_id, topic_key, response) VALUES (1, 'lets_go', 'accepted')"
+    )
+
+    assert await proactive.get_pending_suggestion(db_pool, chat_id=1) is None
+
+
+async def test_resolve_suggestion_sets_response(db_pool):
+    row = await db_pool.fetchrow(
+        "INSERT INTO proactive_suggestions (chat_id, topic_key) VALUES (1, 'lets_go') RETURNING id"
+    )
+
+    await proactive.resolve_suggestion(db_pool, row["id"], "declined")
+
+    updated = await db_pool.fetchrow("SELECT response FROM proactive_suggestions WHERE id = $1", row["id"])
+    assert updated["response"] == "declined"
