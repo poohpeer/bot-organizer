@@ -9,7 +9,7 @@
 ## Units
 | Unit | Branch | Status | Commits | Verification | PR | Notes |
 |------|--------|--------|---------|--------------|----|-------|
-| S1 | — | pending | — | — | — | |
+| S1 | 0001-S1-data-model | in_progress | d6416ad..a550ead | review clean (2 findings fixed) | — | tester pending |
 | S2 | — | pending | — | — | — | |
 | S3 | — | blocked | — | — | — | waits on S1 |
 | S4 | — | blocked | — | — | — | waits on S1, S2 |
