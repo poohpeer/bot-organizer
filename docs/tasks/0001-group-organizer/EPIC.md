@@ -27,8 +27,8 @@ external lookup happens in ordinary, non-fantasizing Python code.
 **Tech stack:** Python 3.12, `uv`, `python-telegram-bot>=22` (long
 polling), `google-genai` (Gemini, native function calling), PostgreSQL
 via `asyncpg` (no ORM), `httpx` for outbound HTTP (Google Places API,
-Open-Meteo), `pytest` + `pytest-asyncio`. Deployed as two Kubernetes
-workloads (bot + worker) against one Postgres instance.
+Open-Meteo), `pytest` + `pytest-asyncio`. Deployed as a three-service
+Docker Compose stack (bot + worker + Postgres).
 
 ## Requirements & acceptance criteria
 
@@ -291,7 +291,7 @@ Acceptance criteria:
 | S7 | Proactive dormant-mode trigger | stories/S7-proactive-trigger.md | R5 | S1, S2, S3 | C |
 | S8 | Background worker: reminder delivery + closing-question firing | stories/S8-background-worker.md | R4, R11 | S1, S3 | C |
 | S9 | Message router / end-to-end wiring | stories/S9-e2e-wiring.md | R1, R2, R3, R5, R6, R10 | S2, S3, S4, S5, S6, S7 | — |
-| S10 | Deployment: Dockerfile, Kubernetes manifests | stories/S10-deployment.md | (infra; no new R) | S8, S9 | — |
+| S10 | Deployment: Dockerfile, Docker Compose | stories/S10-deployment.md | (infra; no new R) | S8, S9 | — |
 
 Every requirement R1–R11 appears in at least one story's `Satisfies` cell.
 
