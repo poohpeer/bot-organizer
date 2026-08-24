@@ -1,3 +1,4 @@
+import datetime as dt
 from unittest.mock import AsyncMock, patch
 
 import bot.tools.composed as composed
@@ -84,3 +85,80 @@ async def test_send_location_not_found_for_unresolved_place(db_pool):
 
     assert result == {"status": "not_found"}
     telegram_bot.send_venue.assert_not_awaited()
+
+
+async def _closed_session_with_place(db_pool, chat_id, activity_type, place_name, days_ago):
+    await db_pool.execute(
+        "INSERT INTO chats (chat_id, title) VALUES ($1, 'Chat') ON CONFLICT DO NOTHING", chat_id
+    )
+    visited_on = dt.date.today() - dt.timedelta(days=days_ago)
+    row = await db_pool.fetchrow(
+        """
+        INSERT INTO sessions (chat_id, activity_type, status, event_date, closed_at)
+        VALUES ($1, $2, 'closed', $3, now()) RETURNING id
+        """,
+        chat_id, activity_type, visited_on,
+    )
+    await db_pool.execute(
+        "INSERT INTO places (session_id, name, lat, lon) VALUES ($1, $2, 0, 0)",
+        row["id"], place_name,
+    )
+
+
+async def test_archive_lookup_no_history(db_pool):
+    result = await composed.archive_lookup(db_pool, chat_id=1, activity_type="picnic")
+
+    assert result == {"pattern": "no_history", "places": []}
+
+
+async def test_archive_lookup_dominant_place_wins_on_recency(db_pool):
+    # Visited 5 times but stale (2 years ago) vs 1 recent visit — recency wins.
+    for _ in range(5):
+        await _closed_session_with_place(db_pool, 1, "picnic", "Old Spot", days_ago=730)
+    await _closed_session_with_place(db_pool, 1, "picnic", "Fresh Spot", days_ago=10)
+
+    result = await composed.archive_lookup(db_pool, chat_id=1, activity_type="picnic")
+
+    assert result["pattern"] == "dominant"
+    assert result["places"][0]["name"] == "Fresh Spot"
+
+
+async def test_archive_lookup_tied_shows_top_options(db_pool):
+    await _closed_session_with_place(db_pool, 1, "picnic", "Spot A", days_ago=10)
+    await _closed_session_with_place(db_pool, 1, "picnic", "Spot A", days_ago=20)
+    await _closed_session_with_place(db_pool, 1, "picnic", "Spot B", days_ago=12)
+    await _closed_session_with_place(db_pool, 1, "picnic", "Spot B", days_ago=22)
+
+    result = await composed.archive_lookup(db_pool, chat_id=1, activity_type="picnic")
+
+    assert result["pattern"] == "tied"
+    assert {p["name"] for p in result["places"]} == {"Spot A", "Spot B"}
+
+
+async def test_archive_lookup_no_pattern_when_every_place_visited_once(db_pool):
+    await _closed_session_with_place(db_pool, 1, "picnic", "Spot A", days_ago=100)
+    await _closed_session_with_place(db_pool, 1, "picnic", "Spot B", days_ago=200)
+    await _closed_session_with_place(db_pool, 1, "picnic", "Spot C", days_ago=300)
+
+    result = await composed.archive_lookup(db_pool, chat_id=1, activity_type="picnic")
+
+    assert result["pattern"] == "no_pattern"
+    assert len(result["places"]) == 3
+
+
+async def test_archive_lookup_ignores_other_activity_types_and_open_sessions(db_pool):
+    await _closed_session_with_place(db_pool, 1, "birthday", "Wrong Activity", days_ago=1)
+    session_id = await _new_session(db_pool, chat_id=1, activity_type="picnic", status="active")
+    await db_pool.execute(
+        "INSERT INTO places (session_id, name, lat, lon) VALUES ($1, 'Still Open', 0, 0)", session_id
+    )
+
+    result = await composed.archive_lookup(db_pool, chat_id=1, activity_type="picnic")
+
+    assert result == {"pattern": "no_history", "places": []}
+
+
+def test_build_composed_registry_covers_every_composed_tool(db_pool):
+    registry = composed.build_composed_registry(db_pool, AsyncMock())
+
+    assert set(registry) == {"resolve_and_save_place", "send_location", "archive_lookup"}
