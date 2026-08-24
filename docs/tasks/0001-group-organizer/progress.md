@@ -16,7 +16,7 @@
 | S5 | 0001-S5-external-tools | complete | e5938e6..HEAD | review: 6 defects fixed; tester PASS | — | maps not live-verified (no API key) |
 | S6 | 0001-S6-composed-flows | complete | 7a0813b..HEAD | review: 6 defects fixed; tester PASS | — | maps verified LIVE (key supplied) |
 | S7 | 0001-S7-addressing-gate | complete | see PR | tester PASS | — | REPLACED the proactive trigger (PR #8) after a product decision |
-| S8 | — | blocked | — | — | — | waits on S1, S3 |
+| S8 | 0001-S8-background-worker | complete | 02a44e6..HEAD | review: 5 defects fixed; tester PASS | — | R4 auto-close-without-asking caught |
 | S9 | — | blocked | — | — | — | brief rewritten for the addressing gate |
 | S10 | — | blocked | — | — | — | waits on S8, S9 |
 
@@ -105,3 +105,16 @@
   may live only in the chat title, and an explicit human stop always
   overrides R4's snooze. S9's brief rewritten — luckily it was not yet
   built. Suite: 148 passed.
+- 2026-08-24: S8 implemented (3 tasks, clean first pass against the brief).
+  Verification found 5 design defects, each reproduced first: one unreachable
+  recipient stranded the whole reminder batch, a doomed reminder retried
+  every 60s forever (added attempts + a 'failed' status), two workers
+  double-delivered the same reminder, group reminders were rate-limited
+  against the epic's own per-user-id constraint, and — worst — a closing
+  question that failed to send was still recorded as asked, so all three test
+  sessions would have auto-closed two days later without the group ever being
+  asked (R4 violation, caused by my own S3 reasoning; that docstring is now
+  corrected). Also isolated the three poll steps. Checked and cleared: a bare
+  telegram.Bot outside `async with` is fine on PTB 22.8. Suite: 165 passed.
+  NOTE: the per-chat timezone debt is now VISIBLE — S8 is what delivers at
+  the wrong local time. Fix before real use.

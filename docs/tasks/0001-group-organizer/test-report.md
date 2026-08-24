@@ -5,6 +5,7 @@ per story rather than overwritten on each run. Latest first.
 
 | Story | Report | Verdict |
 |-------|--------|---------|
+| S8 — Background worker | [test-report-S8.md](test-report-S8.md) | PASS (5 defects fixed) |
 | S7 — Addressing gate | [test-report-S7.md](test-report-S7.md) | PASS (replaced the proactive trigger) |
 | S6 — Composed flows | [test-report-S6.md](test-report-S6.md) | PASS (maps verified live) |
 | S5 — External tools | [test-report-S5.md](test-report-S5.md) | PASS (maps mock-only) |

@@ -424,3 +424,67 @@ only touches the `reminders` table directly — no S4 import)
   git add worker/main.py tests/test_worker_main.py
   git commit -m "Add worker poll-loop entrypoint"
   ```
+
+---
+
+## Implementation notes (added during S8, after code review)
+
+The brief was transcribed faithfully and its 9 tests passed on the first pass.
+Verification against a real database then found five defects in the design,
+each reproduced before it was fixed.
+
+1. **[High — broke R11] One unreachable recipient stranded the whole batch.**
+   `deliver_due_reminders` had no per-send guard, so a `Forbidden` from
+   Telegram — the normal response for anyone who never started the bot —
+   propagated out of the loop. Reproduced with three due reminders: **one send
+   attempted, all three left `pending`**, to be retried every 60 seconds
+   forever. Each send is now isolated.
+
+2. **[High — broke R11] A doomed reminder never drained.** Even isolated, a
+   reminder to someone who has blocked the bot can never succeed. Added
+   `reminders.attempts` and a `failed` status: after `MAX_ATTEMPTS = 3` the row
+   retires. Verified over four polls — attempts 1, 2, then `failed`, and the
+   fourth poll makes no Telegram call at all.
+
+3. **[High] Two workers delivered the same reminder twice.** Select-then-update
+   with no claim. Reproduced with `asyncio.gather`: **2 Telegram sends for one
+   reminder**. Now claimed with a `status = 'pending'` guard — the same pattern
+   S4 used for confirmations — so whoever flips the row first is the only
+   sender. This also covers a single worker restarting mid-poll.
+
+4. **[Medium — contradicted a global constraint] Group reminders were
+   rate-limited.** The epic scopes `REMINDER_MIN_INTERVAL_HOURS` to "the same
+   Telegram **user id**": it exists so one person is not pestered privately.
+   The brief applied it to group chats too, so "выезжаем через час" followed by
+   "не забудьте паспорта" deferred the second by six hours — reproduced —
+   delivering it long after the event rather than protecting anyone. The limit
+   now applies only to direct messages.
+
+5. **[High — broke R4] A closing question that failed to send was still
+   recorded as asked.** This was the worst one, and it was my own reasoning in
+   S3 that caused it: `claim_sessions_for_closing_question`'s docstring argued
+   that marking before sending "costs one skipped question rather than a
+   duplicate one". Reproduced: with three due sessions and the first chat
+   unreachable, **one send was attempted and all three were marked as asked**.
+   Two days later every one of them auto-closes — the bot closing a session it
+   never actually asked about, which is action without consent, the opposite of
+   what R4 wants. The claim now returns `prev_asked_at`/`prev_retries` so
+   `release_closing_question_claim` can restore the row exactly; each chat is
+   isolated. `fire_auto_closes` deliberately does **not** roll back — the close
+   is correct and committed, only the notice was lost, and reopening would
+   re-close it on the next poll.
+
+Also isolated the three steps of `poll_once`: a failure delivering reminders
+used to prevent closing questions from firing at all that tick.
+
+**Checked and found not to be a problem:** a bare `telegram.Bot` used outside
+`async with`. PTB 22.8 initializes on first call — verified directly — so the
+worker does not need an explicit `initialize()`.
+
+## Known limitation
+
+An unreachable chat retries its closing question on every poll, with no cap
+(unlike reminders, which retire after three attempts). The proper fix is not
+another counter: S9 handles `my_chat_member` and should close sessions for
+chats the bot has been removed from, which removes the cause rather than
+capping the symptom. Recorded for S9.
