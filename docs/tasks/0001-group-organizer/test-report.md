@@ -5,6 +5,7 @@ per story rather than overwritten on each run. Latest first.
 
 | Story | Report | Verdict |
 |-------|--------|---------|
+| S7 — Proactive trigger | [test-report-S7.md](test-report-S7.md) | PASS (3 defects fixed) |
 | S6 — Composed flows | [test-report-S6.md](test-report-S6.md) | PASS (maps verified live) |
 | S5 — External tools | [test-report-S5.md](test-report-S5.md) | PASS (maps mock-only) |
 | S4 — Core tools | [test-report-S4.md](test-report-S4.md) | PASS |

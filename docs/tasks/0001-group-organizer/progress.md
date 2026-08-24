@@ -15,7 +15,7 @@
 | S4 | 0001-S4-core-tools | complete | 806c251..HEAD | review: 8 defects fixed; tester PASS | — | R1+R10 verified live |
 | S5 | 0001-S5-external-tools | complete | e5938e6..HEAD | review: 6 defects fixed; tester PASS | — | maps not live-verified (no API key) |
 | S6 | 0001-S6-composed-flows | complete | 7a0813b..HEAD | review: 6 defects fixed; tester PASS | — | maps verified LIVE (key supplied) |
-| S7 | — | blocked | — | — | — | waits on S1, S2, S3 |
+| S7 | 0001-S7-proactive-trigger | complete | cf2d3e8..HEAD | review: 3 defects fixed; tester PASS | — | rate limit was racy — now advisory-locked |
 | S8 | — | blocked | — | — | — | waits on S1, S3 |
 | S9 | — | blocked | — | — | — | waits on S2, S3, S4, S5, S6, S7 |
 | S10 | — | blocked | — | — | — | waits on S8, S9 |
@@ -77,3 +77,14 @@
   against the LIVE Places API for the first time — closing S5's weakest
   evidence gap. Found that review_snippets is always empty on this key.
   Suite: 131 passed.
+- 2026-08-24: S7 implemented (2 tasks, clean first pass against the brief).
+  Verification against a real DB found 3 design defects, each reproduced
+  first and each regression test confirmed to fail against the original code:
+  the R5 weekly rate limit was not actually enforced (two concurrent messages
+  both suggested — fixed with pg_advisory_xact_lock around a conditional
+  insert), a failed Telegram send left a phantom suggestion that silenced the
+  chat for 7 days and would be misread as pending (now withdrawn, and no
+  longer raises — S9 runs this on every dormant message), and
+  resolve_suggestion let a schema-forbidden value through to asyncpg.
+  Confirmed correct without change: zero model calls on the rate-limited and
+  suppressed paths, which is R5's explicit wording. Suite: 147 passed.
