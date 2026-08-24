@@ -206,3 +206,57 @@ async def test_nudge_unconfirmed_dms_only_those_with_known_user_id(db_pool):
     assert result["skipped_no_user_id"] == ["NoTelegram"]
     telegram_bot.send_message.assert_awaited_once()
     assert telegram_bot.send_message.await_args.kwargs["chat_id"] == 111
+
+
+async def test_reminder_set_persists_to_queue(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.reminder_set(
+        db_pool, session_id, chat_id=1, message="Bring the grill",
+        remind_at="2026-09-01T09:00:00",
+    )
+
+    assert result["status"] == "ok"
+    row = await db_pool.fetchrow("SELECT * FROM reminders WHERE id = $1", result["reminder_id"])
+    assert row["status"] == "pending"
+    assert row["message"] == "Bring the grill"
+
+
+async def test_reminder_cancel_marks_cancelled(db_pool):
+    session_id = await _new_session(db_pool)
+    created = await core.reminder_set(
+        db_pool, session_id, chat_id=1, message="x", remind_at="2026-09-01T09:00:00"
+    )
+
+    result = await core.reminder_cancel(db_pool, created["reminder_id"])
+
+    assert result["status"] == "ok"
+    row = await db_pool.fetchrow("SELECT status FROM reminders WHERE id = $1", created["reminder_id"])
+    assert row["status"] == "cancelled"
+
+
+async def test_reminder_cancel_missing_id(db_pool):
+    result = await core.reminder_cancel(db_pool, 999999)
+
+    assert result["status"] == "not_found"
+
+
+async def test_broadcast_message_is_gated(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.broadcast_message(db_pool, session_id, chat_id=1, text="Heads up everyone")
+
+    assert result["status"] == "pending_confirmation"
+
+
+def test_build_core_registry_covers_every_core_tool(db_pool):
+    from unittest.mock import AsyncMock
+
+    registry = core.build_core_registry(db_pool, AsyncMock())
+
+    assert set(registry) == {
+        "remember_fact", "get_facts", "list_add", "list_show", "list_check_off",
+        "list_remove_item", "set_participant", "get_participants",
+        "nudge_unconfirmed_participants", "reminder_set", "reminder_cancel",
+        "broadcast_message",
+    }

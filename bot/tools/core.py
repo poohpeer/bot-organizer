@@ -1,3 +1,7 @@
+import functools
+from datetime import datetime, timezone
+
+
 async def remember_fact(pool, session_id, key, value) -> dict:
     await pool.execute(
         "INSERT INTO facts (session_id, key, value) VALUES ($1, $2, $3)",
@@ -164,3 +168,49 @@ async def nudge_unconfirmed_participants(pool, telegram_bot, session_id) -> dict
         )
         nudged.append(r["display_name"])
     return {"nudged": nudged, "skipped_no_user_id": skipped}
+
+
+async def reminder_set(pool, session_id, chat_id, message, remind_at, target_user_id=None) -> dict:
+    when = datetime.fromisoformat(remind_at)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)  # a naive ISO string is treated as UTC
+    row = await pool.fetchrow(
+        """
+        INSERT INTO reminders (session_id, chat_id, target_user_id, message, remind_at)
+        VALUES ($1, $2, $3, $4, $5) RETURNING id
+        """,
+        session_id, chat_id, target_user_id, message, when,
+    )
+    return {"status": "ok", "reminder_id": row["id"]}
+
+
+async def reminder_cancel(pool, reminder_id) -> dict:
+    result = await pool.execute(
+        "UPDATE reminders SET status = 'cancelled' WHERE id = $1 AND status = 'pending'",
+        reminder_id,
+    )
+    return {"status": "ok"} if result == "UPDATE 1" else {"status": "not_found"}
+
+
+async def broadcast_message(pool, session_id, chat_id, text) -> dict:
+    return await propose_confirmation(
+        pool, chat_id=chat_id, session_id=session_id,
+        action_type="broadcast_message", action_params={"text": text},
+    )
+
+
+def build_core_registry(pool, telegram_bot) -> dict:
+    return {
+        "remember_fact": functools.partial(remember_fact, pool),
+        "get_facts": functools.partial(get_facts, pool),
+        "list_add": functools.partial(list_add, pool),
+        "list_show": functools.partial(list_show, pool),
+        "list_check_off": functools.partial(list_check_off, pool),
+        "list_remove_item": functools.partial(list_remove_item, pool),
+        "set_participant": functools.partial(set_participant, pool),
+        "get_participants": functools.partial(get_participants, pool),
+        "nudge_unconfirmed_participants": functools.partial(nudge_unconfirmed_participants, pool, telegram_bot),
+        "reminder_set": functools.partial(reminder_set, pool),
+        "reminder_cancel": functools.partial(reminder_cancel, pool),
+        "broadcast_message": functools.partial(broadcast_message, pool),
+    }
