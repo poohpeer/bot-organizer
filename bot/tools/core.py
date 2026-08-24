@@ -106,3 +106,61 @@ async def list_remove_item(pool, session_id, name) -> dict:
         pool, chat_id=session_row["chat_id"], session_id=session_id,
         action_type="list_remove_item", action_params={"name": name},
     )
+
+
+async def set_participant(pool, session_id, display_name, status, user_id=None) -> dict:
+    if user_id is not None:
+        result = await pool.execute(
+            """
+            UPDATE participants SET status = $3, display_name = $4, responded_at = now()
+            WHERE session_id = $1 AND user_id = $2
+            """,
+            session_id, user_id, status, display_name,
+        )
+    else:
+        result = await pool.execute(
+            """
+            UPDATE participants SET status = $3, responded_at = now()
+            WHERE session_id = $1 AND user_id IS NULL AND lower(display_name) = lower($2)
+            """,
+            session_id, display_name, status,
+        )
+    if result == "UPDATE 0":
+        await pool.execute(
+            """
+            INSERT INTO participants (session_id, user_id, display_name, status, responded_at)
+            VALUES ($1, $2, $3, $4, now())
+            """,
+            session_id, user_id, display_name, status,
+        )
+    return {"status": "ok"}
+
+
+async def get_participants(pool, session_id) -> dict:
+    rows = await pool.fetch(
+        "SELECT user_id, display_name, status FROM participants WHERE session_id = $1",
+        session_id,
+    )
+    return {"participants": [
+        {"user_id": r["user_id"], "display_name": r["display_name"], "status": r["status"]}
+        for r in rows
+    ]}
+
+
+async def nudge_unconfirmed_participants(pool, telegram_bot, session_id) -> dict:
+    session_row = await pool.fetchrow("SELECT activity_type FROM sessions WHERE id = $1", session_id)
+    rows = await pool.fetch(
+        "SELECT user_id, display_name FROM participants WHERE session_id = $1 AND status = 'unknown'",
+        session_id,
+    )
+    nudged, skipped = [], []
+    for r in rows:
+        if r["user_id"] is None:
+            skipped.append(r["display_name"])
+            continue
+        await telegram_bot.send_message(
+            chat_id=r["user_id"],
+            text=f"Hey {r['display_name']}, are you in for the {session_row['activity_type']}?",
+        )
+        nudged.append(r["display_name"])
+    return {"nudged": nudged, "skipped_no_user_id": skipped}

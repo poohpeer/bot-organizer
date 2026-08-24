@@ -167,3 +167,42 @@ async def test_list_remove_item_is_gated_not_immediate(db_pool):
     assert result["status"] == "pending_confirmation"
     shown = await core.list_show(db_pool, session_id)
     assert len(shown["items"]) == 1  # not actually removed yet
+
+
+async def test_set_participant_inserts_then_updates(db_pool):
+    session_id = await _new_session(db_pool)
+
+    await core.set_participant(db_pool, session_id, "Sasha", "unknown", user_id=111)
+    await core.set_participant(db_pool, session_id, "Sasha", "confirmed", user_id=111)
+
+    participants = await core.get_participants(db_pool, session_id)
+    assert len(participants["participants"]) == 1
+    assert participants["participants"][0]["status"] == "confirmed"
+
+
+async def test_set_participant_without_user_id_matches_by_name(db_pool):
+    session_id = await _new_session(db_pool)
+
+    await core.set_participant(db_pool, session_id, "Masha", "unknown")
+    await core.set_participant(db_pool, session_id, "masha", "declined")
+
+    participants = await core.get_participants(db_pool, session_id)
+    assert len(participants["participants"]) == 1
+    assert participants["participants"][0]["status"] == "declined"
+
+
+async def test_nudge_unconfirmed_dms_only_those_with_known_user_id(db_pool):
+    from unittest.mock import AsyncMock
+
+    session_id = await _new_session(db_pool)
+    await core.set_participant(db_pool, session_id, "Sasha", "unknown", user_id=111)
+    await core.set_participant(db_pool, session_id, "NoTelegram", "unknown")
+    await core.set_participant(db_pool, session_id, "Masha", "confirmed", user_id=222)
+
+    telegram_bot = AsyncMock()
+    result = await core.nudge_unconfirmed_participants(db_pool, telegram_bot, session_id)
+
+    assert result["nudged"] == ["Sasha"]
+    assert result["skipped_no_user_id"] == ["NoTelegram"]
+    telegram_bot.send_message.assert_awaited_once()
+    assert telegram_bot.send_message.await_args.kwargs["chat_id"] == 111
