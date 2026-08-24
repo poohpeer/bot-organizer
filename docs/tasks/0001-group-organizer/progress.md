@@ -14,14 +14,19 @@
 | S3 | 0001-S3-session-lifecycle | complete | c72cc37..d996cf0 | review: 3 defects fixed; tester PASS | — | R4 re-ask loop caught + fixed |
 | S4 | 0001-S4-core-tools | complete | 806c251..HEAD | review: 8 defects fixed; tester PASS | — | R1+R10 verified live |
 | S5 | 0001-S5-external-tools | complete | e5938e6..HEAD | review: 6 defects fixed; tester PASS | — | maps not live-verified (no API key) |
-| S6 | — | blocked | — | — | — | waits on S1, S5 |
+| S6 | 0001-S6-composed-flows | complete | 7a0813b..HEAD | review: 6 defects fixed; tester PASS | — | maps verified LIVE (key supplied) |
 | S7 | — | blocked | — | — | — | waits on S1, S2, S3 |
 | S8 | — | blocked | — | — | — | waits on S1, S3 |
 | S9 | — | blocked | — | — | — | waits on S2, S3, S4, S5, S6, S7 |
 | S10 | — | blocked | — | — | — | waits on S8, S9 |
 
 ## Findings to address
-(none yet)
+- Deferred (S3/S4): no per-chat timezone. Affects event_date and reminder
+  delivery times. The main outstanding user-visible debt.
+- Deferred (S4): nothing writes the 'expired' status on stale
+  pending_confirmations.
+- Limitation (S6): Places returns no review snippets on this key (needs the
+  Enterprise + Atmosphere SKU), so R7 grounding leans on web_search.
 
 ## Log
 - 2026-08-24: Design merged to main. Test Postgres started. Beginning S1.
@@ -59,3 +64,16 @@
   (no GOOGLE_MAPS_API_KEY available) — flagged as the weakest evidence so far.
   NOTE: Gemini free-tier quota exhausted during verification; further live
   model checks may be rate-limited until it resets. Suite: 109 passed.
+- 2026-08-24: S6 implemented (3 tasks, clean first pass against the brief).
+  Code review + verification found 6 design defects, each reproduced first:
+  the place cache matched only the canonical maps name (R9 — re-queried maps
+  and duplicated rows on the group's own phrasing for a place), model-supplied
+  chat_id on BOTH send_location and archive_lookup (the same cross-chat hole
+  S4 closed, write side and read side), a TypeError on a closed session with
+  no dates, a future event_date outscoring real history, and 'tied' being
+  reportable with a single option. Added places.query + a per-session unique
+  index, and a declaration/signature cross-check test (verified it catches
+  drift). The user supplied a GOOGLE_MAPS_API_KEY, so R7/R9 were verified
+  against the LIVE Places API for the first time — closing S5's weakest
+  evidence gap. Found that review_snippets is always empty on this key.
+  Suite: 131 passed.

@@ -5,12 +5,29 @@ from bot.tools.external import maps_lookup
 
 _HALF_LIFE_DAYS = 180
 
+# A place must score at least this multiple of the runner-up to be called the
+# group's usual spot. Below it, the runner-up is close enough that picking one
+# would be arbitrary — so the same boundary decides which places are shown as
+# tied options (R8). Using two different thresholds would leave a dead band
+# where the answer is "tied" but only one option comes back.
+_DOMINANCE_RATIO = 2.0
+
+# Matches a saved place by the canonical name maps returned *or* by the phrasing
+# that originally resolved it, so the group can keep calling it whatever they
+# call it.
+_PLACE_MATCH = """
+    SELECT name, address, lat, lon FROM places
+    WHERE session_id = $1 AND (lower(name) = lower($2) OR lower(query) = lower($2))
+    ORDER BY resolved_at LIMIT 1
+"""
+
+
+async def _session_row(pool, session_id, columns="chat_id"):
+    return await pool.fetchrow(f"SELECT {columns} FROM sessions WHERE id = $1", session_id)
+
 
 async def resolve_and_save_place(pool, session_id, place_query) -> dict:
-    cached = await pool.fetchrow(
-        "SELECT name, address, lat, lon FROM places WHERE session_id = $1 AND lower(name) = lower($2)",
-        session_id, place_query,
-    )
+    cached = await pool.fetchrow(_PLACE_MATCH, session_id, place_query)
     if cached:
         return {
             "found": True, "name": cached["name"], "address": cached["address"],
@@ -21,9 +38,17 @@ async def resolve_and_save_place(pool, session_id, place_query) -> dict:
     if not looked_up.get("found"):
         return {"found": False}
 
+    # A concurrent resolve of the same place may have inserted it already; the
+    # unique index makes that a no-op rather than a duplicate visit in the
+    # archive.
     await pool.execute(
-        "INSERT INTO places (session_id, name, address, lat, lon) VALUES ($1, $2, $3, $4, $5)",
-        session_id, looked_up["name"], looked_up["address"], looked_up["lat"], looked_up["lon"],
+        """
+        INSERT INTO places (session_id, name, address, lat, lon, query)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (session_id, lower(name)) DO NOTHING
+        """,
+        session_id, looked_up["name"], looked_up["address"],
+        looked_up["lat"], looked_up["lon"], place_query,
     )
     return {
         "found": True, "name": looked_up["name"], "address": looked_up["address"],
@@ -31,30 +56,46 @@ async def resolve_and_save_place(pool, session_id, place_query) -> dict:
     }
 
 
-async def send_location(pool, telegram_bot, session_id, chat_id, place_name) -> dict:
-    row = await pool.fetchrow(
-        "SELECT name, address, lat, lon FROM places WHERE session_id = $1 AND lower(name) = lower($2)",
-        session_id, place_name,
-    )
+async def send_location(pool, telegram_bot, session_id, place_name) -> dict:
+    """Send a saved place as a native Telegram venue card.
+
+    chat_id is derived from the session, never taken from the model: a
+    hallucinated chat_id would post this group's plans into another group.
+    """
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"status": "unknown_session"}
+
+    row = await pool.fetchrow(_PLACE_MATCH, session_id, place_name)
     if row is None:
         return {"status": "not_found"}
 
     await telegram_bot.send_venue(
-        chat_id=chat_id, latitude=row["lat"], longitude=row["lon"],
+        chat_id=session_row["chat_id"], latitude=row["lat"], longitude=row["lon"],
         title=row["name"], address=row["address"] or "",
     )
     return {"status": "ok"}
 
 
-async def archive_lookup(pool, chat_id, activity_type) -> dict:
+async def archive_lookup(pool, session_id, activity_type) -> dict:
+    """Rank the places this chat has used before for an activity, weighting
+    recent visits more heavily than old ones (R8).
+
+    Scoped by the session's own chat_id rather than a model-supplied one, so a
+    hallucinated id can't surface another group's history.
+    """
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"pattern": "unknown_session", "places": []}
+
     rows = await pool.fetch(
         """
-        SELECT pl.name, COALESCE(s.event_date, s.closed_at::date) AS visited_on
+        SELECT pl.name, COALESCE(s.event_date, s.closed_at::date, s.started_at::date) AS visited_on
         FROM places pl
         JOIN sessions s ON s.id = pl.session_id
         WHERE s.chat_id = $1 AND s.activity_type = $2 AND s.status = 'closed'
         """,
-        chat_id, activity_type,
+        session_row["chat_id"], activity_type,
     )
     if not rows:
         return {"pattern": "no_history", "places": []}
@@ -66,7 +107,11 @@ async def archive_lookup(pool, chat_id, activity_type) -> dict:
 
     places = []
     for name, visits in visits_by_name.items():
-        score = sum(0.5 ** ((today - v).days / _HALF_LIFE_DAYS) for v in visits)
+        # Clamped at 0: a session closed while its event_date is still in the
+        # future never happened, and an unclamped negative age would score it
+        # above 1.0 per visit — letting an abandoned plan outrank the place the
+        # group actually goes to.
+        score = sum(0.5 ** (max((today - v).days, 0) / _HALF_LIFE_DAYS) for v in visits)
         places.append({
             "name": name,
             "visit_count": len(visits),
@@ -79,10 +124,10 @@ async def archive_lookup(pool, chat_id, activity_type) -> dict:
         return {"pattern": "no_pattern", "places": places}
 
     top = places[0]
-    if len(places) == 1 or top["score"] >= 2 * places[1]["score"]:
+    if len(places) == 1 or top["score"] >= _DOMINANCE_RATIO * places[1]["score"]:
         return {"pattern": "dominant", "places": [top]}
 
-    tied = [p for p in places if p["score"] >= top["score"] * 0.8]
+    tied = [p for p in places if p["score"] * _DOMINANCE_RATIO >= top["score"]]
     return {"pattern": "tied", "places": tied}
 
 

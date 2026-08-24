@@ -71,9 +71,9 @@ ALL_TOOLS = types.Tool(function_declarations=[
         {"session_id": _S(Type.INTEGER), "place_query": _S(Type.STRING)},
         ["session_id", "place_query"]),
     _fn("send_location", "Send a native map location card for a place already resolved for this session.",
-        {"session_id": _S(Type.INTEGER), "chat_id": _S(Type.INTEGER), "place_name": _S(Type.STRING)},
-        ["session_id", "chat_id", "place_name"]),
+        {"session_id": _S(Type.INTEGER), "place_name": _S(Type.STRING)},
+        ["session_id", "place_name"]),
     _fn("archive_lookup", "Look up where this chat has gone before for a given activity type, ranked by recency-weighted frequency, across closed sessions.",
-        {"chat_id": _S(Type.INTEGER), "activity_type": _S(Type.STRING)},
-        ["chat_id", "activity_type"]),
+        {"session_id": _S(Type.INTEGER), "activity_type": _S(Type.STRING)},
+        ["session_id", "activity_type"]),
 ])
