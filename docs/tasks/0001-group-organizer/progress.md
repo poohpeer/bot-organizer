@@ -12,7 +12,7 @@
 | S1 | 0001-S1-data-model | complete | squashed as 10248da | review clean; tester PASS | #2 (merged) | |
 | S2 | 0001-S2-ai-layer | complete | dabe8d7..5b1da69 | review: 7 findings fixed; tester PASS | — | classifier + tool loop verified against live API |
 | S3 | 0001-S3-session-lifecycle | complete | c72cc37..d996cf0 | review: 3 defects fixed; tester PASS | — | R4 re-ask loop caught + fixed |
-| S4 | — | ready | — | — | — | S1+S2 merged |
+| S4 | 0001-S4-core-tools | complete | 806c251..HEAD | review: 8 defects fixed; tester PASS | — | R1+R10 verified live |
 | S5 | — | ready | — | — | — | S2 merged |
 | S6 | — | blocked | — | — | — | waits on S1, S5 |
 | S7 | — | blocked | — | — | — | waits on S1, S2, S3 |
@@ -43,3 +43,11 @@
   Added closing_question_snoozed_until to the schema and atomic claim_*
   helpers (S8's story updated to match). 2 findings deferred with rationale
   (timezone, dedup-before-handler). Tester PASS. Suite: 50 passed.
+- 2026-08-24: S4 implemented (5 tasks, clean first pass against the brief).
+  Code review found 11 issues; 8 fixed as real defects (each reproduced
+  against a real DB first), incl. duplicate participant rows breaking R2, the
+  nudge aborting on the first Forbidden, a gated destructive action executing
+  twice, and model-supplied chat_id allowing cross-chat writes (chat_id
+  removed from the tool declarations). R1 and R10 verified end-to-end against
+  the live model. Deferred: per-chat timezone (shared with S3 — the main
+  outstanding debt), expired-confirmation sweeper. Suite: 82 passed.
