@@ -1,6 +1,8 @@
 import functools
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
+
+import bot.timezones as timezones
 
 log = logging.getLogger(__name__)
 
@@ -289,19 +291,37 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
         when = datetime.fromisoformat(remind_at)
     except (TypeError, ValueError):
         return {"status": "bad_datetime", "detail": f"could not parse {remind_at!r} as ISO-8601"}
-    if when.tzinfo is None:
-        # No per-chat timezone exists yet (see the story's implementation
-        # notes), so a naive timestamp is read as UTC.
-        when = when.replace(tzinfo=timezone.utc)
+    # The model renders "напомни в 9 утра" as a naive wall-clock time, which
+    # means 9am where the group is. Converted here, once, so everything stored
+    # is absolute and the worker never deals with zones.
+    chat_id = session_row["chat_id"]
+    known = await timezones.stored_timezone(pool, chat_id)
+    tz = await timezones.chat_timezone(pool, chat_id)
+    local_time = when.replace(tzinfo=None) if when.tzinfo is None else None
+    when = timezones.to_utc(when, tz)
 
     row = await pool.fetchrow(
         """
-        INSERT INTO reminders (session_id, chat_id, target_user_id, message, remind_at)
-        VALUES ($1, $2, $3, $4, $5) RETURNING id
+        INSERT INTO reminders (session_id, chat_id, target_user_id, message, remind_at,
+                               local_time, assumed_timezone)
+        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
         """,
-        session_id, session_row["chat_id"], target_user_id, message, when,
+        session_id, chat_id, target_user_id, message, when, local_time,
+        None if known else str(tz),
     )
-    return {"status": "ok", "reminder_id": row["id"]}
+    result = {"status": "ok", "reminder_id": row["id"]}
+    if known is None and local_time is not None:
+        # Nobody has said where this group is, so the time was interpreted in
+        # the configured default. Say so instead of silently guessing: the
+        # model should name the assumption and offer to correct it, and
+        # set_timezone re-anchors this reminder if someone does.
+        result["timezone_assumed"] = str(tz)
+        result["ask_user"] = (
+            f"Timezone unknown for this chat — {remind_at} was read as {tz}. "
+            "Tell the user which city or timezone they're in and call set_timezone; "
+            "the reminder will be corrected automatically."
+        )
+    return result
 
 
 async def reminder_cancel(pool, session_id, reminder_id) -> dict:
@@ -332,6 +352,22 @@ async def broadcast_message(pool, session_id, text) -> dict:
     )
 
 
+async def set_timezone(pool, session_id, timezone_name) -> dict:
+    """Record the group's timezone when a human states where they are.
+
+    Outranks the zone guessed from a resolved place: someone saying "мы по
+    Москве" knows better than the coordinates of a restaurant they looked up.
+    """
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"status": "unknown_session"}
+    if not await timezones.set_chat_timezone(pool, session_row["chat_id"], timezone_name):
+        return {"status": "bad_timezone",
+                "detail": f"{timezone_name!r} is not an IANA zone name like 'Europe/Moscow'"}
+    moved = await timezones.reanchor_pending_reminders(pool, session_row["chat_id"], timezone_name)
+    return {"status": "ok", "timezone": timezone_name, "reminders_corrected": moved}
+
+
 def build_core_registry(pool, telegram_bot) -> dict:
     return {
         "remember_fact": functools.partial(remember_fact, pool),
@@ -346,4 +382,5 @@ def build_core_registry(pool, telegram_bot) -> dict:
         "reminder_set": functools.partial(reminder_set, pool),
         "reminder_cancel": functools.partial(reminder_cancel, pool),
         "broadcast_message": functools.partial(broadcast_message, pool),
+        "set_timezone": functools.partial(set_timezone, pool),
     }

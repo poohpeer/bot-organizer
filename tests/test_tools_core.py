@@ -258,7 +258,7 @@ def test_build_core_registry_covers_every_core_tool(db_pool):
         "remember_fact", "get_facts", "list_add", "list_show", "list_check_off",
         "list_remove_item", "set_participant", "get_participants",
         "nudge_unconfirmed_participants", "reminder_set", "reminder_cancel",
-        "broadcast_message",
+        "broadcast_message", "set_timezone",
     }
 
 
