@@ -12,6 +12,63 @@ destructive-action confirmation gate.
 
 ---
 
+## Implementation notes (added during S4, after code review)
+
+`bot/tools/core.py` diverges from the task briefs below where the briefs'
+code had real defects. The briefs are kept for provenance; the code is the
+source of truth. Each item was reproduced against a real database first.
+
+1. **Participant identity (R2).** The briefs matched on `user_id` OR name in
+   mutually exclusive branches, so someone named in the group ("Masha is
+   coming") and later replying in DM became **two rows** — `get_participants`
+   reported conflicting statuses and the nudge DMed someone who had already
+   confirmed. Now: match by `user_id`, fall back to name, backfill the
+   `user_id` onto the existing row.
+2. **Nudge failure isolation (R2).** Telegram raises `Forbidden` for anyone
+   who has never started a private chat with the bot — the *normal* state for
+   most group members. The briefs let that propagate, aborting the run,
+   losing the record of who was already reached, and re-DMing them on retry.
+   Each send is now isolated and the result carries a `failed_to_reach`
+   bucket.
+3. **Gated actions could execute twice (R10).** `resolve_confirmation` had no
+   `status = 'pending'` guard, so two "yes" messages both resolved the same
+   row and the destructive action ran twice. Guarded, and
+   `execute_confirmed_action` now refuses anything not in `confirmed` state.
+4. **Cross-chat writes.** `reminder_set` and `broadcast_message` took
+   `chat_id` as a *model-supplied* argument, so a hallucinated value would
+   file the confirmation against another chat and post the text there.
+   `chat_id` is now derived from `session_id` and removed from the tool
+   declarations; `reminder_cancel` is likewise scoped by `session_id` so a
+   stale `reminder_id` can't cancel another chat's reminder.
+5. **Smaller correctness fixes.** `list_check_off` distinguishes
+   `already_checked` from `not_found` (R1: two people both saying "I got the
+   cucumbers" shouldn't be told cucumbers aren't listed); the confirmed
+   delete removes exactly one row and reports `not_found` if nothing matched;
+   tools return `unknown_session` instead of raising `TypeError` on a bad
+   `session_id`; `reminder_set` returns `bad_datetime` rather than raising;
+   and the confirmation prompt reads as a sentence instead of interpolating a
+   raw params dict (it is relayed verbatim into the chat).
+
+Known and deliberately deferred:
+
+- **Timezone.** `reminder_set` treats a naive ISO-8601 timestamp as UTC. The
+  model will usually render "remind us at 9am" as naive local wall-clock, so
+  in a UTC+3 group the reminder fires 3 hours late. Same root cause as S3's
+  deferred `event_date` timezone issue: there is no per-chat timezone in the
+  schema. Both should be fixed together by adding one.
+- **Expired confirmations.** `get_pending_confirmation` hides rows older than
+  a day, but nothing writes the `'expired'` status the schema defines, so
+  stale rows sit as `'pending'` forever. Harmless today (the gate filters by
+  age) but a sweeper should set the status once anything queries by status
+  alone.
+- **Inflected check-off.** Matching is exact on `lower(name)`. Russian is
+  heavily inflected ("помидоры" added vs "помидорок" spoken), so the model
+  must normalize the `name` argument. See the S4 test report for how this
+  behaves against the live model.
+
+
+---
+
 ### Task 1: Facts
 
 **Satisfies:** R6
