@@ -1,5 +1,13 @@
 import asyncpg
 
+# How long a "not yet, we're still going" reply defers the closing question.
+# R4 says the bot must not keep asking once someone has answered; without a
+# deferral a session whose event_date has passed re-qualifies on the very next
+# worker tick and asks forever.
+SNOOZE_DAYS = 7
+
+CLOSE_REASONS = frozenset({"explicit_stop", "closing_question_yes", "auto_close_silence"})
+
 
 class SessionAlreadyActiveError(Exception):
     pass
@@ -27,40 +35,100 @@ async def start_session(pool, chat_id: int, activity_type: str, *, event_date=No
         raise SessionAlreadyActiveError(f"chat {chat_id} already has an active session")
 
 
-async def close_session(pool, session_id: int, reason: str) -> None:
-    await pool.execute(
-        "UPDATE sessions SET status = 'closed', closed_at = now(), closed_reason = $2 WHERE id = $1",
+async def close_session(pool, session_id: int, reason: str) -> bool:
+    """Close an active session. Returns True if this call actually closed it.
+
+    The `status = 'active'` guard makes closing idempotent and race-safe: if
+    the worker's auto-close and a user's explicit "that's it, thanks" land in
+    the same window, only the first wins, the recorded reason isn't
+    overwritten, and the loser gets False so it can skip posting a second
+    closing summary.
+    """
+    if reason not in CLOSE_REASONS:
+        raise ValueError(f"unknown close reason {reason!r}; expected one of {sorted(CLOSE_REASONS)}")
+    result = await pool.execute(
+        """
+        UPDATE sessions SET status = 'closed', closed_at = now(), closed_reason = $2
+        WHERE id = $1 AND status = 'active'
+        """,
         session_id, reason,
     )
+    return result == "UPDATE 1"
 
 
 async def touch_activity(pool, session_id: int) -> None:
     await pool.execute("UPDATE sessions SET last_activity_at = now() WHERE id = $1", session_id)
 
 
-_NEEDS_CLOSING_QUESTION_SQL = """
-SELECT * FROM sessions
-WHERE status = 'active'
-  AND (
-    (event_date IS NOT NULL AND event_date < current_date AND closing_question_asked_at IS NULL)
-    OR (event_date IS NULL AND closing_question_asked_at IS NULL
-        AND last_activity_at < now() - interval '7 days')
-    OR (closing_question_asked_at IS NOT NULL AND closing_question_retries = 0
-        AND closing_question_asked_at < now() - interval '2 days')
-  )
+# Every branch is gated on the snooze: a session someone has said "not yet"
+# about is off-limits until the snooze expires, whichever branch would
+# otherwise have matched.
+_DUE_FOR_CLOSING_QUESTION = """
+    status = 'active'
+    AND (closing_question_snoozed_until IS NULL OR closing_question_snoozed_until <= now())
+    AND (
+        (event_date IS NOT NULL AND event_date < current_date AND closing_question_asked_at IS NULL)
+        OR (event_date IS NULL AND closing_question_asked_at IS NULL
+            AND last_activity_at < now() - interval '7 days')
+        OR (closing_question_asked_at IS NOT NULL AND closing_question_retries = 0
+            AND closing_question_asked_at < now() - interval '2 days')
+    )
 """
 
-_NEEDS_AUTO_CLOSE_SQL = """
-SELECT * FROM sessions
-WHERE status = 'active'
-  AND closing_question_asked_at IS NOT NULL
-  AND closing_question_retries >= 1
-  AND closing_question_asked_at < now() - interval '2 days'
+_DUE_FOR_AUTO_CLOSE = """
+    status = 'active'
+    AND (closing_question_snoozed_until IS NULL OR closing_question_snoozed_until <= now())
+    AND closing_question_asked_at IS NOT NULL
+    AND closing_question_retries >= 1
+    AND closing_question_asked_at < now() - interval '2 days'
 """
+
+
+async def claim_sessions_for_closing_question(pool):
+    """Atomically claim every session due for a closing question and return them.
+
+    Claim-and-mark in one statement rather than select-then-mark: two pollers
+    (or a tick overlapping a slow send) would otherwise both see the same row
+    and post the question twice. Marking before sending means a failed send
+    costs one skipped question rather than a duplicate one — the direction R10
+    asks for (degrade toward inaction).
+    """
+    return await pool.fetch(
+        f"""
+        UPDATE sessions SET
+            closing_question_retries = CASE
+                WHEN closing_question_asked_at IS NULL THEN 0
+                ELSE closing_question_retries + 1
+            END,
+            closing_question_asked_at = now()
+        WHERE id IN (SELECT id FROM sessions WHERE {_DUE_FOR_CLOSING_QUESTION} FOR UPDATE SKIP LOCKED)
+        RETURNING *
+        """
+    )
+
+
+async def claim_sessions_for_auto_close(pool):
+    """Atomically close every session whose closing question went unanswered
+    twice, returning the rows that were closed so the caller can announce it."""
+    return await pool.fetch(
+        f"""
+        UPDATE sessions SET status = 'closed', closed_at = now(),
+                            closed_reason = 'auto_close_silence'
+        WHERE id IN (SELECT id FROM sessions WHERE {_DUE_FOR_AUTO_CLOSE} FOR UPDATE SKIP LOCKED)
+        RETURNING *
+        """
+    )
 
 
 async def sessions_needing_closing_question(pool):
-    return await pool.fetch(_NEEDS_CLOSING_QUESTION_SQL)
+    """Read-only view of what's due, for tests and diagnostics. The worker uses
+    claim_sessions_for_closing_question so it can't double-send."""
+    return await pool.fetch(f"SELECT * FROM sessions WHERE {_DUE_FOR_CLOSING_QUESTION}")
+
+
+async def sessions_needing_auto_close(pool):
+    """Read-only counterpart to claim_sessions_for_auto_close."""
+    return await pool.fetch(f"SELECT * FROM sessions WHERE {_DUE_FOR_AUTO_CLOSE}")
 
 
 async def mark_closing_question_asked(pool, session_id: int) -> None:
@@ -78,18 +146,25 @@ async def mark_closing_question_asked(pool, session_id: int) -> None:
     )
 
 
-async def sessions_needing_auto_close(pool):
-    return await pool.fetch(_NEEDS_AUTO_CLOSE_SQL)
+async def record_closing_reply(pool, session_id: int, continued: bool) -> bool:
+    """Apply an explicit answer to the closing question.
 
-
-async def record_closing_reply(pool, session_id: int, continued: bool) -> None:
+    Returns True if it applied. False means the session was no longer active —
+    e.g. auto-close fired before a late "not yet" arrived — so the caller can
+    tell the user the session already closed instead of silently doing nothing.
+    """
     if not continued:
-        await close_session(pool, session_id, reason="closing_question_yes")
-        return
-    await pool.execute(
-        """
-        UPDATE sessions SET closing_question_asked_at = NULL, closing_question_retries = 0
-        WHERE id = $1
+        return await close_session(pool, session_id, reason="closing_question_yes")
+
+    result = await pool.execute(
+        f"""
+        UPDATE sessions SET
+            closing_question_asked_at = NULL,
+            closing_question_retries = 0,
+            closing_question_snoozed_until = now() + interval '{SNOOZE_DAYS} days',
+            last_activity_at = now()
+        WHERE id = $1 AND status = 'active'
         """,
         session_id,
     )
+    return result == "UPDATE 1"

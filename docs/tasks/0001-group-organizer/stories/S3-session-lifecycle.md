@@ -13,6 +13,56 @@ without either of them reimplementing this policy.
 
 ---
 
+## Implementation notes (added during S3, after code review)
+
+The implemented `bot/session.py` diverges from the task briefs below in
+three places, each fixing a bug the briefs' code actually had. The briefs
+are kept as-written for provenance; the code is the source of truth.
+
+1. **Closing-question snooze (fixes an R4 violation).** The briefs'
+   `record_closing_reply(continued=True)` only cleared
+   `closing_question_asked_at`, so a session whose `event_date` had passed
+   immediately re-matched the first due-branch and the bot re-asked on every
+   worker tick, forever — directly contradicting R4's "no further closing
+   question is asked until conditions change". Reproduced against a real
+   database before fixing. A `closing_question_snoozed_until` column was
+   added to `sessions` (plus an idempotent `ALTER` in `init_db`), every
+   due-branch and the auto-close now respect it, and a "not yet" reply
+   snoozes for `SNOOZE_DAYS` (7) and touches `last_activity_at`.
+
+2. **Idempotent close.** `close_session` now filters on `status = 'active'`
+   and returns a bool. Without the guard, the worker's auto-close and a
+   user's explicit "that's it, thanks" racing in the same window both
+   succeeded — overwriting `closed_reason` and posting two closing
+   summaries. `record_closing_reply` likewise returns False when the
+   session is already closed, so a late "not yet" doesn't silently mutate a
+   closed row. `close_session` also validates `reason` against
+   `CLOSE_REASONS` instead of surfacing a raw `CheckViolationError`.
+
+3. **Atomic claim for the worker.** `claim_sessions_for_closing_question`
+   and `claim_sessions_for_auto_close` mark/close in a single
+   `UPDATE ... RETURNING ... FOR UPDATE SKIP LOCKED` rather than
+   select-then-mark, so two pollers can't both claim a session and post
+   twice. The read-only `sessions_needing_*` functions remain for tests and
+   diagnostics. S8's story file has been updated to consume the new
+   helpers.
+
+Known and deliberately deferred:
+
+- **Timezone.** `event_date < current_date` evaluates in the database's
+  timezone (UTC), so for a group at UTC+3 the day-after question can fire a
+  few hours into the wrong local day. Fixing this properly needs a per-chat
+  timezone, which the schema doesn't carry; acceptable for v1 single-timezone
+  groups.
+- **Dedup marks before handling.** `bot/dedup.py` records the `update_id`
+  before the handler runs, so a crash mid-handler drops that update rather
+  than reprocessing it. This is the intended direction — R10 asks that
+  degradation be toward inaction, and the alternative risks duplicate list
+  items and facts on redelivery.
+
+
+---
+
 ### Task 1: Session start/stop core
 
 **Satisfies:** R3
