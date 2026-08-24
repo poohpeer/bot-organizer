@@ -78,3 +78,85 @@ async def test_run_tool_loop_raises_after_max_iterations():
 
     with pytest.raises(RuntimeError, match="max iterations"):
         await run_tool_loop(fb, "loop forever", registry)
+
+
+async def test_run_tool_loop_wraps_non_dict_tool_result():
+    """Part.from_function_response requires a dict; tools that return a list
+    (list_show, get_participants, archive_lookup) must not crash the loop."""
+    chat = MagicMock()
+    first_resp = MagicMock(function_calls=[_make_call("list_show", {"session_id": 1})])
+    second_resp = MagicMock(function_calls=None, text="Here it is.")
+    chat.send_message = AsyncMock(return_value=second_resp)
+    fb = MagicMock()
+    fb.send_message = AsyncMock(return_value=("gemini-3.6-flash", chat, first_resp))
+    registry = {"list_show": AsyncMock(return_value=["tomatoes", "meat"])}
+
+    result = await run_tool_loop(fb, "show the list", registry)
+
+    assert result == "Here it is."
+    sent = chat.send_message.await_args.args[0]
+    assert sent[0].function_response.response == {"result": ["tomatoes", "meat"]}
+
+
+async def test_run_tool_loop_returns_text_on_final_allowed_iteration():
+    """A conversation using exactly MAX_TOOL_ITERATIONS tool rounds and then
+    answering must return that answer, not raise."""
+    from bot.ai.tool_loop import MAX_TOOL_ITERATIONS
+
+    call_resp = MagicMock(function_calls=[_make_call("list_add", {"session_id": 1, "name": "x"})])
+    final_resp = MagicMock(function_calls=None, text="Done at the limit.")
+    chat = MagicMock()
+    chat.send_message = AsyncMock(
+        side_effect=[call_resp] * (MAX_TOOL_ITERATIONS - 1) + [final_resp]
+    )
+    fb = MagicMock()
+    fb.send_message = AsyncMock(return_value=("gemini-3.6-flash", chat, call_resp))
+    registry = {"list_add": AsyncMock(return_value={"status": "ok"})}
+
+    assert await run_tool_loop(fb, "work hard", registry) == "Done at the limit."
+
+
+async def test_run_tool_loop_falls_back_to_next_model_on_later_turn_429():
+    """A 429 on turn 2+ must re-drive on the next model, not abort."""
+    from google.genai import errors
+
+    chat1 = MagicMock()
+    chat1.send_message = AsyncMock(
+        side_effect=errors.APIError(code=429, response_json={"error": {"code": 429}}, response=None)
+    )
+    chat1.get_history = MagicMock(return_value=["prior"])
+    chat2 = MagicMock()
+
+    first_resp = MagicMock(function_calls=[_make_call("list_add", {"session_id": 1, "name": "x"})])
+    recovered = MagicMock(function_calls=None, text="Recovered.")
+
+    fb = MagicMock()
+    fb.index = 0
+    fb.models = ["a", "b"]
+    fb.send_message = AsyncMock(
+        side_effect=[("a", chat1, first_resp), ("b", chat2, recovered)]
+    )
+    registry = {"list_add": AsyncMock(return_value={"status": "ok"})}
+
+    result = await run_tool_loop(fb, "add x", registry)
+
+    assert result == "Recovered."
+    assert fb.index == 1
+
+
+async def test_run_tool_loop_reraises_when_no_model_left_to_fall_back_to():
+    from google.genai import errors
+
+    chat = MagicMock()
+    chat.send_message = AsyncMock(
+        side_effect=errors.APIError(code=429, response_json={"error": {"code": 429}}, response=None)
+    )
+    fb = MagicMock()
+    fb.index = 1
+    fb.models = ["a", "b"]
+    fb.send_message = AsyncMock(
+        return_value=("b", chat, MagicMock(function_calls=[_make_call("list_add", {"name": "x"})]))
+    )
+
+    with pytest.raises(errors.APIError):
+        await run_tool_loop(fb, "add x", {"list_add": AsyncMock(return_value={})})
