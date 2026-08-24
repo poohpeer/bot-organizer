@@ -16,3 +16,57 @@ async def get_facts(pool, session_id, key=None) -> dict:
         session_id, key,
     )
     return {"facts": {r["key"]: r["value"] for r in rows}}
+
+
+async def propose_confirmation(pool, *, chat_id, session_id, action_type, action_params) -> dict:
+    row = await pool.fetchrow(
+        """
+        INSERT INTO pending_confirmations (chat_id, session_id, action_type, action_params)
+        VALUES ($1, $2, $3, $4) RETURNING id
+        """,
+        chat_id, session_id, action_type, action_params,
+    )
+    return {
+        "status": "pending_confirmation",
+        "confirmation_id": row["id"],
+        "message_for_user": (
+            f"This needs your confirmation before I do it ({action_type}: {action_params}). "
+            "Reply yes to confirm or no to cancel."
+        ),
+    }
+
+
+async def get_pending_confirmation(pool, chat_id):
+    return await pool.fetchrow(
+        """
+        SELECT * FROM pending_confirmations
+        WHERE chat_id = $1 AND status = 'pending' AND proposed_at > now() - interval '1 day'
+        ORDER BY proposed_at DESC LIMIT 1
+        """,
+        chat_id,
+    )
+
+
+async def resolve_confirmation(pool, confirmation_id, *, confirmed: bool):
+    return await pool.fetchrow(
+        """
+        UPDATE pending_confirmations SET status = $2
+        WHERE id = $1 RETURNING *
+        """,
+        confirmation_id, "confirmed" if confirmed else "rejected",
+    )
+
+
+async def execute_confirmed_action(pool, bot, confirmation) -> dict:
+    action_type = confirmation["action_type"]
+    params = confirmation["action_params"]
+    if action_type == "list_remove_item":
+        await pool.execute(
+            "DELETE FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
+            confirmation["session_id"], params["name"],
+        )
+        return {"status": "executed"}
+    if action_type == "broadcast_message":
+        await bot.send_message(chat_id=confirmation["chat_id"], text=params["text"])
+        return {"status": "executed"}
+    return {"status": "unknown_action_type"}
