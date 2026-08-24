@@ -41,3 +41,15 @@ async def db_pool():
             await admin_conn.execute(f"DROP SCHEMA {schema} CASCADE")
         finally:
             await admin_conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_quiet_hours(monkeypatch):
+    """Most tests exercise *whether* a session is due, not what time of day the
+    bot is willing to say so. Without this every one of them would pass or fail
+    depending on the wall clock when the suite happens to run. The tests that
+    are actually about quiet hours put the real window back themselves."""
+    import bot.session
+
+    monkeypatch.setattr(bot.session, "QUIET_UNTIL_HOUR", 0)
+    monkeypatch.setattr(bot.session, "QUIET_FROM_HOUR", 24)

@@ -1,3 +1,5 @@
+import os
+
 import asyncpg
 
 import bot.timezones as timezones
@@ -69,7 +71,19 @@ async def touch_activity(pool, session_id: int) -> None:
 # the day after in the group's own timezone, or a chat several hours from UTC
 # gets asked on the wrong calendar day. chats.timezone is NULL for most chats,
 # hence the fallback to the configured default.
-_LOCAL_DATE = "(now() AT TIME ZONE COALESCE(c.timezone, $1))::date"
+_LOCAL_NOW = "(now() AT TIME ZONE COALESCE(c.timezone, $1))"
+_LOCAL_DATE = f"{_LOCAL_NOW}::date"
+
+# The bot may only start a conversation during waking hours, local to the group.
+# Getting the local day right (above) means the closing question becomes due the
+# moment the date rolls over — i.e. around local midnight, which is a rude time
+# to message a group. This delays rather than skips: the worker polls every
+# minute, so a question that comes due at 00:05 goes out at the start of the
+# window instead.
+QUIET_UNTIL_HOUR = int(os.environ.get("QUIET_UNTIL_HOUR", "9"))
+QUIET_FROM_HOUR = int(os.environ.get("QUIET_FROM_HOUR", "21"))
+
+_WAKING_HOURS = f"EXTRACT(HOUR FROM {_LOCAL_NOW}) >= $2 AND EXTRACT(HOUR FROM {_LOCAL_NOW}) < $3"
 
 _DUE_FOR_CLOSING_QUESTION = f"""
     status = 'active'
@@ -81,14 +95,16 @@ _DUE_FOR_CLOSING_QUESTION = f"""
         OR (closing_question_asked_at IS NOT NULL AND closing_question_retries = 0
             AND closing_question_asked_at < now() - interval '2 days')
     )
+    AND ({_WAKING_HOURS})
 """
 
-_DUE_FOR_AUTO_CLOSE = """
+_DUE_FOR_AUTO_CLOSE = f"""
     status = 'active'
     AND (closing_question_snoozed_until IS NULL OR closing_question_snoozed_until <= now())
     AND closing_question_asked_at IS NOT NULL
     AND closing_question_retries >= 1
     AND closing_question_asked_at < now() - interval '2 days'
+    AND ({_WAKING_HOURS})
 """
 
 
@@ -123,7 +139,7 @@ async def claim_sessions_for_closing_question(pool):
         FROM due WHERE s.id = due.id
         RETURNING s.*, due.prev_asked_at, due.prev_retries
         """,
-        timezones.DEFAULT_TIMEZONE,
+        timezones.DEFAULT_TIMEZONE, QUIET_UNTIL_HOUR, QUIET_FROM_HOUR,
     )
 
 
@@ -134,9 +150,13 @@ async def claim_sessions_for_auto_close(pool):
         f"""
         UPDATE sessions SET status = 'closed', closed_at = now(),
                             closed_reason = 'auto_close_silence'
-        WHERE id IN (SELECT id FROM sessions WHERE {_DUE_FOR_AUTO_CLOSE} FOR UPDATE SKIP LOCKED)
+        WHERE id IN (
+            SELECT id FROM sessions JOIN chats c USING (chat_id)
+            WHERE {_DUE_FOR_AUTO_CLOSE} FOR UPDATE SKIP LOCKED
+        )
         RETURNING *
-        """
+        """,
+        timezones.DEFAULT_TIMEZONE, QUIET_UNTIL_HOUR, QUIET_FROM_HOUR,
     )
 
 
@@ -157,13 +177,16 @@ async def sessions_needing_closing_question(pool):
     claim_sessions_for_closing_question so it can't double-send."""
     return await pool.fetch(
         f"SELECT s.* FROM sessions s JOIN chats c USING (chat_id) WHERE {_DUE_FOR_CLOSING_QUESTION}",
-        timezones.DEFAULT_TIMEZONE,
+        timezones.DEFAULT_TIMEZONE, QUIET_UNTIL_HOUR, QUIET_FROM_HOUR,
     )
 
 
 async def sessions_needing_auto_close(pool):
     """Read-only counterpart to claim_sessions_for_auto_close."""
-    return await pool.fetch(f"SELECT * FROM sessions WHERE {_DUE_FOR_AUTO_CLOSE}")
+    return await pool.fetch(
+        f"SELECT s.* FROM sessions s JOIN chats c USING (chat_id) WHERE {_DUE_FOR_AUTO_CLOSE}",
+        timezones.DEFAULT_TIMEZONE, QUIET_UNTIL_HOUR, QUIET_FROM_HOUR,
+    )
 
 
 async def mark_closing_question_asked(pool, session_id: int) -> None:

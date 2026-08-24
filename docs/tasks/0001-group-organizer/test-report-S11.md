@@ -77,9 +77,29 @@ no `tzdata` dependency is needed.
 
 Suite: **181 passed**.
 
-## Known limitation
+## Quiet hours (added after the first review of this story)
 
-The closing question fires as soon as the local date rolls over — i.e. around
-local midnight. R4 only says "the day after", and that is now correct, but
-messaging a group at 00:0x is poor manners. Worth adding a "not before 09:00
-local" floor when convenient; it is a UX refinement, not a correctness bug.
+Getting the local day right had a side effect: the closing question became due
+the moment the date rolled over, so the bot would open a conversation at about
+00:05 local. `QUIET_UNTIL_HOUR` (9) and `QUIET_FROM_HOUR` (21) now gate both
+the closing question and the auto-close notice, evaluated in the chat's own
+zone. This **delays rather than skips** — the worker polls every minute, so a
+question that comes due overnight goes out at the start of the window.
+
+Tested by putting a chat in whichever IANA zone is currently at the hour under
+test, rather than by faking the clock, so these stay real queries against a
+real database:
+`::test_the_bot_does_not_start_a_conversation_at_local_midnight`,
+`::test_the_bot_does_not_start_a_conversation_late_at_night`,
+`::test_the_question_goes_out_once_the_group_is_awake`.
+
+Both "stay silent" tests were confirmed to fail with the window removed
+(`bot would have posted at 00:00 in Europe/Minsk`,
+`bot would have posted at 22:00 in Etc/GMT-1`).
+
+An autouse fixture in `conftest.py` widens the window to 0–24 for the rest of
+the suite: those tests are about *whether* a session is due, and without it
+every one of them would pass or fail depending on the wall clock when the suite
+happened to run.
+
+Suite after this addition: **184 passed**.
