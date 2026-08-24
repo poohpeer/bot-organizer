@@ -13,7 +13,7 @@
 | S2 | 0001-S2-ai-layer | complete | dabe8d7..5b1da69 | review: 7 findings fixed; tester PASS | — | classifier + tool loop verified against live API |
 | S3 | 0001-S3-session-lifecycle | complete | c72cc37..d996cf0 | review: 3 defects fixed; tester PASS | — | R4 re-ask loop caught + fixed |
 | S4 | 0001-S4-core-tools | complete | 806c251..HEAD | review: 8 defects fixed; tester PASS | — | R1+R10 verified live |
-| S5 | — | ready | — | — | — | S2 merged |
+| S5 | 0001-S5-external-tools | complete | e5938e6..HEAD | review: 6 defects fixed; tester PASS | — | maps not live-verified (no API key) |
 | S6 | — | blocked | — | — | — | waits on S1, S5 |
 | S7 | — | blocked | — | — | — | waits on S1, S2, S3 |
 | S8 | — | blocked | — | — | — | waits on S1, S3 |
@@ -51,3 +51,11 @@
   removed from the tool declarations). R1 and R10 verified end-to-end against
   the live model. Deferred: per-chat timezone (shared with S3 — the main
   outstanding debt), expired-confirmation sweeper. Suite: 82 passed.
+- 2026-08-24: S5 implemented (2 tasks) with good hardening from the subagent.
+  Code review found 7 issues, 6 fixed — incl. web_search having no model
+  fallback (observed failing live when the Gemini quota ran out) and
+  maps_lookup returning name=None which would break S6's NOT NULL insert.
+  weather_lookup verified live against Open-Meteo; maps_lookup is mock-only
+  (no GOOGLE_MAPS_API_KEY available) — flagged as the weakest evidence so far.
+  NOTE: Gemini free-tier quota exhausted during verification; further live
+  model checks may be rate-limited until it resets. Suite: 109 passed.

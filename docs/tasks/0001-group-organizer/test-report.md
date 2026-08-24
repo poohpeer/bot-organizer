@@ -5,6 +5,7 @@ per story rather than overwritten on each run. Latest first.
 
 | Story | Report | Verdict |
 |-------|--------|---------|
+| S5 — External tools | [test-report-S5.md](test-report-S5.md) | PASS (maps mock-only) |
 | S4 — Core tools | [test-report-S4.md](test-report-S4.md) | PASS |
 | S3 — Session lifecycle | [test-report-S3.md](test-report-S3.md) | PASS |
 | S2 — AI layer | [test-report-S2.md](test-report-S2.md) | PASS |
