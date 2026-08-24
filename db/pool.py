@@ -79,7 +79,11 @@ CREATE TABLE IF NOT EXISTS reminders (
     message         TEXT NOT NULL,
     remind_at       TIMESTAMPTZ NOT NULL,
     status          TEXT NOT NULL DEFAULT 'pending'
-                         CHECK (status IN ('pending', 'sent', 'cancelled')),
+                         CHECK (status IN ('pending', 'sent', 'cancelled', 'failed')),
+    -- Delivery attempts. A reminder to someone who has blocked the bot can
+    -- never succeed; without a count the worker would retry it every 60s
+    -- forever and the queue would never drain.
+    attempts        INT NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     sent_at         TIMESTAMPTZ
 );
@@ -164,6 +168,12 @@ async def create_pool(dsn: str, *, init=None) -> asyncpg.Pool:
 _ALTERS_SQL = """
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS closing_question_snoozed_until TIMESTAMPTZ;
 ALTER TABLE places ADD COLUMN IF NOT EXISTS query TEXT;
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+-- Widening a CHECK needs the old one dropped first; there is no
+-- ADD CONSTRAINT IF NOT EXISTS. Both statements are idempotent together.
+ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_status_check;
+ALTER TABLE reminders ADD CONSTRAINT reminders_status_check
+    CHECK (status IN ('pending', 'sent', 'cancelled', 'failed'));
 """
 
 

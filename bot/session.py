@@ -89,20 +89,31 @@ async def claim_sessions_for_closing_question(pool):
 
     Claim-and-mark in one statement rather than select-then-mark: two pollers
     (or a tick overlapping a slow send) would otherwise both see the same row
-    and post the question twice. Marking before sending means a failed send
-    costs one skipped question rather than a duplicate one — the direction R10
-    asks for (degrade toward inaction).
+    and post the question twice.
+
+    Each row also carries `prev_asked_at`/`prev_retries`, its state before the
+    claim, so a caller whose send fails can put the row back exactly as it was
+    via `release_closing_question_claim`. Without that the session stays marked
+    as "asked" although nothing was ever sent, and two days later auto-closes a
+    session the group was never actually asked about — action without consent,
+    which is the opposite of what R4 wants.
     """
     return await pool.fetch(
         f"""
-        UPDATE sessions SET
+        WITH due AS (
+            SELECT id,
+                   closing_question_asked_at AS prev_asked_at,
+                   closing_question_retries  AS prev_retries
+            FROM sessions WHERE {_DUE_FOR_CLOSING_QUESTION} FOR UPDATE SKIP LOCKED
+        )
+        UPDATE sessions s SET
             closing_question_retries = CASE
-                WHEN closing_question_asked_at IS NULL THEN 0
-                ELSE closing_question_retries + 1
+                WHEN due.prev_asked_at IS NULL THEN 0
+                ELSE due.prev_retries + 1
             END,
             closing_question_asked_at = now()
-        WHERE id IN (SELECT id FROM sessions WHERE {_DUE_FOR_CLOSING_QUESTION} FOR UPDATE SKIP LOCKED)
-        RETURNING *
+        FROM due WHERE s.id = due.id
+        RETURNING s.*, due.prev_asked_at, due.prev_retries
         """
     )
 
@@ -117,6 +128,18 @@ async def claim_sessions_for_auto_close(pool):
         WHERE id IN (SELECT id FROM sessions WHERE {_DUE_FOR_AUTO_CLOSE} FOR UPDATE SKIP LOCKED)
         RETURNING *
         """
+    )
+
+
+async def release_closing_question_claim(pool, session_id: int, prev_asked_at, prev_retries: int) -> None:
+    """Undo a claim whose closing question could not be delivered, restoring the
+    exact prior state so the question is asked again on a later poll."""
+    await pool.execute(
+        """
+        UPDATE sessions SET closing_question_asked_at = $2, closing_question_retries = $3
+        WHERE id = $1
+        """,
+        session_id, prev_asked_at, prev_retries,
     )
 
 

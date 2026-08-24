@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import logging
 import os
 
@@ -17,9 +18,24 @@ POLL_INTERVAL_SECONDS = 60
 
 
 async def poll_once(pool, telegram_bot, *, min_interval_hours: float) -> None:
-    await deliver_due_reminders(pool, telegram_bot, min_interval_hours=min_interval_hours)
-    await fire_closing_questions(pool, telegram_bot)
-    await fire_auto_closes(pool, telegram_bot)
+    """Run one pass of every scheduled duty.
+
+    The steps are independent, so each is isolated: a database hiccup while
+    delivering reminders must not stop closing questions from being asked for
+    the rest of the day. Without this the first step to fail silently disables
+    the two behind it.
+    """
+    steps = (
+        ("reminders", functools.partial(
+            deliver_due_reminders, pool, telegram_bot, min_interval_hours=min_interval_hours)),
+        ("closing questions", functools.partial(fire_closing_questions, pool, telegram_bot)),
+        ("auto-closes", functools.partial(fire_auto_closes, pool, telegram_bot)),
+    )
+    for name, step in steps:
+        try:
+            await step()
+        except Exception:
+            log.exception("Worker step %r failed this poll", name)
 
 
 async def main() -> None:
