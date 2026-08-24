@@ -92,9 +92,19 @@ CREATE TABLE IF NOT EXISTS places (
     address      TEXT,
     lat          DOUBLE PRECISION NOT NULL,
     lon          DOUBLE PRECISION NOT NULL,
+    -- The phrasing that resolved this place ("поляна Ханания"), as opposed to
+    -- the canonical name maps returned ("Hanania Meadow"). Cached lookups match
+    -- on either, so asking again the way you asked the first time is a cache
+    -- hit rather than a second maps call and a duplicate row (R9).
+    query        TEXT,
     resolved_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_places_session ON places (session_id);
+-- One row per place name per session: re-resolving the same place must update
+-- nothing and insert nothing, not accumulate near-duplicate rows that
+-- archive_lookup would later count as separate visits.
+CREATE UNIQUE INDEX IF NOT EXISTS one_place_name_per_session
+    ON places (session_id, lower(name));
 
 CREATE TABLE IF NOT EXISTS proactive_suggestions (
     id            BIGSERIAL PRIMARY KEY,
@@ -165,6 +175,7 @@ async def create_pool(dsn: str, *, init=None) -> asyncpg.Pool:
 # constraints — and safe to run on every startup.
 _ALTERS_SQL = """
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS closing_question_snoozed_until TIMESTAMPTZ;
+ALTER TABLE places ADD COLUMN IF NOT EXISTS query TEXT;
 """
 
 

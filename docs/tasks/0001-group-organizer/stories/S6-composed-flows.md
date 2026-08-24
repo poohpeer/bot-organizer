@@ -406,3 +406,69 @@ with S4's `get_facts`/etc. only at the S9 wiring layer; no code import)
   git add bot/tools/composed.py tests/test_tools_composed.py
   git commit -m "Add recency-weighted archive_lookup and build_composed_registry"
   ```
+
+---
+
+## Implementation notes (added during S6, after code review)
+
+The brief was transcribed faithfully and its 11 tests passed on the first
+pass. Verification against a real database and the **live Google Places API**
+then found six defects in the design itself, each reproduced before it was
+fixed. Divergences from the brief above:
+
+1. **Cache matched only the canonical maps name (R9 violation).**
+   `resolve_and_save_place` compared `lower(name) = lower(place_query)`, which
+   only hits when the user types back the exact name maps returned. Reproduced:
+   resolving "поляна Ханания" twice called maps **twice** and left **two**
+   `places` rows. Fixed by recording the phrasing that resolved a place in a
+   new `places.query` column and matching on either, plus a
+   `one_place_name_per_session` unique index with `ON CONFLICT DO NOTHING` so
+   two phrasings for the same place can never become two rows — which would
+   otherwise have inflated that outing into several visits in `archive_lookup`.
+
+2. **`send_location` took a model-supplied `chat_id`.** The same cross-chat
+   hole S4 closed on `reminder_set`/`broadcast_message`: a hallucinated id
+   would post one group's venue card into another group. `chat_id` is now
+   derived from the session and removed from the tool declaration.
+
+3. **`archive_lookup` took a model-supplied `chat_id`.** The read-side version
+   of the same hole — a wrong id surfaces another group's history. It now takes
+   `session_id` and derives `chat_id`. Safe because tools only ever run inside
+   an active session (S9's dormant handler has no tool loop).
+
+4. **`NULL` visit date crashed the scorer.**
+   `COALESCE(s.event_date, s.closed_at::date)` is only non-null because
+   `close_session` happens to set `closed_at`. Reproduced a closed session with
+   neither: `TypeError: unsupported operand type(s) for -: 'datetime.date' and
+   'NoneType'`. Added `s.started_at::date` as the final fallback — it is
+   `NOT NULL DEFAULT now()`, so the value can no longer be null.
+
+5. **A future `event_date` outscored real history.** A session closed while its
+   event date is still ahead never happened, but the unclamped age made
+   `0.5 ** negative` exceed 1.0 per visit. Reproduced: one abandoned
+   future-dated plan (score 4.08) beat a place genuinely visited three times in
+   the last month (2.83). Age is now clamped at 0.
+
+6. **`pattern: "tied"` could return a single place.** The 2× dominance cut and
+   the 0.8 tie cut left a dead band: a runner-up between 0.5× and 0.8× of the
+   top score was neither dominant nor tied-in, so the bot was told to "ask which
+   one" while being handed one option. Reproduced with two visits 5/15 days ago
+   vs two 120/130 days ago. Both cuts now use the same `_DOMINANCE_RATIO`, so a
+   non-dominant result always returns at least two places.
+
+Also added `test_declared_parameters_match_the_bound_signatures`, which pins
+each composed tool's declaration in `bot/tools/schema.py` to its real bound
+signature. Verified it catches drift by re-introducing defect 2 and watching it
+fail. This is the first automated guard against the declaration/signature drift
+that produced defects 2 and 3 here and one of S4's.
+
+## Known limitation: no review snippets from Places
+
+`maps_lookup`'s `review_snippets` is **always empty** with the current API key.
+Confirmed live: Sarona Market reports `userRatingCount: 34149`, but both
+`places:searchText` and the Place Details endpoint return zero `reviews` (HTTP
+200, the field simply omitted — it needs the Enterprise + Atmosphere SKU).
+R7's "paid parking, no official grilling allowed" style grounding must
+therefore come from `web_search`, not from review text. No code change made:
+the field degrades to `[]` harmlessly and would start working if the SKU is
+ever enabled.
