@@ -10,9 +10,13 @@ closing itself down again only with explicit human consent.
 
 **Architecture:** A single `python-telegram-bot` long-polling process
 (`bot/`) receives every update, deduplicates it, and routes it through a
-per-chat session state machine: **dormant** chats only run a cheap
-keyword filter looking for a proactive-suggestion opening; **active**
-chats run every message through a Gemini function-calling loop backed by
+per-chat session state machine. Whether the bot may act at all is decided
+by one model-free gate (`bot/addressing.py`): an @mention of its exact
+username or a reply to something it said. **Dormant** chats do nothing
+until that gate passes. In **active** chats the bot listens to every
+message — silently recording facts — but still speaks only when
+addressed, and then runs the message through a Gemini function-calling
+loop backed by
 a small set of generic tools (facts, lists, reminders, web search, maps,
 weather) that the model composes freely instead of the app hard-coding
 every scenario. All state — sessions, facts, lists, reminders,
@@ -82,6 +86,12 @@ Acceptance criteria:
   addressed to the bot as an explicit answer to its own closing question
   (R4), **then** the session stays active — the bot never infers closure
   from ambient chat.
+- **Given** an active session, **when** someone addresses the bot and says in
+  **any** wording that it is no longer needed ("всё, спасибо", "можешь
+  отдыхать", "мы закончили", "больше не нужен"), **then** the session
+  closes. Recognising that intent is the model's job: there is no fixed
+  vocabulary, keyword list, or regular expression for stopping anywhere in
+  the code, so no phrasing can fail to be understood for want of a pattern.
 
 **R4 — Bot asks to close itself, with a silence safety net**
 > As a group member, I don't want to remember to tell the bot to stop —
@@ -102,30 +112,43 @@ Acceptance criteria:
   stated), **when** the session has had no activity for 7 days, **then** the
   bot asks the same closing question rather than waiting forever for a date
   that will never arrive.
+- **Given** a chat whose event date appears only in the chat title or
+  description ("Пикник 15 сентября") and is never written in a message,
+  **when** a session starts, **then** that date is captured as the session's
+  `event_date` — the title is part of the context the model reads, not just
+  the message text.
+- **Given** a session where someone answered the closing question with "not
+  yet" but the event was in fact moved without being mentioned in the chat,
+  so the event date stays in the past, **when** anyone addresses the bot and
+  says it is no longer needed, **then** the session closes immediately —
+  an explicit human stop always overrides the snooze from R4's "not yet",
+  and never has to wait for the next scheduled ask.
 
-**R5 — Proactive suggestion from a dormant chat**
-> As a group member, I want the bot to notice when we're clearly
-> thinking about organizing something, even before anyone remembers it
-> exists, so I don't have to be the one who remembers to invoke it.
+**R5 — Explicit addressing is the only trigger**
+> As a group member, I want the bot to act only when we actually speak to
+> it, so it can never decide on its own to join a conversation.
 
 Acceptance criteria:
-- **Given** a dormant chat, **when** a message matches a cheap keyword
-  pre-filter for organizing-adjacent phrasing ("we haven't done X in a
-  while", "we should go somewhere"), **then** and only then does the bot run
-  a second, low-cost model check to confirm it's really an organizing lead
-  and not nostalgia or unrelated chat.
-- **Given** the second-stage check confirms a lead, **when** the chat hasn't
-  received a proactive suggestion in the last 7 days, **then** the bot posts
-  one short, easily-ignorable suggestion ("want help organizing that?").
-- **Given** a posted suggestion, **when** someone replies affirmatively,
-  **then** a session starts (this satisfies R3's consent requirement);
-  **given** it's ignored or declined, **then** the bot says nothing further
-  and suppresses suggestions on that same topic in that chat for 30 days.
-- **Given** a chat that already received a proactive suggestion (accepted,
-  declined, or ignored) within the last 7 days, **when** another candidate
-  message matches the keyword filter, **then** no second-stage check or
-  suggestion happens — the rate limit is enforced in code before any model
-  call, not left to prompt instructions.
+- **Given** the bot has just been added to a group, **when** it receives the
+  membership update, **then** it posts one short message saying how to call
+  it and **does not** start a session.
+- **Given** the bot is already in a chat, **when** it is promoted, demoted or
+  its permissions change, **then** it says nothing — only joining greets.
+- **Given** a dormant chat, **when** a message arrives that does not address
+  the bot, **then** the bot neither replies nor calls the model at all.
+- **Given** a dormant chat, **when** someone @mentions the bot by its exact
+  username or replies to one of the bot's own messages, **then** a session
+  starts (this is the explicit consent R3 requires).
+- **Given** an active session, **when** a message arrives that does not
+  address the bot, **then** the bot stays silent but still records facts
+  from it — listening is not the same as speaking.
+- **Given** an active session, **when** the bot is addressed, **then** it
+  answers.
+- **Given** a message mentioning a different bot whose username merely
+  starts with this bot's username (`@orgbot_test` vs `@orgbot`), **when** it
+  arrives, **then** it does not count as addressing this bot.
+- **Given** a message with emoji before the mention, **when** it arrives,
+  **then** the mention is still recognised — entity offsets are UTF-16.
 
 **R6 — Composable fact memory**
 > As a group member, I want to ask things the bot was never specifically
@@ -244,9 +267,9 @@ Acceptance criteria:
   curated, hand-maintained priority list with sticky fallback on 429/5xx
   (same pattern as the sibling project's `gemini_fallback.py`) — no
   runtime model auto-discovery.
-- The two-stage cheap-filter pattern (R5, and the active-mode
-  session-relevance filter) always uses the **cheapest** model in the
-  fallback chain, never the primary model, for the first-pass check.
+- The active-mode session-relevance cheap filter always uses the
+  **cheapest** model in the fallback chain, never the primary model, for
+  the first-pass check.
 - PostgreSQL via `asyncpg`, **no ORM, no migration framework** — schema is
   plain SQL DDL, applied idempotently (`CREATE TABLE IF NOT EXISTS`) by
   both the bot process and the worker process on startup.
@@ -259,9 +282,15 @@ Acceptance criteria:
 - `REMINDER_MIN_INTERVAL_HOURS` — env var, default `6`. Minimum spacing
   between reminder sends to the same Telegram user id, enforced by the
   worker at send time.
-- Proactive suggestions (R5): max 1 per chat per rolling 7 days
-  (any topic); a topic that was declined or ignored is suppressed in that
-  chat for 30 days from the suggestion timestamp.
+- The bot never initiates (R5). Whether it may act is decided by
+  `bot.addressing.addressed_to_bot` — id and entity-offset comparison only,
+  never a model — and the model is consulted only after that gate passes.
+- Telegram **privacy mode must be disabled** via BotFather (`/setprivacy` ->
+  Disable, then re-add the bot to the group). With privacy mode on, a plain
+  `@mention` that is not a slash command never reaches the bot at all, which
+  would make R5's trigger unreachable and R1's silent capture impossible.
+  Note that an administrator bot receives every message regardless of this
+  setting, which is why the gate lives in code rather than relying on it.
 - Update dedup (R10): every update's `update_id` is checked against a
   `seen_updates` table before any handler logic with side effects runs.
 - Env vars: `BOT_TOKEN`, `GEMINI_API_KEY`, `DATABASE_URL`,
@@ -282,13 +311,13 @@ Acceptance criteria:
 
 | ID | Title | File | Satisfies | Depends on | Parallel group |
 |----|-------|------|-----------|-----------|----------------|
-| S1 | Data model & persistence | stories/S1-data-model.md | R1, R2, R4, R5, R8, R9, R10, R11 | — | A |
-| S2 | AI layer: Gemini, fallback, tool-calling harness, cheap classifier | stories/S2-ai-layer.md | R5, R6, R10 | — | A |
+| S1 | Data model & persistence | stories/S1-data-model.md | R1, R2, R4, R8, R9, R10, R11 | — | A |
+| S2 | AI layer: Gemini, fallback, tool-calling harness, cheap classifier | stories/S2-ai-layer.md | R6, R10 | — | A |
 | S3 | Session lifecycle: state machine, closing-question policy, dedup, decision log | stories/S3-session-lifecycle.md | R3, R4, R10 | S1 | B |
 | S4 | Core tools: facts, lists, participants, reminders, confirmation gate | stories/S4-core-tools.md | R1, R2, R6, R10, R11 | S1, S2 | B |
 | S5 | External grounding tools: web search, maps, weather | stories/S5-external-tools.md | R6, R7, R9, R10 | S2 | B |
 | S6 | Composed flows: place-check, "as usual" archive ranking, venue messages | stories/S6-composed-flows.md | R7, R8, R9 | S1, S5 | C |
-| S7 | Proactive dormant-mode trigger | stories/S7-proactive-trigger.md | R5 | S1, S2, S3 | C |
+| S7 | Addressing gate: the only trigger for acting | stories/S7-addressing-gate.md | R5 | — | A |
 | S8 | Background worker: reminder delivery + closing-question firing | stories/S8-background-worker.md | R4, R11 | S1, S3 | C |
 | S9 | Message router / end-to-end wiring | stories/S9-e2e-wiring.md | R1, R2, R3, R5, R6, R10 | S2, S3, S4, S5, S6, S7 | — |
 | S10 | Deployment: Dockerfile, Docker Compose | stories/S10-deployment.md | (infra; no new R) | S8, S9 | — |
@@ -299,11 +328,11 @@ Every requirement R1–R11 appears in at least one story's `Satisfies` cell.
 
 ```
 S1 ──┬─▶ S3 ──┬────────────────────┐
-     │        ├─▶ S7 (needs S2)    │
-     │        └─▶ S8               ├─▶ S9 ──▶ S10
-     ├─▶ S4 (needs S2)             │
-     └─▶ S6 (needs S5) ────────────┘
-S2 ──┴─▶ S5 ──▶ S6
+     │        └─▶ S8               │
+     ├─▶ S4 (needs S2)             ├─▶ S9 ──▶ S10
+     └─▶ S6 (needs S5) ────────────┤
+S2 ──┴─▶ S5 ──▶ S6                 │
+S7 (independent) ──────────────────┘
 ```
 
 Concretely (derived from each story's actual `Consumes` — an import, not
@@ -315,8 +344,8 @@ just a shared table, counts as a dependency):
 - S6 depends on S1, S5 (`resolve_and_save_place` calls `bot.tools.external.maps_lookup`;
   it does **not** import anything from S4 — the model composes S4's and
   S6's tools together only at the S9 wiring layer, not in code).
-- S7 depends on S1, S2, S3 (`bot.proactive` calls `bot.ai.classify.classify`
-  (S2) and `bot.decision_log.log_decision` (S3)).
+- S7 depends on nothing (`bot/addressing.py` imports only `python-telegram-bot`;
+  it holds no state and calls no model).
 - S8 depends on S1, S3 (`worker.closing` calls `bot.session` functions;
   `worker.reminders` only touches the `reminders` table directly — no S4
   import).
@@ -331,10 +360,11 @@ just a shared table, counts as a dependency):
   (`bot/session.py`+`bot/dedup.py`+`bot/decision_log.py`, `bot/tools/core.py`,
   `bot/tools/external.py`) with no dependencies on each other — may all
   run concurrently once Group A is done.
-- **Group C (after Group B):** S6, S7, S8 — disjoint files
-  (`bot/tools/composed.py`, `bot/proactive.py`, `worker/`) — S6 needs S5,
-  S7 needs S2+S3, S8 needs S3; none of the three needs another from this
-  group — may run concurrently once Group B is done.
+- **Group C (after Group B):** S6, S8 — disjoint files
+  (`bot/tools/composed.py`, `worker/`) — S6 needs S5, S8 needs S3; neither
+  needs the other — may run concurrently once Group B is done. S7
+  (`bot/addressing.py`) has no dependencies at all and may run at any
+  point before S9.
 - S9 and S10 run sequentially at the end — S9 touches `bot/main.py`/
   `bot/router.py` and necessarily depends on nearly everything; S10
   packages both entrypoints once they exist.

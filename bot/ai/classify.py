@@ -17,7 +17,7 @@ _BOOL_SCHEMA = types.Schema(
 async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
     """Cheap structured-JSON extraction against CLASSIFIER_MODEL. Fails
     closed (returns {}) on any error — a classifier failure must never
-    cause a proactive suggestion, a session start/stop, or an active-mode
+    cause a session start/stop or an active-mode
     tool call to fire.
 
     "Any error" is meant literally, hence the bare `except Exception`:

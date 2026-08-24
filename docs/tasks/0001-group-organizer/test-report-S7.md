@@ -1,103 +1,106 @@
-# Test report: S7 — Proactive dormant-mode trigger
+# Test report: S7 — Addressing gate (replaces the proactive trigger)
 
-**Design:** `docs/tasks/0001-group-organizer/stories/S7-proactive-trigger.md`
-(requirements in `../EPIC.md`)
-**Checked against:** branch `0001-S7-proactive-trigger`, commits `cf2d3e8..HEAD`
+**Design:** `docs/tasks/0001-group-organizer/stories/S7-addressing-gate.md`
+(requirement R5 in `../EPIC.md`, rewritten for this story)
+**Checked against:** branch `0001-S7-addressing-gate`
 **Date:** 2026-08-24
-**Verdict:** PASS — after fixing 3 defects found during verification
+**Verdict:** PASS
+
+This story **replaces** the original S7 (proactive dormant-mode trigger,
+merged as PR #8). The product decision changed: the bot must never decide on
+its own that help is wanted. R5 was rewritten, `bot/proactive.py` and its 16
+tests were deleted, and the now-unused `proactive_suggestions` table was
+dropped from the schema.
 
 ## Requirement checklist
 
-**R5 — Proactive suggestion from a dormant chat:** PASS (after fixes)
+**R5 — Explicit addressing is the only trigger:** PASS
 
-- *"...when a message matches a cheap keyword pre-filter …, then **and only
-  then** does the bot run a second, low-cost model check"* — PASS.
-  `::test_match_topic_finds_a_keyword_category` covers the filter itself
-  (including a non-match). The "and only then" half is the load-bearing part
-  and is asserted with a spy rather than assumed:
-  `::test_maybe_suggest_skips_when_no_keyword_match` returns
-  `no_keyword_match`, and the two new spy tests confirm **zero** `classify`
-  calls on the rate-limited and topic-suppressed paths.
+- *"...when it receives the membership update, then it posts one short
+  message saying how to call it and does not start a session"* — the gate
+  half is covered by `::test_bot_joining_the_chat_is_detected`; the greeting
+  and the "no session" half are S9's router (its brief now specifies both).
+- *"...when it is promoted, demoted or its permissions change, then it says
+  nothing"* — `::test_bot_being_promoted_is_not_a_join`. `bot_was_added`
+  compares old and new status rather than reading the new one, because a
+  promotion arrives as the same `my_chat_member` update and would otherwise
+  re-greet the chat. `::test_bot_leaving_is_not_a_join` and
+  `::test_another_user_joining_is_not_the_bot` cover the other two shapes.
+- *"...when a message arrives that does not address the bot, then the bot
+  neither replies nor calls the model at all"* —
+  `::test_ordinary_chatter_is_not_addressed`,
+  `::test_message_without_text_is_not_addressed`,
+  `::test_reply_to_another_person_is_not_addressed`. The "no model call"
+  half is enforced structurally: `bot/addressing.py` imports nothing from
+  `bot.ai`, so no model call is reachable from this path.
+- *"...when someone @mentions the bot by its exact username or replies to one
+  of the bot's own messages, then a session starts"* — the gate is covered by
+  `::test_plain_mention_is_addressed`,
+  `::test_mention_in_the_middle_is_addressed`,
+  `::test_username_match_is_case_insensitive`,
+  `::test_reply_to_the_bot_is_addressed`,
+  `::test_text_mention_of_the_bot_is_addressed`, and
+  `::test_mention_in_a_photo_caption_is_addressed`. Starting the session is
+  S9's.
+- *"...a different bot whose username merely starts with this bot's username
+  (`@orgbot_test` vs `@orgbot`) does not count"* —
+  `::test_a_similarly_named_bot_is_not_us`. This is why matching goes through
+  entities rather than `"@orgbot" in text`.
+- *"...with emoji before the mention, the mention is still recognised —
+  entity offsets are UTF-16"* —
+  `::test_mention_after_an_emoji_is_addressed` and
+  `::test_mention_after_several_emoji_is_addressed`.
 
-- *"...when the chat hasn't received a proactive suggestion in the last 7 days,
-  then the bot posts one short, easily-ignorable suggestion"* — PASS after
-  Defect 1. `::test_maybe_suggest_posts_when_classifier_confirms` covers the
-  happy path (one `send_message`, one row, `response` still NULL).
-  `::test_maybe_suggest_enforces_the_weekly_limit_under_concurrency` covers the
-  case the original design got wrong.
+**R5 (listening vs speaking)** — *"an active session records facts from
+unaddressed messages but stays silent"* — belongs to S9's router; its brief
+now specifies the split and the tests for it. Not verifiable in this story,
+which delivers only the gate.
 
-- *"...when someone replies affirmatively, then a session starts"* — PARTIAL by
-  design, not a gap: S7 delivers `get_pending_suggestion` /
-  `resolve_suggestion`; the actual session start on "давай" is S9's
-  `handle_dormant_message`, and its own brief tests it. Covered here by
-  `::test_get_pending_suggestion_returns_unresolved_one`,
-  `::test_get_pending_suggestion_none_when_already_resolved`,
-  `::test_resolve_suggestion_sets_response`.
+## Defects found during verification
 
-- *"...given it's ignored or declined, then the bot says nothing further and
-  suppresses suggestions on that same topic in that chat for 30 days"* — PASS.
-  `::test_maybe_suggest_topic_suppressed_after_decline`. The mirror case is
-  covered too: `::test_an_accepted_topic_is_not_suppressed` — suppression keys
-  on `response IS DISTINCT FROM 'accepted'`, so an *accepted* topic stays
-  available, which is what R5 asks for and would be easy to break.
-  A never-answered suggestion keeps `response = NULL`, which that same
-  predicate treats as suppressed — so "ignored" needs no sweeper to work.
+Both were caught by the tests before the code was committed, so neither
+reached a commit.
 
-- *"...given a chat that already received a proactive suggestion … within the
-  last 7 days, then no second-stage check or suggestion happens — the rate
-  limit is enforced in code before any model call, not left to prompt
-  instructions"* — PASS after Defect 1.
-  `::test_maybe_suggest_rate_limited_within_seven_days` plus
-  `::test_maybe_suggest_makes_no_model_call_when_rate_limited`.
-
-## Defects found during verification (all fixed on this branch)
-
-Each was **reproduced against a real Postgres before being fixed**, and each
-regression test was confirmed to fail against the original implementation
-(`git stash` on `bot/proactive.py`) before being kept. The implementation
-matched the brief verbatim, so all three were defects in the design.
-
-1. **[High — broke R5] The weekly rate limit was not enforced.** Check and
-   insert were separate statements, so two messages arriving together both
-   passed. Reproduced with `asyncio.gather`: **2 rows, 2 Telegram messages** in
-   one week, against a requirement that names this limit as code-enforced.
-   Fixed with `pg_advisory_xact_lock(chat_id)` around a conditional insert.
-2. **[High — broke R5] A failed send still silenced the chat for a week.**
-   The row was written before `send_message`. On a Telegram refusal the
-   exception escaped `maybe_suggest`, the phantom row rate-limited the chat for
-   7 days, and `get_pending_suggestion` handed it back — so the next unrelated
-   message would have been read as a reply to a suggestion nobody saw. The
-   claim is now withdrawn and the failure swallowed (R10: fail toward
-   inaction), because S9 runs this on every dormant-chat message.
-3. **[Low] `resolve_suggestion` accepted values the schema forbids**, raising
-   `CheckViolationError` from inside asyncpg. Now a `ValueError` at the call
-   site.
+1. **[High] `parse_entity` raises on a caption-only message.**
+   `RuntimeError: This Message has no 'text'` — a photo captioned
+   "@orgbot вот это место" would have crashed the handler rather than being
+   answered. Text and caption entities now go through `parse_entity` and
+   `parse_caption_entity` respectively.
+2. **[High] The UTF-16 offset problem is real, not theoretical.**
+   Demonstrated directly before writing the module: for `"🎉 @orgbot привет"`,
+   Telegram's offset is 3 while Python's index is 2, so a naive slice yields
+   `'orgbot '` and never matches `@orgbot`. One emoji anywhere earlier in a
+   message would have silently disabled the bot for that message.
 
 ## QA findings beyond the stated criteria
 
-- **[Info] The keyword filter is deliberately narrow and Russian-only.**
-  `KEYWORD_TOPICS` is three categories of literal patterns, so plain phrasings
-  like "давайте куда-нибудь поедем" do not match and no suggestion is offered.
-  That is the correct trade for R5 — a cheap pre-filter that misses is far
-  better than one that fires on ordinary chatter — but it does mean recall is
-  low by construction, and the epic's "proactive" behavior will trigger rarely.
-  Worth revisiting only with real chat logs, not by guessing more patterns.
-- **[Info] Category order in `KEYWORD_TOPICS` is significant.** "может, на
-  выходных махнём куда-то" matches both `should_go_somewhere` and `lets_go`;
-  dict order decides, and the topic chosen becomes the 30-day suppression key.
-  Correct as written, but reordering the dict would silently change which
-  topic gets suppressed.
-- **[Deferred — Low] Nothing ever writes `response = 'ignored'`.** The
-  suppression predicate treats NULL as not-accepted, so behavior is right
-  without it, but the `'ignored'` state the schema defines stays unused and
-  the two cases are indistinguishable in the decision log. Same shape as S4's
-  unused `'expired'` confirmation status; both want one sweeper.
+- **[Critical for deployment — no code fix possible] Privacy mode must be
+  disabled in BotFather.** Verified against Telegram's own documentation:
+  a bot with privacy mode enabled (**the default**) receives only slash
+  commands aimed at it, replies to its own messages, and service messages —
+  **a plain `@mention` never arrives**. Since the epic forbids commands, the
+  bot would be completely unreachable out of the box. `/setprivacy` ->
+  Disable, then re-add the bot to the group. Recorded as a global constraint
+  and belongs in S10's deployment docs.
+- **[Info] An administrator bot receives every message regardless of the
+  privacy setting.** So privacy mode can never *be* the guarantee — promoting
+  the bot would silently switch listening back on. This is the reason the
+  gate lives in code rather than relying on the platform.
+- **[Important for S9] `bot_username` must come from `bot.get_me()` at
+  startup, never a hardcoded constant or env var.** If the bot is renamed,
+  a stale username makes every mention stop matching — the bot goes
+  permanently silent with no error in the logs, which is the hardest possible
+  failure to diagnose. Flagged for S9's `bot/main.py` task.
+- **[Info] Messages from other bots.** The gate answers only "was this
+  addressed to me". S9 should additionally ignore messages whose sender is a
+  bot, or two bots mentioning each other could loop.
 
 ## Verification methods used
 
-No live model calls — the Gemini free-tier quota is still exhausted, and
-`classify` is monkeypatched throughout (its own live behavior was verified in
-S2). Every test runs against a **real Postgres** via the `db_pool` fixture;
-Telegram is the only other mocked boundary. The concurrency defect was
-reproduced with genuine concurrent coroutines against a real database, not
-simulated. Suite: **147 passed**.
+No database and no model — this story touches neither. All 17 tests build
+real `python-telegram-bot` objects (`Message`, `MessageEntity`,
+`ChatMemberUpdated`, the `ChatMember*` status classes) and exercise the real
+library parsers, so the UTF-16 behavior tested is the library's own, not a
+reimplementation. The two Telegram platform facts above were checked against
+`core.telegram.org` documentation rather than recalled. Suite: **148 passed**
+(was 147; −16 proactive, +17 addressing).

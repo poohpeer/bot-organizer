@@ -15,9 +15,9 @@
 | S4 | 0001-S4-core-tools | complete | 806c251..HEAD | review: 8 defects fixed; tester PASS | — | R1+R10 verified live |
 | S5 | 0001-S5-external-tools | complete | e5938e6..HEAD | review: 6 defects fixed; tester PASS | — | maps not live-verified (no API key) |
 | S6 | 0001-S6-composed-flows | complete | 7a0813b..HEAD | review: 6 defects fixed; tester PASS | — | maps verified LIVE (key supplied) |
-| S7 | 0001-S7-proactive-trigger | complete | cf2d3e8..HEAD | review: 3 defects fixed; tester PASS | — | rate limit was racy — now advisory-locked |
+| S7 | 0001-S7-addressing-gate | complete | see PR | tester PASS | — | REPLACED the proactive trigger (PR #8) after a product decision |
 | S8 | — | blocked | — | — | — | waits on S1, S3 |
-| S9 | — | blocked | — | — | — | waits on S2, S3, S4, S5, S6, S7 |
+| S9 | — | blocked | — | — | — | brief rewritten for the addressing gate |
 | S10 | — | blocked | — | — | — | waits on S8, S9 |
 
 ## Findings to address
@@ -88,3 +88,20 @@
   resolve_suggestion let a schema-forbidden value through to asyncpg.
   Confirmed correct without change: zero model calls on the rate-limited and
   suppressed paths, which is R5's explicit wording. Suite: 147 passed.
+- 2026-08-24: PRODUCT PIVOT. The bot must never decide on its own that help
+  is wanted — it acts only when @mentioned or replied to. R5 was rewritten
+  from "proactive suggestion" to "explicit addressing is the only trigger",
+  and the S7 merged an hour earlier (PR #8) was removed: bot/proactive.py,
+  its 16 tests, and the proactive_suggestions table are gone. Replaced by
+  bot/addressing.py — a model-free gate (17 tests). Two Telegram facts
+  checked against the docs, both load-bearing: privacy mode is ON by default
+  and does NOT deliver plain @mentions (so it must be disabled in BotFather
+  or the bot is unreachable, since the epic forbids commands), and an admin
+  bot receives everything regardless (so the gate cannot rely on the
+  platform). Two defects caught by tests before commit: parse_entity raises
+  on caption-only messages, and UTF-16 entity offsets break naive slicing
+  (one emoji before a mention was enough). R3/R4 amended per the user:
+  stopping is model-understood with no keyword list anywhere, the event date
+  may live only in the chat title, and an explicit human stop always
+  overrides R4's snooze. S9's brief rewritten — luckily it was not yet
+  built. Suite: 148 passed.

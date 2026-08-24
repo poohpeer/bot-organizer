@@ -12,14 +12,19 @@ that drives it.
 **Parallel-safe with:** none (final integration)
 **Requirements & global constraints:** see `../EPIC.md`
 
-**One documented v1 simplification:** when a session starts from an
-*accepted proactive suggestion* (R5), the `activity_type` is taken from a
-small static mapping keyed by the suggestion's keyword topic (not
-re-extracted from the original trigger message) — good enough for a
-coarse label, and the model fills in real details (place, date, etc.) as
-facts once the session is active. An *explicit* start request ("start
-watching for the picnic") gets a real extracted label, since that's the
-more common and more visible path.
+**Two rules bind every task below:**
+
+1. **The bot acts only when addressed** (R5). `bot.addressing` decides that,
+   with no model involved. In a dormant chat an unaddressed message is
+   dropped before any model call. In an *active* session an unaddressed
+   message is still read and its facts recorded (R1's silent capture), but
+   the bot does not reply.
+2. **Stopping is understood, never matched** (R3). There is no keyword list
+   or regular expression for "we're done" anywhere in the router. An
+   addressed message goes to the model, which decides among: answer, start,
+   stop. Any phrasing that means "you're not needed" must close the session,
+   including when the event was silently moved and R4's snooze is still
+   running — an explicit human stop always wins.
 
 ---
 
@@ -32,213 +37,45 @@ more common and more visible path.
 - Create: `tests/test_router.py`
 
 **Interfaces:**
-- Consumes: `bot.session.start_session`/`SessionAlreadyActiveError` (S3),
-  `bot.proactive.get_pending_suggestion`/`resolve_suggestion`/`maybe_suggest`
-  (S7), `bot.ai.classify.classify`/`extract` (S2), `bot.decision_log.log_decision` (S3).
-- Produces: `async bot.router.handle_dormant_message(pool, telegram_bot, chat_id, user_id, text) -> None`.
+- Consumes: `bot.addressing.addressed_to_bot`/`bot_was_added` (S7),
+  `bot.session.start_session`/`SessionAlreadyActiveError` (S3),
+  `bot.ai.classify.extract` (S2), `bot.decision_log.log_decision` (S3).
+- Produces:
+  - `async bot.router.handle_dormant_message(pool, telegram_bot, message, bot_id, bot_username) -> None`
+  - `async bot.router.handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_username) -> None`
 
-- [ ] **Step 1: Write the failing test** — create `tests/test_router.py`:
-  ```python
-  from unittest.mock import AsyncMock, MagicMock
+**Routing rule (R5) — no model runs before the gate:**
 
-  import bot.router as router
-  import bot.session as session
+```
+addressed_to_bot(message, bot_id, bot_username)?
+├── no  ──▶ return immediately. No model call, no DB write, no reply.
+└── yes ──▶ extract activity_type + event_date from the message, using
+            chat.title as additional context (R4: the date may live only
+            in the chat title, e.g. "Пикник 15 сентября").
+            ├── extraction confident ──▶ start_session, confirm in chat
+            └── not confident        ──▶ ask what to track; no session yet
+```
 
+`handle_bot_added` posts one short message explaining how to call the bot
+(mention or reply) and **starts no session** — being added is not consent.
+It fires only on an actual join: `bot_was_added` returns False for a
+promotion, so a permission change never re-greets the chat.
 
-  def _pool():
-      return MagicMock(name="pool")
+**Tests must cover, at minimum:**
+- An unaddressed message in a dormant chat: no reply, and the `extract`
+  mock is **not awaited** — R5's "no model call" is the point, so assert it
+  directly rather than only asserting silence.
+- An addressed message naming an activity: a session starts and the bot
+  confirms.
+- An addressed message whose event date appears only in `chat.title`: the
+  session's `event_date` is taken from the title.
+- An addressed message too vague to extract an activity: the bot asks what
+  to track and starts no session.
+- `SessionAlreadyActiveError`: the bot says it is already tracking, and does
+  not create a second session.
+- Bot added to a chat: exactly one greeting, no session row.
+- Bot promoted: nothing sent.
 
-
-  async def test_dormant_accepts_pending_suggestion_and_starts_session(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      pending = {"id": 7, "topic_key": "lets_go"}
-      monkeypatch.setattr(router.proactive, "get_pending_suggestion", AsyncMock(return_value=pending))
-      monkeypatch.setattr(router.proactive, "resolve_suggestion", AsyncMock())
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
-      started = {"id": 42, "chat_id": 1}
-      monkeypatch.setattr(router.session, "start_session", AsyncMock(return_value=started))
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-
-      await router.handle_dormant_message(pool, telegram_bot, chat_id=1, user_id=99, text="давай")
-
-      router.proactive.resolve_suggestion.assert_awaited_once_with(pool, 7, "accepted")
-      router.session.start_session.assert_awaited_once_with(pool, 1, "trip")
-      telegram_bot.send_message.assert_awaited_once()
-
-
-  async def test_dormant_declines_pending_suggestion_when_not_accepted(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      pending = {"id": 7, "topic_key": "lets_go"}
-      monkeypatch.setattr(router.proactive, "get_pending_suggestion", AsyncMock(return_value=pending))
-      monkeypatch.setattr(router.proactive, "resolve_suggestion", AsyncMock())
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
-      monkeypatch.setattr(router.session, "start_session", AsyncMock())
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-
-      await router.handle_dormant_message(pool, telegram_bot, chat_id=1, user_id=99, text="не сегодня")
-
-      router.proactive.resolve_suggestion.assert_awaited_once_with(pool, 7, "declined")
-      router.session.start_session.assert_not_awaited()
-      telegram_bot.send_message.assert_not_awaited()
-
-
-  async def test_dormant_explicit_start_when_no_pending_suggestion(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router.proactive, "get_pending_suggestion", AsyncMock(return_value=None))
-      monkeypatch.setattr(router, "extract", AsyncMock(return_value={"is_start": True, "activity_type": "picnic"}))
-      started = {"id": 42, "chat_id": 1}
-      monkeypatch.setattr(router.session, "start_session", AsyncMock(return_value=started))
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-      monkeypatch.setattr(router.proactive, "maybe_suggest", AsyncMock())
-
-      await router.handle_dormant_message(pool, telegram_bot, chat_id=1, user_id=99, text="start watching for the picnic")
-
-      router.session.start_session.assert_awaited_once_with(pool, 1, "picnic")
-      telegram_bot.send_message.assert_awaited_once()
-      router.proactive.maybe_suggest.assert_not_awaited()
-
-
-  async def test_dormant_explicit_start_race_reports_already_active(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router.proactive, "get_pending_suggestion", AsyncMock(return_value=None))
-      monkeypatch.setattr(router, "extract", AsyncMock(return_value={"is_start": True, "activity_type": "picnic"}))
-      monkeypatch.setattr(
-          router.session, "start_session",
-          AsyncMock(side_effect=session.SessionAlreadyActiveError("already active")),
-      )
-
-      await router.handle_dormant_message(pool, telegram_bot, chat_id=1, user_id=99, text="start watching for the picnic")
-
-      telegram_bot.send_message.assert_awaited_once()
-      assert "уже" in telegram_bot.send_message.await_args.kwargs["text"].lower()
-
-
-  async def test_dormant_falls_through_to_proactive_filter(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router.proactive, "get_pending_suggestion", AsyncMock(return_value=None))
-      monkeypatch.setattr(router, "extract", AsyncMock(return_value={"is_start": False}))
-      monkeypatch.setattr(router.proactive, "maybe_suggest", AsyncMock(return_value={"suggested": False, "reason": "no_keyword_match"}))
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-
-      await router.handle_dormant_message(pool, telegram_bot, chat_id=1, user_id=99, text="nice weather today")
-
-      router.proactive.maybe_suggest.assert_awaited_once_with(pool, telegram_bot, 1, "nice weather today")
-  ```
-
-- [ ] **Step 2: Run it, confirm it fails**
-  ```bash
-  uv run pytest tests/test_router.py -v
-  ```
-  Expected: `ModuleNotFoundError: No module named 'bot.router'`.
-
-- [ ] **Step 3: Implement `bot/router.py`**
-  ```python
-  import logging
-
-  from google.genai import types
-
-  import bot.decision_log as decision_log
-  import bot.proactive as proactive
-  import bot.session as session
-  from bot.ai.classify import classify, extract
-
-  log = logging.getLogger(__name__)
-
-  _TOPIC_TO_ACTIVITY_TYPE = {
-      "havent_in_a_while": "gathering",
-      "should_go_somewhere": "trip",
-      "lets_go": "trip",
-  }
-
-  _STARTED_TEXT_TEMPLATE = "Принял, слежу за: {activity_type}. Скажите «хватит», когда закончим."
-  _ALREADY_ACTIVE_TEXT = "Уже слежу за чем-то в этом чате — сначала закончим то."
-
-  _ACCEPT_SUGGESTION_INSTRUCTION = (
-      "The bot just asked in a group chat: 'Want help organizing that?'. "
-      "Given the reply below, answer true only if it's a clear yes/go-ahead. "
-      "Answer false for anything else (a no, a brush-off, or an unrelated message)."
-  )
-
-  _START_SCHEMA = types.Schema(
-      type=types.Type.OBJECT,
-      properties={
-          "is_start": types.Schema(type=types.Type.BOOLEAN),
-          "activity_type": types.Schema(
-              type=types.Type.STRING,
-              description="A short 1-3 word label, e.g. 'picnic', 'birthday', 'trip'.",
-          ),
-      },
-      required=["is_start"],
-  )
-  _START_INSTRUCTION = (
-      "The bot is currently dormant in a group chat. Answer is_start=true "
-      "only if this message is an explicit, direct instruction telling the "
-      "bot to start tracking/organizing something (e.g. 'start watching for "
-      "the picnic', 'keep an eye on this, we are planning a trip'). Ordinary "
-      "chat about an event that isn't addressed to the bot is is_start=false. "
-      "If is_start is true, also give a short activity_type label."
-  )
-
-
-  async def handle_dormant_message(pool, telegram_bot, chat_id: int, user_id: int | None, text: str) -> None:
-      pending = await proactive.get_pending_suggestion(pool, chat_id)
-      if pending is not None:
-          accepted = await classify(_ACCEPT_SUGGESTION_INSTRUCTION, text)
-          if accepted:
-              await proactive.resolve_suggestion(pool, pending["id"], "accepted")
-              activity_type = _TOPIC_TO_ACTIVITY_TYPE.get(pending["topic_key"], "gathering")
-              row = await session.start_session(pool, chat_id, activity_type)
-              await telegram_bot.send_message(
-                  chat_id=chat_id, text=_STARTED_TEXT_TEMPLATE.format(activity_type=activity_type)
-              )
-              await decision_log.log_decision(
-                  pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_start",
-                  decision={"trigger": "proactive_accept", "session_id": row["id"]},
-              )
-          else:
-              await proactive.resolve_suggestion(pool, pending["id"], "declined")
-              await decision_log.log_decision(
-                  pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="proactive_response",
-                  decision={"result": "declined_or_unrelated"},
-              )
-          return
-
-      start = await extract(_START_INSTRUCTION, text, _START_SCHEMA)
-      if start.get("is_start"):
-          activity_type = start.get("activity_type") or "gathering"
-          try:
-              row = await session.start_session(pool, chat_id, activity_type)
-          except session.SessionAlreadyActiveError:
-              await telegram_bot.send_message(chat_id=chat_id, text=_ALREADY_ACTIVE_TEXT)
-              return
-          await telegram_bot.send_message(
-              chat_id=chat_id, text=_STARTED_TEXT_TEMPLATE.format(activity_type=activity_type)
-          )
-          await decision_log.log_decision(
-              pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_start",
-              decision={"trigger": "explicit", "session_id": row["id"]},
-          )
-          return
-
-      result = await proactive.maybe_suggest(pool, telegram_bot, chat_id, text)
-      await decision_log.log_decision(
-          pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="dormant_router", decision=result
-      )
-  ```
-
-- [ ] **Step 4: Run tests, confirm pass**
-  ```bash
-  uv run pytest tests/test_router.py -v
-  ```
-  Expected: `5 passed`.
-
-- [ ] **Step 5: Commit**
-  ```bash
-  git add bot/router.py tests/test_router.py
-  git commit -m "Add dormant-chat message routing (session start, proactive delegation)"
-  ```
-
----
 
 ### Task 2: Active-session routing
 
@@ -254,8 +91,28 @@ more common and more visible path.
   `execute_confirmed_action`/`list_show`/`get_participants` (S4),
   `bot.tools.core.build_core_registry`, `bot.tools.external.build_external_registry`,
   `bot.tools.composed.build_composed_registry` (S4/S5/S6),
-  `bot.ai.tool_loop.run_tool_loop`, `bot.ai.client.fallback` (S2).
-- Produces: `async bot.router.handle_active_message(pool, telegram_bot, active_session, user_id, text) -> None`.
+  `bot.ai.tool_loop.run_tool_loop`, `bot.ai.client.fallback` (S2),
+  `bot.addressing.addressed_to_bot` (S7).
+- Produces: `async bot.router.handle_active_message(pool, telegram_bot, active_session, message, bot_id, bot_username) -> None`.
+
+**Split listening from speaking (R5 + R1).** An active session reads every
+message but answers only addressed ones:
+
+```
+unaddressed ──▶ silent capture: extract facts/list items, record them,
+                touch_activity, send nothing at all
+addressed   ──▶ closing-question reply? pending confirmation? otherwise the
+                full tool loop, and reply in chat
+```
+
+The silent-capture path is what makes R1 work ("надо купить помидоры" adds
+three items with no announcement). It must never call `send_message`.
+
+**Stopping is model-understood, not matched (R3).** The addressed path asks
+the model to classify intent; there is no keyword list for "we're done". A
+stop closes the session immediately even when R4's `closing_question_snoozed_until`
+is still in the future — the snooze suppresses the bot's *own* asking, never
+a human's explicit instruction.
 
 - [ ] **Step 1: Write the failing test** — append to `tests/test_router.py`:
   ```python

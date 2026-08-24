@@ -20,7 +20,7 @@ MODELS = [
     "gemma-4-31b-it",
 ]
 
-# Cheap/fast model for the two-stage filter checks (R5, active-mode
+# Cheap/fast model for the two-stage filter checks (active-mode
 # relevance) so the primary model is never spent on a binary "is this even
 # relevant" question.
 #
@@ -30,7 +30,7 @@ MODELS = [
 # the slowest and least reliable — repeated 504 DEADLINE_EXCEEDED and
 # empty completions during verification. Since classify()/extract() fail
 # closed, a flaky classifier silently degrades into "never suggest
-# anything" (R5) rather than erroring visibly, so this path needs the
+# anything" rather than erroring visibly, so this path needs the
 # fast, dependable tier, not the last-resort one.
 CLASSIFIER_MODEL = "gemini-3.1-flash-lite"
 
