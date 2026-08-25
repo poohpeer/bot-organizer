@@ -1,6 +1,6 @@
 # Progress: Group organizer bot (0001)
 
-**Status:** in_progress
+**Status:** complete
 **Merge policy:** auto-merge
 
 **Test Postgres:** local Docker container `bot-organizer-test-pg`,
@@ -18,7 +18,7 @@
 | S7 | 0001-S7-addressing-gate | complete | see PR | tester PASS | — | REPLACED the proactive trigger (PR #8) after a product decision |
 | S8 | 0001-S8-background-worker | complete | 02a44e6..HEAD | review: 5 defects fixed; tester PASS | — | R4 auto-close-without-asking caught |
 | S9 | 0001-S9-e2e-wiring | complete | 0ab6507..HEAD | review: 4 defects + 1 prod issue fixed; tester PASS | — | R2 was unbuilt; zoneinfo/Postgres zone mismatch found |
-| S10 | — | blocked | — | — | — | waits on S8, S9 |
+| S10 | 0001-S10-deployment | complete | see PR | stack built and run; tester PASS | — | bot reached Telegram from the container |
 | S11 | 0001-S11-per-chat-timezone | complete | see PR | tester PASS | — | added mid-epic; closes the timezone debt from S3/S4/S8 |
 
 ## Findings to address
@@ -150,3 +150,18 @@
   one of the 113 legacy aliases made the closing-question query raise for the
   whole batch — one chat's bad zone silencing the bot everywhere. Zones are
   now validated against pg_timezone_names on write. Suite: 218 passed.
+- 2026-08-25: S10 — Dockerfile + docker-compose (postgres/bot/worker), written
+  and verified in the parent session by actually building and running the
+  stack. The bot resolved its identity through Telegram FROM INSIDE the
+  container (id=8998516801 username=pooh_organizer_bot), which proves image,
+  env plumbing, network and token together. Verified rather than assumed: 10
+  tables created by the app's own DDL, no .env or secret values in the image,
+  a row surviving both --force-recreate and a full down/up, and the
+  unless-stopped policy restarting a self-exiting container 5 times in 18s.
+  Two brief defects fixed: .env.example lacked the three variables S11 added,
+  and the healthcheck tested the server rather than the database. A method
+  correction is recorded — the first restart test used `docker kill`, which
+  correctly does NOT restart, since unless-stopped must not override a manual
+  stop.
+  EPIC COMPLETE: 10 stories + S11, 218 tests. Remaining: a live group test,
+  which needs a human to add @pooh_organizer_bot to a chat and talk to it.

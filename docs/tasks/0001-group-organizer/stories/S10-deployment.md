@@ -216,3 +216,51 @@ implementation for deployment.
   git add Dockerfile .dockerignore docker-compose.yml .env.example docs/deployment.md
   git commit -m "Add Dockerfile and docker-compose deployment (bot + worker + Postgres)"
   ```
+
+---
+
+## Implementation notes (added during S10)
+
+Written in the parent session rather than dispatched: the value here is in
+actually building and running the stack, not in transcribing YAML.
+
+**Divergences from the brief, all verified:**
+
+1. **`.env.example` was missing three variables.** `DEFAULT_TIMEZONE`,
+   `QUIET_UNTIL_HOUR` and `QUIET_FROM_HOUR` were added by S11, after this
+   story was written. A deployment following the brief verbatim would have
+   silently used the code defaults.
+2. **The healthcheck now names the database.** `pg_isready -U ${POSTGRES_USER}`
+   checks the server, not the database the app uses; `-d bot_organizer` makes
+   `service_healthy` mean what the `depends_on` is relied upon to mean.
+3. **The privacy-mode warning is the first section of `docs/deployment.md`,**
+   not a footnote. It is the single thing that makes the bot appear completely
+   dead, it cannot be fixed in code, and it requires re-adding the bot to the
+   group to take effect.
+
+## What was actually verified, not assumed
+
+- `docker compose up -d --build` brings all three services up clean.
+- **The bot reached Telegram from inside the container**, resolving its own
+  identity through `get_me()`: `id=8998516801 username=pooh_organizer_bot`.
+  This is the real end-to-end proof — image, env plumbing, network and token
+  all work together.
+- The worker logs `Worker started, polling every 60s`.
+- All 10 tables are created in the Compose Postgres by the app's own
+  idempotent DDL (`proactive_suggestions` correctly absent since the pivot).
+- **No secrets in the image:** no `.env` anywhere in the filesystem, and zero
+  secret values in the image config.
+- **Volume persistence:** a row written before `docker compose down` survived
+  both a `--force-recreate` of the app services and a full `down`/`up`.
+- **`restart: unless-stopped` works in this daemon** — a container that exits
+  on its own restarted 5 times in 18 seconds, and all three services carry the
+  policy.
+
+**A correction worth recording:** the first restart test used
+`docker kill`, and the container stayed down. That is not a bug — `unless-stopped`
+deliberately does not override manual intervention, or `docker stop` could
+never stop anything. Two further attempts failed for environmental reasons
+(the slim image has no `ps`/`pkill`; host-side kills are not permitted), so the
+policy was verified with a separate throwaway container that exits by itself.
+The behaviour is now stated precisely in the deployment docs rather than
+generically.

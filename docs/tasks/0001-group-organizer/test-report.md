@@ -5,6 +5,7 @@ per story rather than overwritten on each run. Latest first.
 
 | Story | Report | Verdict |
 |-------|--------|---------|
+| S10 — Deployment | [test-report-S10.md](test-report-S10.md) | PASS (stack run, not just parsed) |
 | S9 — Message router / wiring | [test-report-S9.md](test-report-S9.md) | PASS (4 defects + 1 prod issue) |
 | S11 — Per-chat timezone | [test-report-S11.md](test-report-S11.md) | PASS |
 | S8 — Background worker | [test-report-S8.md](test-report-S8.md) | PASS (5 defects fixed) |
