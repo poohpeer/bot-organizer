@@ -1,0 +1,14 @@
+# Run the image CI published instead of building one locally.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+#
+# Useful on a host that should not have a build toolchain, or to run exactly
+# the artifact that passed CI rather than a fresh build of the same source.
+# `docker compose pull` first to pick up a newer :latest.
+services:
+  bot:
+    build: !reset null
+    image: ghcr.io/poohpeer/bot-organizer:${BOT_IMAGE_TAG:-latest}
+  worker:
+    build: !reset null
+    image: ghcr.io/poohpeer/bot-organizer:${BOT_IMAGE_TAG:-latest}
