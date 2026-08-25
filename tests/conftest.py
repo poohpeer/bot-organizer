@@ -53,3 +53,19 @@ def _no_quiet_hours(monkeypatch):
 
     monkeypatch.setattr(bot.session, "QUIET_UNTIL_HOUR", 0)
     monkeypatch.setattr(bot.session, "QUIET_FROM_HOUR", 24)
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_http_client():
+    """Drop the module-global httpx client between tests.
+
+    `bot.tools.external` keeps one client for the whole process, which is right
+    in production and wrong across tests: a client created inside one test's
+    event loop is unusable from the next one, and the failure surfaces in
+    whichever test happens to run second — not in the one that leaked it.
+    """
+    import bot.tools.external as external
+
+    external._shared_client = None
+    yield
+    external._shared_client = None
