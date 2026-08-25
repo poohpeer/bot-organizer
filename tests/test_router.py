@@ -394,3 +394,90 @@ async def test_tool_loop_failure_sends_fixed_fallback_message(db_pool, monkeypat
     await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
 
     telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text=router._FALLBACK_MESSAGE)
+
+
+async def test_two_simultaneous_stops_post_one_summary(db_pool, monkeypatch):
+    """close_session returns False for whoever lost the race, precisely so the
+    loser doesn't post a second closing summary."""
+    import asyncio
+
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
+    monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="ИТОГИ"))
+    telegram_bot = AsyncMock()
+
+    await asyncio.gather(
+        router.handle_active_message(db_pool, telegram_bot, active, _message("@orgbot всё"), BOT_ID, BOT_USERNAME),
+        router.handle_active_message(db_pool, telegram_bot, active, _message("@orgbot спасибо"), BOT_ID, BOT_USERNAME),
+    )
+
+    assert telegram_bot.send_message.await_count == 1
+
+
+async def test_a_late_yes_to_an_already_closed_session_says_so(db_pool, monkeypatch):
+    """The worker's auto-close can beat a reply. Posting the summary anyway
+    tells the person they closed it, which is not what happened."""
+    active = await _new_active_session(db_pool)
+    await db_pool.execute(
+        "UPDATE sessions SET closing_question_asked_at = now() WHERE id = $1", active["id"]
+    )
+    active = await db_pool.fetchrow("SELECT * FROM sessions WHERE id = $1", active["id"])
+    await session.close_session(db_pool, active["id"], reason="auto_close_silence")
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
+    monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="ИТОГИ"))
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot да, всё"), BOT_ID, BOT_USERNAME
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] == router._ALREADY_CLOSED
+    row = await db_pool.fetchrow("SELECT closed_reason FROM sessions WHERE id = $1", active["id"])
+    assert row["closed_reason"] == "auto_close_silence"
+
+
+async def test_a_confirmed_action_that_did_nothing_is_not_reported_as_done(db_pool, monkeypatch):
+    """R10 forbids the confident-but-wrong answer: if the item vanished between
+    proposal and confirmation, "готово" claims a deletion that never happened."""
+    active = await _new_active_session(db_pool)
+    await core_tools.list_remove_item(db_pool, active["id"], "колбаса")
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot да"), BOT_ID, BOT_USERNAME
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] == router._CONFIRMED_NOTHING
+
+
+async def test_a_participants_dm_reply_updates_their_status(db_pool, monkeypatch):
+    """R2's third criterion. A DM has no session of its own, so without this the
+    reply falls into the dormant path and tries to start a new session."""
+    active = await _new_active_session(db_pool)
+    await core_tools.set_participant(db_pool, active["id"], "Маша", "unknown", user_id=333)
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
+    telegram_bot = AsyncMock()
+    dm = Message(
+        message_id=1, date=dt.datetime.now(dt.timezone.utc),
+        chat=Chat(id=333, type="private"),
+        from_user=User(id=333, first_name="Маша", is_bot=False), text="да, приду",
+    )
+
+    assert await router.handle_private_message(db_pool, telegram_bot, dm) is True
+
+    rows = await db_pool.fetch("SELECT display_name, status FROM participants WHERE session_id = $1", active["id"])
+    assert [(r["display_name"], r["status"]) for r in rows] == [("Маша", "confirmed")]
+
+
+async def test_a_dm_from_someone_with_no_pending_nudge_falls_through(db_pool, monkeypatch):
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
+    telegram_bot = AsyncMock()
+    dm = Message(
+        message_id=1, date=dt.datetime.now(dt.timezone.utc),
+        chat=Chat(id=999, type="private"),
+        from_user=User(id=999, first_name="Кто-то", is_bot=False), text="привет",
+    )
+
+    assert await router.handle_private_message(db_pool, telegram_bot, dm) is False
+    telegram_bot.send_message.assert_not_awaited()

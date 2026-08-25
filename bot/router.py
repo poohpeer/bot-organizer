@@ -163,6 +163,8 @@ async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_userna
 
 # --- Active-session routing --------------------------------------------------
 
+_ALREADY_CLOSED = "Эта сессия уже закрыта."
+_CONFIRMED_NOTHING = "Не получилось это сделать — похоже, уже неактуально."
 _STILL_ACTIVE_ACK = "Понял, продолжаю следить."
 _CONFIRMED_DONE = "Готово."
 _CONFIRMED_CANCELLED = "Отменил."
@@ -303,16 +305,23 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         reply = (await extract(_CLOSING_REPLY_INSTRUCTION, text, _YES_NO_UNRELATED_SCHEMA)).get("reply")
         if reply == "yes":
             summary = await _summarize_session(pool, session_id)
-            await session.record_closing_reply(pool, session_id, continued=False)
-            await telegram_bot.send_message(chat_id=chat_id, text=summary)
+            # False means the session had already closed — the worker's
+            # auto-close beat a late reply. Say so rather than posting a
+            # summary that implies this person closed it.
+            applied = await session.record_closing_reply(pool, session_id, continued=False)
+            await telegram_bot.send_message(
+                chat_id=chat_id, text=summary if applied else _ALREADY_CLOSED
+            )
             await decision_log.log_decision(
                 pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="closing_reply",
                 decision={"reply": "yes", "session_id": session_id},
             )
             return
         if reply == "no":
-            await session.record_closing_reply(pool, session_id, continued=True)
-            await telegram_bot.send_message(chat_id=chat_id, text=_STILL_ACTIVE_ACK)
+            applied = await session.record_closing_reply(pool, session_id, continued=True)
+            await telegram_bot.send_message(
+                chat_id=chat_id, text=_STILL_ACTIVE_ACK if applied else _ALREADY_CLOSED
+            )
             await decision_log.log_decision(
                 pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="closing_reply",
                 decision={"reply": "no", "session_id": session_id},
@@ -332,7 +341,14 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
                 pool, pending_confirmation["id"], confirmed=True
             )
             result = await core_tools.execute_confirmed_action(pool, telegram_bot, resolved)
-            await telegram_bot.send_message(chat_id=chat_id, text=_CONFIRMED_DONE)
+            # resolve_confirmation returns None when the row was already
+            # resolved, and the action can legitimately find nothing to do.
+            # Reporting "готово" either way tells the group something happened
+            # when it did not — the confident-but-wrong answer R10 forbids.
+            await telegram_bot.send_message(
+                chat_id=chat_id,
+                text=_CONFIRMED_DONE if result.get("status") == "executed" else _CONFIRMED_NOTHING,
+            )
             await decision_log.log_decision(
                 pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="confirmation_reply",
                 decision={"reply": "yes", "confirmation_id": pending_confirmation["id"], "result": result},
@@ -349,8 +365,16 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         # "unrelated" -> fall through to normal processing below.
 
     if await classify(_STOP_INSTRUCTION, text):
+        # close_session returns False when someone (or the worker's auto-close)
+        # got there first. Posting the summary regardless means two people
+        # saying "спасибо, всё" at once get two closing summaries.
         summary = await _summarize_session(pool, session_id)
-        await session.close_session(pool, session_id, reason="explicit_stop")
+        if not await session.close_session(pool, session_id, reason="explicit_stop"):
+            await decision_log.log_decision(
+                pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_stop",
+                decision={"trigger": "explicit", "session_id": session_id, "result": "already_closed"},
+            )
+            return
         await telegram_bot.send_message(chat_id=chat_id, text=summary)
         await decision_log.log_decision(
             pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_stop",
@@ -374,3 +398,55 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     )
     if reply_text.strip():
         await telegram_bot.send_message(chat_id=chat_id, text=reply_text)
+
+
+_DM_REPLY_INSTRUCTION = (
+    "A group member was privately asked whether they are coming to a planned "
+    "outing. Read their reply and answer 'yes' if they are coming, 'no' if "
+    "they are not, and 'unrelated' if the message is not an answer to that "
+    "question at all."
+)
+
+
+async def handle_private_message(pool, telegram_bot, message) -> bool:
+    """Record a participant's answer to a private nudge (R2).
+
+    A DM has no session of its own, so this looks the sender up among the
+    participants still marked unknown in any active session. Returns False when
+    the message isn't an answer to a pending nudge, so the caller can fall
+    through to ordinary handling.
+    """
+    user_id = message.from_user.id if message.from_user else None
+    if user_id is None:
+        return False
+
+    pending = await pool.fetchrow(
+        """
+        SELECT p.id, p.session_id, p.display_name, s.chat_id
+        FROM participants p JOIN sessions s ON s.id = p.session_id
+        WHERE p.user_id = $1 AND p.status = 'unknown' AND s.status = 'active'
+        ORDER BY p.created_at DESC LIMIT 1
+        """,
+        user_id,
+    )
+    if pending is None:
+        return False
+
+    text = _text_of(message)
+    reply = (await extract(_DM_REPLY_INSTRUCTION, text, _YES_NO_UNRELATED_SCHEMA)).get("reply")
+    if reply not in ("yes", "no"):
+        return False
+
+    status = "confirmed" if reply == "yes" else "declined"
+    await core_tools.set_participant(
+        pool, pending["session_id"], pending["display_name"], status, user_id=user_id
+    )
+    await telegram_bot.send_message(
+        chat_id=user_id,
+        text="Записал, спасибо!" if reply == "yes" else "Понял, передам.",
+    )
+    await decision_log.log_decision(
+        pool, chat_id=pending["chat_id"], user_id=user_id, raw_text=text,
+        stage="participant_dm_reply", decision={"status": status, "session_id": pending["session_id"]},
+    )
+    return True

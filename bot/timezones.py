@@ -93,10 +93,24 @@ async def chat_timezone(pool, chat_id: int) -> ZoneInfo:
     return ZoneInfo(DEFAULT_TIMEZONE)
 
 
+async def known_to_postgres(pool, name: str) -> bool:
+    """Whether Postgres will accept this name in `AT TIME ZONE`.
+
+    Python and Postgres do not ship the same list: zoneinfo knows 599 zones to
+    Postgres's 487, and the 113 extras are mostly legacy aliases —
+    "America/Buenos_Aires", "US/Hawaii" — exactly what a model reaches for.
+    Storing one is worse than rejecting it: the closing-question query would
+    then raise for the whole batch, so one chat's bad zone silences the bot
+    everywhere.
+    """
+    return await pool.fetchval("SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = $1)", name)
+
+
 async def set_chat_timezone(pool, chat_id: int, name: str) -> bool:
     """Record a chat's zone. Returns False for anything not a real IANA name,
-    so a hallucinated "MSK" or "UTC+3" is refused rather than stored."""
-    if not is_valid_timezone(name):
+    so a hallucinated "MSK" or "UTC+3" is refused rather than stored — and for
+    anything Postgres would later choke on."""
+    if not is_valid_timezone(name) or not await known_to_postgres(pool, name):
         return False
     await pool.execute("UPDATE chats SET timezone = $2 WHERE chat_id = $1", chat_id, name)
     return True
@@ -129,7 +143,7 @@ async def learn_timezone_from_coordinates(pool, chat_id: int, lat: float, lon: f
         log.warning("Timezone lookup failed for %s,%s", lat, lon, exc_info=True)
         return None
 
-    if not is_valid_timezone(name):
+    if not is_valid_timezone(name) or not await known_to_postgres(pool, name):
         return None
     await pool.execute("UPDATE chats SET timezone = $2 WHERE chat_id = $1", chat_id, name)
     return name

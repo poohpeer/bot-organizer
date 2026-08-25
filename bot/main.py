@@ -42,6 +42,13 @@ async def route_update(pool, telegram_bot, message, bot_id, bot_username, *, upd
         # Two bots addressing each other would otherwise loop forever.
         return
 
+    # A private chat carries no session of its own; it is where participants
+    # answer the nudge R2 sends them. Only if this isn't such an answer does it
+    # fall through to ordinary handling.
+    if message.chat.type == "private":
+        if await router.handle_private_message(pool, telegram_bot, message):
+            return
+
     active = await session.get_active_session(pool, message.chat.id)
     if active is None:
         await router.handle_dormant_message(pool, telegram_bot, message, bot_id, bot_username)
