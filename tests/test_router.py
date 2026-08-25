@@ -14,6 +14,7 @@ from telegram import (
 
 import bot.router as router
 import bot.session as session
+import bot.tools.core as core_tools
 
 BOT_ID = 4242
 BOT_USERNAME = "orgbot"
@@ -174,3 +175,207 @@ async def test_bot_promoted_sends_nothing(db_pool):
     await router.handle_bot_added(db_pool, telegram_bot, update, BOT_ID, BOT_USERNAME)
 
     telegram_bot.send_message.assert_not_awaited()
+
+
+# --- handle_active_message ---------------------------------------------------
+
+async def _decision_log_count(db_pool, chat_id=-100):
+    return await db_pool.fetchval("SELECT count(*) FROM decision_log WHERE chat_id = $1", chat_id)
+
+
+async def _new_active_session(db_pool, chat_id=-100, activity_type="picnic"):
+    await _ensure_chat(db_pool, chat_id=chat_id)
+    row = await session.start_session(db_pool, chat_id=chat_id, activity_type=activity_type)
+    return dict(row)
+
+
+async def test_unaddressed_message_records_facts_and_stays_silent(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={
+        "list_items": ["помидоры"], "checked_off_items": [], "facts": [],
+    }))
+    run_tool_loop_mock = AsyncMock()
+    monkeypatch.setattr(router, "run_tool_loop", run_tool_loop_mock)
+    msg = _message("нужны помидоры", addressed=False)
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    items = await db_pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1", active["id"]
+    )
+    assert [r["name"] for r in items] == ["помидоры"]
+    telegram_bot.send_message.assert_not_awaited()
+    run_tool_loop_mock.assert_not_awaited()
+
+    refreshed = await session.get_active_session(db_pool, -100)
+    assert refreshed["last_activity_at"] > active["last_activity_at"]
+    assert await _decision_log_count(db_pool) == 1
+
+
+async def test_addressed_explicit_stop_closes_and_summarizes(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
+    msg = _message("всё, спасибо, свободен")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    row = await db_pool.fetchrow("SELECT status, closed_reason FROM sessions WHERE id = $1", active["id"])
+    assert (row["status"], row["closed_reason"]) == ("closed", "explicit_stop")
+    telegram_bot.send_message.assert_awaited_once()
+    assert telegram_bot.send_message.await_args.kwargs["chat_id"] == -100
+    assert await _decision_log_count(db_pool) == 1
+
+
+async def test_addressed_stop_while_snoozed_still_closes(db_pool, monkeypatch):
+    """The R4 case from the brief: an event silently moved, 'not yet' already
+    answered (snooze running, closing_question_asked_at back to NULL), and an
+    explicit human stop must override the snooze immediately."""
+    active = await _new_active_session(db_pool)
+    await db_pool.execute(
+        "UPDATE sessions SET closing_question_snoozed_until = now() + interval '5 days' WHERE id = $1",
+        active["id"],
+    )
+    active = dict(await session.get_active_session(db_pool, -100))
+    assert active["closing_question_asked_at"] is None  # precondition: not an outstanding question
+
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
+    msg = _message("больше не нужен, можешь отдыхать")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    row = await db_pool.fetchrow("SELECT status, closed_reason FROM sessions WHERE id = $1", active["id"])
+    assert (row["status"], row["closed_reason"]) == ("closed", "explicit_stop")
+
+
+async def test_various_stop_phrasings_all_close_via_the_classifier(db_pool, monkeypatch):
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
+
+    for i, phrasing in enumerate([
+        "мы закончили",
+        "можешь отдыхать",
+        "больше не нужен",
+        "that's it, thanks",
+    ]):
+        chat_id = -200 - i
+        active = await _new_active_session(db_pool, chat_id=chat_id)
+        msg = _message(phrasing, chat_id=chat_id)
+
+        await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+        row = await db_pool.fetchrow("SELECT status FROM sessions WHERE id = $1", active["id"])
+        assert row["status"] == "closed", phrasing
+
+
+async def test_addressed_closing_question_reply_yes_routes_to_record_closing_reply(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    await db_pool.execute(
+        "UPDATE sessions SET closing_question_asked_at = now() WHERE id = $1", active["id"]
+    )
+    active = dict(await session.get_active_session(db_pool, -100))
+    assert active["closing_question_asked_at"] is not None
+
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
+    run_tool_loop_mock = AsyncMock()
+    monkeypatch.setattr(router, "run_tool_loop", run_tool_loop_mock)
+    msg = _message("да, всё")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    row = await db_pool.fetchrow("SELECT status, closed_reason FROM sessions WHERE id = $1", active["id"])
+    assert (row["status"], row["closed_reason"]) == ("closed", "closing_question_yes")
+    run_tool_loop_mock.assert_not_awaited()
+    telegram_bot.send_message.assert_awaited_once()
+    assert await _decision_log_count(db_pool) == 1
+
+
+async def test_addressed_closing_question_reply_no_stays_active(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    await db_pool.execute(
+        "UPDATE sessions SET closing_question_asked_at = now() WHERE id = $1", active["id"]
+    )
+    active = dict(await session.get_active_session(db_pool, -100))
+
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "no"}))
+    run_tool_loop_mock = AsyncMock()
+    monkeypatch.setattr(router, "run_tool_loop", run_tool_loop_mock)
+    msg = _message("нет, ещё нужен")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    row = await db_pool.fetchrow(
+        "SELECT status, closing_question_asked_at FROM sessions WHERE id = $1", active["id"]
+    )
+    assert row["status"] == "active"
+    assert row["closing_question_asked_at"] is None
+    run_tool_loop_mock.assert_not_awaited()
+    telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text=router._STILL_ACTIVE_ACK)
+
+
+async def test_addressed_yes_with_pending_confirmation_resolves_and_executes(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    await core_tools.list_add(db_pool, active["id"], "tomatoes")
+    proposed = await core_tools.propose_confirmation(
+        db_pool, chat_id=-100, session_id=active["id"],
+        action_type="list_remove_item", action_params={"name": "tomatoes"},
+    )
+
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
+    run_tool_loop_mock = AsyncMock()
+    monkeypatch.setattr(router, "run_tool_loop", run_tool_loop_mock)
+    msg = _message("да")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    confirmation_row = await db_pool.fetchrow(
+        "SELECT status FROM pending_confirmations WHERE id = $1", proposed["confirmation_id"]
+    )
+    assert confirmation_row["status"] == "confirmed"
+    remaining = await db_pool.fetch("SELECT name FROM list_items WHERE session_id = $1", active["id"])
+    assert remaining == []
+    run_tool_loop_mock.assert_not_awaited()
+    telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text=router._CONFIRMED_DONE)
+
+
+async def test_addressed_ordinary_request_runs_tool_loop_and_replies(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="Вот список: помидоры"))
+    msg = _message("что у нас в списке")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text="Вот список: помидоры")
+    assert await _decision_log_count(db_pool) == 1
+
+
+async def test_empty_tool_loop_reply_posts_nothing(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="   "))
+    msg = _message("ладно проехали")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_not_awaited()
+    assert await _decision_log_count(db_pool) == 1
+
+
+async def test_tool_loop_failure_sends_fixed_fallback_message(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(side_effect=RuntimeError("boom")))
+    msg = _message("???")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text=router._FALLBACK_MESSAGE)
