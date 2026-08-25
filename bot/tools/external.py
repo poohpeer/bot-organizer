@@ -75,6 +75,12 @@ async def web_search(query: str) -> dict:
                 contents=query,
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
+                    # Google Search runs server-side; there are no local Python
+                    # functions for the SDK to call back into. Saying so keeps
+                    # generate_content off its automatic-function-calling path,
+                    # which otherwise logs a warning telling us to use a chat
+                    # session we have no use for here.
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                     http_options=types.HttpOptions(timeout=_SEARCH_TIMEOUT_MS),
                 ),
             )

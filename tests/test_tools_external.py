@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from google.genai import errors
 
@@ -367,3 +367,23 @@ async def test_http_tools_share_one_client():
 
     assert first is second
     await external.aclose()
+
+
+async def test_web_search_does_not_use_automatic_function_calling():
+    """Google Search executes server-side, so there is nothing for the SDK to
+    call back into. Without saying so explicitly, generate_content takes its
+    AFC path and logs a warning recommending a chat session — which this call
+    has no use for."""
+    from google.genai import _extra_utils
+
+    captured = {}
+
+    async def fake_generate_content(*, model, contents, config):
+        captured["config"] = config
+        raise RuntimeError("stop here — only the config matters")
+
+    with patch("bot.tools.external.gemini") as client:
+        client.aio.models.generate_content = fake_generate_content
+        await external.web_search("что угодно")
+
+    assert _extra_utils.should_disable_afc(captured["config"]) is True
