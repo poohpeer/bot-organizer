@@ -105,6 +105,21 @@ async def test_addressed_message_naming_activity_starts_session(db_pool, monkeyp
     assert telegram_bot.send_message.await_args.kwargs["chat_id"] == -100
 
 
+async def test_addressed_message_registers_a_chat_seen_for_the_first_time(db_pool, monkeypatch):
+    """sessions.chat_id is a foreign key into chats; nothing upstream of the
+    router is guaranteed to have inserted that row yet."""
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(
+        router, "extract",
+        AsyncMock(return_value={"confident": True, "activity_type": "picnic"}),
+    )
+    msg = _message("давай отслеживать пикник", chat_title="New Chat")
+
+    await router.handle_dormant_message(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME)
+
+    assert await session.get_active_session(db_pool, -100) is not None
+
+
 async def test_event_date_taken_from_chat_title_when_only_there(db_pool, monkeypatch):
     await _ensure_chat(db_pool, title="Пикник 15 сентября")
     telegram_bot = AsyncMock()

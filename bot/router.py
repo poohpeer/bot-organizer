@@ -108,6 +108,16 @@ async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_userna
     text = _text_of(message)
     user_id = message.from_user.id if message.from_user else None
 
+    # sessions.chat_id is a foreign key into chats; nothing upstream is
+    # guaranteed to have registered this chat yet, and doing it here — only
+    # once the gate has passed — keeps the unaddressed path's "no DB write"
+    # contract intact (R5).
+    await pool.execute(
+        "INSERT INTO chats (chat_id, title) VALUES ($1, $2) "
+        "ON CONFLICT (chat_id) DO UPDATE SET title = EXCLUDED.title",
+        chat.id, chat.title,
+    )
+
     extracted = await extract(
         _START_INSTRUCTION,
         f"Chat title: {chat.title or '(no title)'}\n\nMessage: {text}",
