@@ -48,6 +48,23 @@ class Reply:
 # classifier fails closed.
 _PROVIDER_UNUSABLE = (401, 403)
 
+# Groq returns 400 output_parse_failed when it cannot parse the tool call its
+# own model emitted. Observed on openai/gpt-oss-20b in 3 of 6 tool-calling
+# runs. It is a 400, but it says nothing about our request — the same request
+# succeeds on the next attempt or the next model — so treating it as fatal
+# would answer half of those turns with "не понял, переформулируй", which is
+# both wrong and unactionable for the user.
+_MODEL_MISBEHAVED = "output_parse_failed"
+
+
+def _groq_error_code(exc) -> str | None:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            return error.get("code")
+    return None
+
 
 def is_retryable(exc) -> bool:
     """Whether another model deserves a try.
@@ -58,6 +75,9 @@ def is_retryable(exc) -> bool:
     another call to get the same answer.
     """
     if isinstance(exc, groq.APIStatusError):
+        if _groq_error_code(exc) == _MODEL_MISBEHAVED:
+            log.warning("Model produced output the provider could not parse; trying the next model")
+            return True
         if exc.status_code in _PROVIDER_UNUSABLE:
             log.error("Provider rejected our credentials (%s) — check GROQ_API_KEY", exc.status_code)
             return True

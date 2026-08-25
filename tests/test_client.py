@@ -149,3 +149,27 @@ def test_without_a_groq_key_the_chain_is_gemini_only():
     chain = build_chain(None, _FakeProvider("gemini"))
 
     assert [m for p, m in chain] == GEMINI_MODELS
+
+
+def test_a_provider_failing_to_parse_its_own_model_is_retryable():
+    """Groq answers 400 output_parse_failed when it cannot parse the tool call
+    its own model emitted — observed on gpt-oss-20b in 3 of 6 tool-calling
+    runs. It is a 400, but it says nothing about our request, and treating it
+    as fatal answers half those turns with "не понял, переформулируй"."""
+    request = httpx.Request("POST", "https://api.groq.com/x")
+    body = {"error": {"message": "Parsing failed.", "type": "invalid_request_error",
+                      "code": "output_parse_failed"}}
+    response = httpx.Response(400, request=request, json=body)
+    error = groq.BadRequestError("parse failed", response=response, body=body)
+
+    assert is_retryable(error) is True
+
+
+def test_an_ordinary_bad_request_is_still_fatal():
+    """Only the parse failure is special. A genuinely malformed request would
+    fail identically on every model."""
+    request = httpx.Request("POST", "https://api.groq.com/x")
+    body = {"error": {"message": "bad", "type": "invalid_request_error", "code": "invalid_value"}}
+    response = httpx.Response(400, request=request, json=body)
+
+    assert is_retryable(groq.BadRequestError("bad", response=response, body=body)) is False
