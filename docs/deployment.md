@@ -105,6 +105,44 @@ which the bot may start a conversation on its own.
 docker compose logs -f bot worker
 ```
 
+`LOG_LEVEL` (default `DEBUG`) controls **our** packages only. Third-party
+libraries stay at INFO or WARNING whatever it is set to — `httpx` logs a line
+per outbound request, `telegram.request` dumps every `getUpdates` payload, and
+turning the root logger to DEBUG buries the lines that explain what the bot
+decided. See `bot/logging_setup.py`.
+
+At DEBUG you get, for every message:
+
+```
+update 42 from chat -100… (supergroup) user=7: @bot что по списку?
+update 42: active session 3
+session 3: addressed, deciding intent
+AI extract -> gemini-3.1-flash-lite | instruction=… | text=…
+AI extract <- 210ms | {"reply": "unrelated"}
+tool loop -> prompt=… | history=0 turns
+tool loop turn 1: model requested list_show
+tool -> list_show({'session_id': 3})
+DB fetch 1ms -> 3 rows | SELECT name, status FROM list_items WHERE session_id = $1 | args=(3,)
+tool <- list_show 2ms | {'items': [...]}
+tool loop <- 1840ms after 2 turn(s) | Помидоры — ещё нужно купить…
+```
+
+**When the bot doesn't answer**, read from the top of that block: either the
+`update …` line is missing entirely (the message never reached the bot — check
+privacy mode), or one of the lines right after it says why nothing happened
+(`dropped, already seen`, `dropped, sender is a bot`, `not addressed, silent
+capture only`).
+
+Set `LOG_LEVEL=INFO` once things are stable; you keep what the bot *did*
+(sessions started and closed, items captured, reminders delivered, closing
+questions asked) without the per-statement trace.
+
+`LOG_MAX_CHARS` (default 300) caps how much of any single value — a prompt, a
+search result, a SQL statement — reaches a log line.
+
+Secrets are never logged: API keys travel in headers that are not rendered, and
+a test asserts the maps key cannot appear in `bot.tools.external`'s output.
+
 | Symptom | Cause |
 |---|---|
 | Bot ignores everything in a group | Privacy mode still on — see above; re-add the bot after disabling |

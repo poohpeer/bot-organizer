@@ -1,6 +1,9 @@
 import logging
+import time
 
 from google.genai import errors, types
+
+from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
 
@@ -22,12 +25,18 @@ def _as_response_dict(result) -> dict:
 async def _call_tool(registry: dict, call) -> dict:
     fn = registry.get(call.name)
     if fn is None:
+        log.warning("Model called unknown tool %r", call.name)
         return {"error": f"unknown tool {call.name!r}"}
+    started = time.perf_counter()
+    log.debug("tool -> %s(%s)", call.name, truncate(call.args or {}, 200))
     try:
-        return _as_response_dict(await fn(**(call.args or {})))
+        result = _as_response_dict(await fn(**(call.args or {})))
     except Exception as e:  # tool errors become a result, not a crash
-        log.exception("Tool %s raised", call.name)
+        log.exception("Tool %s raised after %.0fms", call.name, (time.perf_counter() - started) * 1000)
         return {"error": str(e)}
+    log.debug("tool <- %s %.0fms | %s", call.name,
+              (time.perf_counter() - started) * 1000, truncate(result))
+    return result
 
 
 async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, system_instruction=None) -> str:
@@ -41,12 +50,21 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
     from bot.tools.schema import ALL_TOOLS
 
     config = types.GenerateContentConfig(tools=[ALL_TOOLS], system_instruction=system_instruction)
-    _model, chat, resp = await fallback.send_message(prompt, config=config, history=history)
+    started = time.perf_counter()
+    log.debug("tool loop -> prompt=%s | history=%d turns",
+              truncate(prompt), len(history or []))
+    model, chat, resp = await fallback.send_message(prompt, config=config, history=history)
+    log.debug("tool loop: first turn answered by %s", model)
 
-    for _ in range(MAX_TOOL_ITERATIONS):
+    for turn in range(1, MAX_TOOL_ITERATIONS + 1):
         calls = resp.function_calls
         if not calls:
+            log.debug("tool loop <- %.0fms after %d turn(s) | %s",
+                      (time.perf_counter() - started) * 1000, turn, truncate(resp.text or ""))
             return resp.text or ""
+
+        log.debug("tool loop turn %d: model requested %s",
+                  turn, ", ".join(c.name for c in calls))
 
         parts = [
             types.Part.from_function_response(name=call.name, response=await _call_tool(registry, call))
@@ -66,14 +84,18 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
                 raise
             log.warning("Tool loop turn failed (%s), retrying on next model", e.code)
             fallback.index += 1
-            _model, chat, resp = await fallback.send_message(
+            model, chat, resp = await fallback.send_message(
                 parts, config=config, history=chat.get_history()
             )
+            log.debug("tool loop: recovered on %s", model)
 
     # The final round's response may itself be plain text — checking it here
     # rather than raising means a conversation that legitimately uses all
     # MAX_TOOL_ITERATIONS rounds still returns its answer.
     if not resp.function_calls:
+        log.debug("tool loop <- %.0fms at the iteration limit | %s",
+                  (time.perf_counter() - started) * 1000, truncate(resp.text or ""))
         return resp.text or ""
 
+    log.warning("Tool loop still calling tools after %d turns, giving up", MAX_TOOL_ITERATIONS)
     raise RuntimeError(f"tool loop exceeded max iterations ({MAX_TOOL_ITERATIONS})")
