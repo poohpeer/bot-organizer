@@ -1,18 +1,25 @@
 import logging
 import os
 
-from google.genai import errors
-
-from google import genai
+from bot.ai.providers import GeminiProvider, GroqProvider, build_gemini_client, build_groq_client, is_retryable
+from bot.ai.tool_schema_openai import openai_tools
+from bot.tools.schema import ALL_TOOLS
 
 log = logging.getLogger(__name__)
 
-gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+groq_client = build_groq_client()
+gemini = build_gemini_client()
 
-# Priority order: strongest first, Gemma as last resort. Sticky fallback
-# on 429/5xx, never rolls back — same pattern validated in the sibling
-# general-telegram-bot project's gemini_fallback.py.
-MODELS = [
+_GROQ = GroqProvider(groq_client) if groq_client is not None else None
+_GEMINI = GeminiProvider(gemini, ALL_TOOLS)
+
+GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+
+# Priority order. The two Groq-hosted GPT-OSS models come first and Gemini
+# behind them: the chain switches on 429/5xx, so putting a separate provider —
+# separate account, separate quota, separate outage — ahead of the Gemini
+# models means a Gemini rate limit no longer takes the bot down.
+GEMINI_MODELS = [
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
@@ -20,54 +27,91 @@ MODELS = [
     "gemma-4-31b-it",
 ]
 
-# Cheap/fast model for the two-stage filter checks (active-mode
-# relevance) so the primary model is never spent on a binary "is this even
-# relevant" question.
-#
-# Deliberately NOT MODELS[-1]: the last entry is the emergency fallback
-# (Gemma), and while it does support system_instruction, response_schema
-# and function calling (verified against the live API), it was measurably
-# the slowest and least reliable — repeated 504 DEADLINE_EXCEEDED and
-# empty completions during verification. Since classify()/extract() fail
-# closed, a flaky classifier silently degrades into "never suggest
-# anything" rather than erroring visibly, so this path needs the
-# fast, dependable tier, not the last-resort one.
+
+def build_chain(groq_provider, gemini_provider) -> list[tuple]:
+    """The GPT-OSS models first, Gemini behind them.
+
+    A separate function rather than a module constant so the ordering can be
+    asserted without a Groq key present: without one the live chain is
+    Gemini-only, and a test reading the constant would quietly stop checking
+    the thing it was written to check.
+    """
+    groq_entries = [(groq_provider, model) for model in GROQ_MODELS] if groq_provider else []
+    return groq_entries + [(gemini_provider, model) for model in GEMINI_MODELS]
+
+
+CHAIN = build_chain(_GROQ, _GEMINI)
+
+# Kept for the modules that only need to know which Gemini models exist, and
+# for web_search's grounded-search fallback.
+MODELS = GEMINI_MODELS
+
+# Cheap/fast model for the two-stage filter checks (active-mode relevance) so
+# the primary model is never spent on a binary "is this even relevant"
+# question. Deliberately not the chain's last entry: that one is the emergency
+# fallback, and classify()/extract() fail closed, so a flaky classifier
+# degrades silently into "never do anything" rather than erroring visibly.
 CLASSIFIER_MODEL = "gemini-3.1-flash-lite"
+
+# Groq's small model answers the same binary questions and comes from a
+# different quota pool, so the classifier survives a Gemini outage too.
+CLASSIFIER_CHAIN = [
+    *([(_GROQ, "openai/gpt-oss-20b")] if _GROQ else []),
+    (_GEMINI, CLASSIFIER_MODEL),
+]
+
+
+class AllModelsUnavailable(RuntimeError):
+    """Every model in the chain returned 429 or 5xx.
+
+    Distinct from an ordinary API error so the router can tell "the AI is
+    unreachable right now" — which has a specific reply — from a bug.
+    """
 
 
 class ModelFallback:
-    """Sends messages through a list of Gemini/Gemma models, switching to
-    the next one in the list on 429 (rate limit) or 5xx (overload) and
-    remembering the choice — API-key limits are shared across the whole
-    process, so it never rolls back."""
+    """Walks CHAIN, moving to the next entry on 429/5xx and staying there.
 
-    def __init__(self, client, models: list[str]):
-        self.client = client
-        self.models = models
+    The move is sticky because quotas are shared process-wide: having just
+    learned that a model is rate-limited, trying it again on the next message
+    only spends another call to be told the same thing.
+    """
+
+    def __init__(self, chain=None):
+        self.chain = chain if chain is not None else CHAIN
         self.index = 0
 
     @property
+    def current(self):
+        return self.chain[self.index]
+
+    @property
     def model(self) -> str:
-        return self.models[self.index]
+        return self.current[1]
 
-    async def send_message(self, text, *, config=None, history=None):
-        while True:
-            model = self.model
-            chat = self.client.aio.chats.create(model=model, config=config, history=history)
+    async def start(self, prompt, *, tools=None, system_instruction=None, history=None):
+        """Open a conversation on the best model that will accept it.
+
+        Raises AllModelsUnavailable once every remaining entry has refused.
+        """
+        last_error = None
+        while self.index < len(self.chain):
+            provider, model = self.current
             try:
-                resp = await chat.send_message(text)
-                return model, chat, resp
-            except errors.APIError as e:
-                # e.code is None when the error body carries no numeric code
-                # (APIError falls back to _get_code(response_json)); comparing
-                # None >= 500 would raise TypeError from inside the handler and
-                # mask the real API error, so guard before comparing.
-                is_retryable = e.code == 429 or (e.code is not None and e.code >= 500)
-                if is_retryable and self.index < len(self.models) - 1:
-                    log.warning("%s failed (%s), switching to %s", model, e.code, self.models[self.index + 1])
-                    self.index += 1
-                    continue
-                raise
+                chat = await provider.start(
+                    model, prompt, tools=tools,
+                    system_instruction=system_instruction, history=history,
+                )
+                return provider, model, chat
+            except Exception as e:
+                if not is_retryable(e):
+                    raise
+                last_error = e
+                log.warning("%s/%s unavailable (%s), trying the next model", provider.name, model, e)
+                self.index += 1
+        raise AllModelsUnavailable(
+            f"every model in the chain refused; last error: {last_error}"
+        ) from last_error
 
 
-fallback = ModelFallback(gemini, MODELS)
+fallback = ModelFallback()

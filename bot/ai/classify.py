@@ -4,7 +4,8 @@ import time
 
 from google.genai import errors, types
 
-from bot.ai.client import CLASSIFIER_MODEL, gemini
+from bot.ai.client import CLASSIFIER_CHAIN, CLASSIFIER_MODEL, gemini, groq_client
+from bot.ai.providers import is_retryable
 from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
@@ -14,6 +15,55 @@ _BOOL_SCHEMA = types.Schema(
     properties={"result": types.Schema(type=types.Type.BOOLEAN)},
     required=["result"],
 )
+
+
+def _json_schema_of(schema) -> dict:
+    """Groq wants a JSON Schema; our declarations are written in Gemini's."""
+    from bot.ai.tool_schema_openai import _TYPES
+
+    return {
+        "type": "object",
+        "properties": {
+            name: {"type": _TYPES[prop.type]} for name, prop in (schema.properties or {}).items()
+        },
+        "required": list(schema.required or []),
+        "additionalProperties": False,
+    }
+
+
+async def _extract_via_chain(instruction: str, text: str, schema) -> str | None:
+    """Ask the cheap models in order, moving on for the same reasons the main
+    chain does. Returns the raw JSON text, or None if nobody answered."""
+    last_error = None
+    for provider, model in CLASSIFIER_CHAIN:
+        try:
+            if provider.name == "groq":
+                resp = await groq_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "system", "content": instruction},
+                              {"role": "user", "content": text}],
+                    response_format={"type": "json_schema", "json_schema": {
+                        "name": "extraction", "strict": True, "schema": _json_schema_of(schema)}},
+                )
+                return resp.choices[0].message.content
+            resp = await gemini.aio.models.generate_content(
+                model=model,
+                contents=text,
+                config=types.GenerateContentConfig(
+                    system_instruction=instruction,
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
+            )
+            return resp.text
+        except Exception as e:
+            if not is_retryable(e):
+                raise
+            last_error = e
+            log.warning("classifier %s/%s unavailable (%s), trying the next", provider.name, model, e)
+    log.warning("every classifier model refused; last error: %s", last_error)
+    return None
 
 
 async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
@@ -33,34 +83,15 @@ async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
     log.debug("AI extract -> %s | instruction=%s | text=%s",
               CLASSIFIER_MODEL, truncate(instruction, 120), truncate(text))
     try:
-        resp = await gemini.aio.models.generate_content(
-            model=CLASSIFIER_MODEL,
-            contents=text,
-            config=types.GenerateContentConfig(
-                system_instruction=instruction,
-                response_mime_type="application/json",
-                response_schema=schema,
-                # generate_content takes the SDK's automatic-function-calling
-                # path unless told otherwise — regardless of whether any tools
-                # were supplied — and logs a warning recommending a chat
-                # session. This call returns structured JSON and declares no
-                # tools at all, so there is nothing to call back into. The one
-                # place that does use function calling, bot/ai/tool_loop.py,
-                # already goes through AsyncChat as the SDK recommends.
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
-        # resp.text is None whenever the response carries no text parts —
-        # a safety-blocked candidate, or one truncated at MAX_TOKENS before
-        # emitting text. json.loads(None) would raise TypeError, which is
-        # not a ValueError and would escape a narrower handler.
-        if not resp.text:
+        raw = await _extract_via_chain(instruction, text, schema)
+        # An empty completion is not JSON. json.loads(None) raises TypeError,
+        # which is not a ValueError and would escape a narrower handler.
+        if not raw:
             log.warning("extract() got an empty response, defaulting to {}")
             return {}
-
         log.debug("AI extract <- %.0fms | %s",
-                  (time.perf_counter() - started) * 1000, truncate(resp.text))
-        parsed = json.loads(resp.text)
+                  (time.perf_counter() - started) * 1000, truncate(raw))
+        parsed = json.loads(raw)
         # A model is not obliged to honor response_schema; a JSON array or
         # scalar parses fine but has no .get(), which would blow up in
         # classify() instead of failing closed here.
