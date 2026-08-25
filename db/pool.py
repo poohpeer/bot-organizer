@@ -166,6 +166,11 @@ CREATE TABLE IF NOT EXISTS list_items (
     checked_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_list_items_session ON list_items (session_id);
+-- One row per item name per session. A shopping list with "огурцы" twice is
+-- never what anyone meant, and a model that re-adds an item it already added
+-- (observed on gpt-oss-120b) would otherwise quietly corrupt the list.
+CREATE UNIQUE INDEX IF NOT EXISTS one_item_name_per_session
+    ON list_items (session_id, lower(name));
 
 CREATE TABLE IF NOT EXISTS reminders (
     id              BIGSERIAL PRIMARY KEY,
