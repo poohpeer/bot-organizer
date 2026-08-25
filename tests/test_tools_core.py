@@ -369,7 +369,7 @@ async def test_list_check_off_distinguishes_already_checked_from_absent(db_pool)
     await core.list_check_off(db_pool, session_id, "cucumbers")
 
     assert await core.list_check_off(db_pool, session_id, "cucumbers") == {"status": "already_checked"}
-    assert await core.list_check_off(db_pool, session_id, "never added") == {"status": "not_found"}
+    assert (await core.list_check_off(db_pool, session_id, "never added"))["status"] == "not_found"
 
 
 async def test_adding_the_same_item_twice_keeps_one_row(db_pool):
@@ -441,3 +441,17 @@ async def test_confirmation_prompt_reads_as_a_sentence(db_pool):
 
     assert "{" not in proposed["message_for_user"]
     assert "tomatoes" in proposed["message_for_user"]
+
+
+async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):
+    """Observed live: asked to check off "огурцы", the model translated the
+    name, added "cucumbers" and checked that off instead — leaving the real
+    item outstanding. A bare not_found gives it nothing to correct with."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "огурцы")
+    await core.list_add(db_pool, session_id, "мясо")
+
+    result = await core.list_check_off(db_pool, session_id, "cucumbers")
+
+    assert result["status"] == "not_found"
+    assert set(result["items_on_the_list"]) == {"огурцы", "мясо"}

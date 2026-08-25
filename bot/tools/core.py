@@ -184,7 +184,15 @@ async def list_check_off(pool, session_id, name) -> dict:
     )
     if existing is not None:
         return {"status": "already_checked"}
-    return {"status": "not_found"}
+
+    # Hand back what is actually on the list. Observed live: a model asked to
+    # check off "огурцы" instead added and checked off "cucumbers", having
+    # translated the name. A bare not_found gives it nothing to correct with;
+    # the real names let it retry against one of them.
+    rows = await pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1 AND status = 'pending'", session_id
+    )
+    return {"status": "not_found", "items_on_the_list": [r["name"] for r in rows]}
 
 
 async def list_remove_item(pool, session_id, name) -> dict:
