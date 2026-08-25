@@ -1,8 +1,9 @@
 import logging
 import time
 
-from google.genai import errors, types
-
+from bot.ai.client import AllModelsUnavailable
+from bot.ai.providers import is_retryable
+from bot.ai.tool_schema_openai import openai_tools
 from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
@@ -13,11 +14,8 @@ MAX_TOOL_ITERATIONS = 6
 def _as_response_dict(result) -> dict:
     """Wrap a tool's return value so it is always a JSON object.
 
-    `Part.from_function_response(response=...)` requires a dict — handing it
-    a list or scalar raises a pydantic ValidationError that would abort the
-    whole loop and lose the reply. Several tools naturally return sequences
-    (list_show, get_participants, archive_lookup), so normalize here rather
-    than constraining every tool's return type.
+    Several tools naturally return sequences (list_show, get_participants,
+    archive_lookup), and both providers want an object for a tool result.
     """
     return result if isinstance(result, dict) else {"result": result}
 
@@ -40,62 +38,55 @@ async def _call_tool(registry: dict, call) -> dict:
 
 
 async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, system_instruction=None) -> str:
-    """Sends `prompt`, executes any function calls the model returns against
-    `registry`, feeds the results back, and repeats until the model returns
-    plain text. Raises RuntimeError if it never converges within
-    MAX_TOOL_ITERATIONS tool rounds; raises whatever the underlying Gemini
-    call raises on API failure. Neither case is caught here — callers apply
-    the fixed fallback reply.
-    """
-    from bot.tools.schema import ALL_TOOLS
+    """Sends `prompt`, runs whatever tools the model asks for, feeds the
+    results back, and repeats until it answers in plain text.
 
-    config = types.GenerateContentConfig(tools=[ALL_TOOLS], system_instruction=system_instruction)
+    Raises AllModelsUnavailable when every model in the chain is refusing, and
+    RuntimeError if the model never stops calling tools. Neither is caught
+    here — the router turns the first into a specific reply and the second into
+    its generic one.
+    """
+    tools = openai_tools()
     started = time.perf_counter()
-    log.debug("tool loop -> prompt=%s | history=%d turns",
-              truncate(prompt), len(history or []))
-    model, chat, resp = await fallback.send_message(prompt, config=config, history=history)
-    log.debug("tool loop: first turn answered by %s", model)
+    log.debug("tool loop -> prompt=%s | history=%d turns", truncate(prompt), len(history or []))
+
+    provider, model, chat = await fallback.start(
+        prompt, tools=tools, system_instruction=system_instruction, history=history
+    )
+    log.debug("tool loop: first turn answered by %s/%s", provider.name, model)
+    reply = chat.reply
 
     for turn in range(1, MAX_TOOL_ITERATIONS + 1):
-        calls = resp.function_calls
-        if not calls:
+        if not reply.tool_calls:
             log.debug("tool loop <- %.0fms after %d turn(s) | %s",
-                      (time.perf_counter() - started) * 1000, turn, truncate(resp.text or ""))
-            return resp.text or ""
+                      (time.perf_counter() - started) * 1000, turn, truncate(reply.text))
+            return reply.text
 
         log.debug("tool loop turn %d: model requested %s",
-                  turn, ", ".join(c.name for c in calls))
-
-        parts = [
-            types.Part.from_function_response(name=call.name, response=await _call_tool(registry, call))
-            for call in calls
-        ]
+                  turn, ", ".join(c.name for c in reply.tool_calls))
+        results = [(call, await _call_tool(registry, call)) for call in reply.tool_calls]
 
         try:
-            resp = await chat.send_message(parts)
-        except errors.APIError as e:
-            # Only the first turn went through ModelFallback; a 429/5xx on a
-            # later turn would otherwise abort the request outright, even
-            # though later turns are exactly when the shared key's quota is
-            # most likely to run out. Re-drive the conversation on the next
-            # model, preserving the history built so far.
-            is_retryable = e.code == 429 or (e.code is not None and e.code >= 500)
-            if not (is_retryable and fallback.index < len(fallback.models) - 1):
+            reply = await chat.send_tool_results(results)
+        except Exception as e:
+            # Only the opening turn went through the chain. A 429 on a later
+            # turn is if anything more likely — quota runs out mid-conversation
+            # — so re-drive what has been said so far on the next model rather
+            # than losing the whole exchange.
+            if not is_retryable(e):
                 raise
-            log.warning("Tool loop turn failed (%s), retrying on next model", e.code)
+            log.warning("Tool loop turn failed (%s), re-driving on the next model", e)
             fallback.index += 1
-            model, chat, resp = await fallback.send_message(
-                parts, config=config, history=chat.get_history()
+            provider, model, chat = await fallback.start(
+                None, tools=tools, system_instruction=system_instruction, history=chat.history()
             )
-            log.debug("tool loop: recovered on %s", model)
+            log.debug("tool loop: recovered on %s/%s", provider.name, model)
+            reply = chat.reply
 
-    # The final round's response may itself be plain text — checking it here
-    # rather than raising means a conversation that legitimately uses all
-    # MAX_TOOL_ITERATIONS rounds still returns its answer.
-    if not resp.function_calls:
+    if not reply.tool_calls:
         log.debug("tool loop <- %.0fms at the iteration limit | %s",
-                  (time.perf_counter() - started) * 1000, truncate(resp.text or ""))
-        return resp.text or ""
+                  (time.perf_counter() - started) * 1000, truncate(reply.text))
+        return reply.text
 
     log.warning("Tool loop still calling tools after %d turns, giving up", MAX_TOOL_ITERATIONS)
     raise RuntimeError(f"tool loop exceeded max iterations ({MAX_TOOL_ITERATIONS})")

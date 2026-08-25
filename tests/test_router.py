@@ -481,3 +481,48 @@ async def test_a_dm_from_someone_with_no_pending_nudge_falls_through(db_pool, mo
 
     assert await router.handle_private_message(db_pool, telegram_bot, dm) is False
     telegram_bot.send_message.assert_not_awaited()
+
+
+async def test_the_bot_says_the_ai_is_unreachable_rather_than_blaming_the_user(db_pool, monkeypatch):
+    """When every model in the chain refuses, "не понял, переформулируй" is a
+    lie: it sends the user off to retype a perfectly good message into a bot
+    that cannot answer any message at all."""
+    from bot.ai.client import AllModelsUnavailable
+
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
+    monkeypatch.setattr(
+        router, "run_tool_loop", AsyncMock(side_effect=AllModelsUnavailable("all refused"))
+    )
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot что по списку?"), BOT_ID, BOT_USERNAME
+    )
+
+    sent = telegram_bot.send_message.await_args.kwargs["text"]
+    assert sent in router._AI_UNAVAILABLE_MESSAGES
+    assert sent != router._FALLBACK_MESSAGE
+
+
+async def test_an_ordinary_tool_loop_failure_still_gets_the_generic_reply(db_pool, monkeypatch):
+    """Only an exhausted chain gets the "come back later" line. A bug must not
+    be reported to the group as a temporary outage."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(side_effect=RuntimeError("boom")))
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot что по списку?"), BOT_ID, BOT_USERNAME
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] == router._FALLBACK_MESSAGE
+
+
+def test_every_unavailable_message_offers_to_try_later():
+    """Sarcasm is the tone, but the line still has to tell the user what to do."""
+    for message in router._AI_UNAVAILABLE_MESSAGES:
+        assert any(word in message.lower() for word in ("позже", "позднее", "через", "времени"))

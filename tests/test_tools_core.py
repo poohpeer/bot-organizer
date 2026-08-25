@@ -369,22 +369,48 @@ async def test_list_check_off_distinguishes_already_checked_from_absent(db_pool)
     await core.list_check_off(db_pool, session_id, "cucumbers")
 
     assert await core.list_check_off(db_pool, session_id, "cucumbers") == {"status": "already_checked"}
-    assert await core.list_check_off(db_pool, session_id, "never added") == {"status": "not_found"}
+    assert (await core.list_check_off(db_pool, session_id, "never added"))["status"] == "not_found"
 
 
-async def test_removing_one_duplicate_entry_keeps_the_other(db_pool):
+async def test_adding_the_same_item_twice_keeps_one_row(db_pool):
+    """A shopping list with "огурцы" twice is never what anyone meant. Two
+    people both asking for milk, or a model re-adding an item it just added
+    (observed live on gpt-oss-120b), must not split the list."""
+    session_id = await _new_session(db_pool)
+
+    first = await core.list_add(db_pool, session_id, "помидоры")
+    second = await core.list_add(db_pool, session_id, "Помидоры")
+
+    assert first["status"] == "ok"
+    assert second["status"] == "already_present"
+    assert second["item_id"] == first["item_id"]
+    assert len((await core.list_show(db_pool, session_id))["items"]) == 1
+
+
+async def test_re_adding_a_checked_item_says_it_is_already_done(db_pool):
+    """The caller needs to distinguish "already on the list" from "already
+    bought" to answer honestly."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "огурцы")
+    await core.list_check_off(db_pool, session_id, "огурцы")
+
+    again = await core.list_add(db_pool, session_id, "огурцы")
+
+    assert again["status"] == "already_present"
+    assert again["item_status"] == "checked"
+
+
+async def test_removing_an_item_removes_it(db_pool):
     from unittest.mock import AsyncMock
 
     session_id = await _new_session(db_pool)
-    await core.list_add(db_pool, session_id, "tomatoes")
     await core.list_add(db_pool, session_id, "tomatoes")
 
     proposed = await core.list_remove_item(db_pool, session_id, "tomatoes")
     confirmation = await core.resolve_confirmation(db_pool, proposed["confirmation_id"], confirmed=True)
     await core.execute_confirmed_action(db_pool, AsyncMock(), confirmation)
 
-    remaining = (await core.list_show(db_pool, session_id))["items"]
-    assert len(remaining) == 1
+    assert (await core.list_show(db_pool, session_id))["items"] == []
 
 
 async def test_tools_report_unknown_session_instead_of_crashing(db_pool):
@@ -415,3 +441,17 @@ async def test_confirmation_prompt_reads_as_a_sentence(db_pool):
 
     assert "{" not in proposed["message_for_user"]
     assert "tomatoes" in proposed["message_for_user"]
+
+
+async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):
+    """Observed live: asked to check off "огурцы", the model translated the
+    name, added "cucumbers" and checked that off instead — leaving the real
+    item outstanding. A bare not_found gives it nothing to correct with."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "огурцы")
+    await core.list_add(db_pool, session_id, "мясо")
+
+    result = await core.list_check_off(db_pool, session_id, "cucumbers")
+
+    assert result["status"] == "not_found"
+    assert set(result["items_on_the_list"]) == {"огурцы", "мясо"}

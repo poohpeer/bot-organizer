@@ -106,9 +106,9 @@ async def execute_confirmed_action(pool, bot, confirmation) -> dict:
     params = confirmation["action_params"]
 
     if action_type == "list_remove_item":
-        # Deletes exactly one row: two separate `list_add("tomatoes")` calls
-        # are two distinct entries, and confirming removal of one shouldn't
-        # silently take the other with it.
+        # A name is unique per session now, so this matches at most one row.
+        # The LIMIT stays as a belt-and-braces guard against an unbounded
+        # DELETE if that index is ever dropped.
         deleted = await pool.fetchrow(
             """
             DELETE FROM list_items WHERE id = (
@@ -131,11 +131,30 @@ async def execute_confirmed_action(pool, bot, confirmation) -> dict:
 
 
 async def list_add(pool, session_id, name) -> dict:
+    """Add an item, or report that it is already on the list.
+
+    Idempotent on purpose: two people asking for milk, or a model re-adding an
+    item it added a moment ago, must not produce two rows. Telling the caller
+    which happened lets it answer honestly instead of confirming an addition
+    that did not occur.
+    """
     row = await pool.fetchrow(
-        "INSERT INTO list_items (session_id, name) VALUES ($1, $2) RETURNING id",
+        """
+        INSERT INTO list_items (session_id, name) VALUES ($1, $2)
+        ON CONFLICT (session_id, lower(name)) DO NOTHING
+        RETURNING id
+        """,
         session_id, name,
     )
-    return {"status": "ok", "item_id": row["id"]}
+    if row is not None:
+        return {"status": "ok", "item_id": row["id"]}
+
+    existing = await pool.fetchrow(
+        "SELECT id, status FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
+        session_id, name,
+    )
+    return {"status": "already_present", "item_id": existing["id"],
+            "item_status": existing["status"]}
 
 
 async def list_show(pool, session_id) -> dict:
@@ -165,7 +184,15 @@ async def list_check_off(pool, session_id, name) -> dict:
     )
     if existing is not None:
         return {"status": "already_checked"}
-    return {"status": "not_found"}
+
+    # Hand back what is actually on the list. Observed live: a model asked to
+    # check off "огурцы" instead added and checked off "cucumbers", having
+    # translated the name. A bare not_found gives it nothing to correct with;
+    # the real names let it retry against one of them.
+    rows = await pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1 AND status = 'pending'", session_id
+    )
+    return {"status": "not_found", "items_on_the_list": [r["name"] for r in rows]}
 
 
 async def list_remove_item(pool, session_id, name) -> dict:

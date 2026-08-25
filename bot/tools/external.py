@@ -5,16 +5,19 @@ import time
 import httpx
 from google.genai import errors, types
 
-from bot.ai.client import MODELS, gemini
+from bot.ai.client import GROQ_MODELS, MODELS, gemini, groq_client
+from bot.ai.providers import is_retryable
 from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 10.0
 
-# Grounded search needs a model that actually supports the Google Search tool.
-# Gemma does not, so it is excluded here even though it is the last resort in
-# the chat fallback chain.
+# Grounded search needs a model with a real search tool behind it. Groq's
+# GPT-OSS models carry a server-side `browser_search`; Gemini has its own
+# Google Search grounding. Gemma has neither, so it is excluded even though it
+# is the last resort in the chat chain.
+GROQ_SEARCH_MODELS = GROQ_MODELS if groq_client is not None else []
 SEARCH_MODELS = [m for m in MODELS if m.startswith("gemini-")]
 
 # Seconds. Without this a hung grounded-search call blocks the tool loop, and
@@ -70,20 +73,44 @@ async def web_search(query: str) -> dict:
     rest of the bot happily degrades to a later model.
     """
     last_error = None
+
+    for model in GROQ_SEARCH_MODELS:
+        started = time.perf_counter()
+        log.debug("web_search -> groq/%s | query=%s", model, truncate(query, 150))
+        try:
+            resp = await groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": query}],
+                tools=[{"type": "browser_search"}],
+                tool_choice="required",
+            )
+        except Exception as e:
+            last_error = e
+            if not is_retryable(e):
+                log.warning("web_search on groq/%s failed non-retryably", model, exc_info=True)
+                break
+            log.warning("web_search on groq/%s unavailable (%s), trying the next", model, e)
+            continue
+
+        text = (resp.choices[0].message.content or "").strip()
+        elapsed = (time.perf_counter() - started) * 1000
+        if text:
+            log.debug("web_search <- groq/%s %.0fms | %s", model, elapsed, truncate(text))
+            # Groq's browser_search does not surface the pages it read, so
+            # there are no source URLs to hand back. Saying so honestly beats
+            # inventing them.
+            return {"found": True, "summary": text, "sources": []}
+        log.debug("web_search <- groq/%s %.0fms | empty result", model, elapsed)
+
     for model in SEARCH_MODELS:
         started = time.perf_counter()
-        log.debug("web_search -> %s | query=%s", model, truncate(query, 150))
+        log.debug("web_search -> gemini/%s | query=%s", model, truncate(query, 150))
         try:
             resp = await gemini.aio.models.generate_content(
                 model=model,
                 contents=query,
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
-                    # Google Search runs server-side; there are no local Python
-                    # functions for the SDK to call back into. Saying so keeps
-                    # generate_content off its automatic-function-calling path,
-                    # which otherwise logs a warning telling us to use a chat
-                    # session we have no use for here.
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                     http_options=types.HttpOptions(timeout=_SEARCH_TIMEOUT_MS),
                 ),
@@ -92,29 +119,29 @@ async def web_search(query: str) -> dict:
             last_error = e
             retryable = e.code == 429 or (e.code is not None and e.code >= 500)
             if retryable:
-                log.warning("web_search on %s failed (%s), trying next model", model, e.code)
+                log.warning("web_search on gemini/%s failed (%s), trying next model", model, e.code)
                 continue
-            log.warning("web_search on %s failed non-retryably (%s)", model, e.code)
+            log.warning("web_search on gemini/%s failed non-retryably (%s)", model, e.code)
             break
         except Exception as e:
             # Transport failures (httpx ConnectError/ReadTimeout, DNS) are not
-            # APIError subclasses; the contract above says any failure is
-            # found=False, so they must not escape either.
+            # APIError subclasses; the contract says any failure is found=False,
+            # so they must not escape either.
             last_error = e
-            log.warning("web_search on %s raised %s", model, type(e).__name__, exc_info=True)
+            log.warning("web_search on gemini/%s raised %s", model, type(e).__name__, exc_info=True)
             break
 
         text = (resp.text or "").strip()
         elapsed = (time.perf_counter() - started) * 1000
         if not text:
-            log.debug("web_search <- %.0fms | empty result", elapsed)
+            log.debug("web_search <- gemini/%s %.0fms | empty result", model, elapsed)
             return {"found": False, "summary": None, "sources": []}
         sources = _extract_sources(resp)
-        log.debug("web_search <- %.0fms | %d sources | %s", elapsed, len(sources), truncate(text))
+        log.debug("web_search <- gemini/%s %.0fms | %d sources | %s", model, elapsed, len(sources), truncate(text))
         return {"found": True, "summary": text, "sources": sources}
 
     if last_error is not None:
-        log.warning("web_search exhausted all search models for query=%r", query)
+        log.warning("web_search exhausted every search model for query=%r", query)
     return {"found": False, "summary": None, "sources": []}
 
 

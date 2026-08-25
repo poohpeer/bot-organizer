@@ -7,6 +7,7 @@ that gate runs unless a human explicitly spoke to the bot.
 """
 
 import logging
+import random
 
 from bot.logging_setup import truncate
 from datetime import date
@@ -20,13 +21,33 @@ import bot.tools.core as core_tools
 import bot.tools.external as external_tools
 from bot.addressing import addressed_to_bot, bot_was_added
 from bot.ai.classify import classify, extract
-from bot.ai.client import fallback
+from bot.ai.client import AllModelsUnavailable, fallback
 from bot.ai.tool_loop import run_tool_loop
 from bot.session import SessionAlreadyActiveError, start_session
 
 log = logging.getLogger(__name__)
 
 _FALLBACK_MESSAGE = "Не понял, переформулируй, пожалуйста."
+
+# Shown when every model in the chain is refusing. Deliberately different from
+# _FALLBACK_MESSAGE: "переформулируй" invites the user to retype a message that
+# was perfectly fine, and they would keep retyping while nothing worked. This
+# says the problem is mine and that waiting is the fix. Rotated so a chat that
+# hits it several times in a row doesn't get the same line every time.
+_AI_UNAVAILABLE_MESSAGES = (
+    "Мой искусственный интеллект временно закончился. Остался только "
+    "естественный, а он у меня, честно говоря, так себе. Попробуйте попозже.",
+    "Все нейросети, которые я знаю, дружно сделали вид, что меня не существует. "
+    "Обидно, но переживу. Напишите через несколько минут.",
+    "Технически я всё ещё здесь. Интеллектуально — уже нет. Дайте мне немного "
+    "времени прийти в себя.",
+    "Нейронка прилегла отдохнуть и меня с собой не позвала. Загляните чуть позже, "
+    "я к тому времени, надеюсь, снова начну соображать.",
+)
+
+
+def _ai_unavailable_message() -> str:
+    return random.choice(_AI_UNAVAILABLE_MESSAGES)
 
 _GREETING_TEMPLATE = (
     "Привет! Я включаюсь только когда меня зовут — упомяните {mention} или "
@@ -247,7 +268,20 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "one event. Use the available tools to remember facts, manage the "
     "shared list, track participant confirmations, schedule reminders, and "
     "answer questions using grounded lookups — never invent a fact that "
-    "wasn't found by a tool. If a message only gives you something to "
+    "wasn't found by a tool.\n"
+    "When someone says they already have, bought or brought something that "
+    "belongs on the shared list, call list_check_off for that item. Do not "
+    "record it with remember_fact instead: the list is what the group reads, "
+    "and a fact nobody looks at leaves the item showing as still needed.\n"
+    "Add each item only once. If list_add reports already_present, the item "
+    "is on the list — say so rather than adding it again.\n"
+    "Keep item names exactly as the group wrote them, in their language. "
+    "Never translate or transliterate a name: \"cucumbers\" and \"огурцы\" are "
+    "two different items to the list, so translating one turns checking it "
+    "off into adding a second copy. If list_check_off reports not_found it "
+    "returns the names actually on the list — pick the matching one and call "
+    "it again rather than adding anything.\n"
+    "If a message only gives you something to "
     "silently record and doesn't ask a question or need a reply, respond "
     "with an empty string — do not narrate what you just recorded."
 )
@@ -394,6 +428,12 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         reply_text = await run_tool_loop(
             fallback, text, registry, system_instruction=_ACTIVE_MODE_SYSTEM_INSTRUCTION
         )
+    except AllModelsUnavailable:
+        # Every provider is rate-limited or down. Telling the user to
+        # rephrase would be a lie and would have them retyping a fine message
+        # into a bot that cannot answer any of them.
+        log.warning("Every model refused for chat_id=%s session_id=%s", chat_id, session_id)
+        reply_text = _ai_unavailable_message()
     except Exception:
         log.exception("Tool loop failed for chat_id=%s session_id=%s", chat_id, session_id)
         reply_text = _FALLBACK_MESSAGE
