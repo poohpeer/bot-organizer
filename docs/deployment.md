@@ -24,10 +24,12 @@ setting. That is why the bot decides whether to act in code
 
 ## First run
 
-1. Copy `.env.example` to `.env` and fill in `BOT_TOKEN`, `GEMINI_API_KEY`,
-   `GOOGLE_MAPS_API_KEY`, and a `POSTGRES_PASSWORD` of your choosing — putting
-   that same password into `DATABASE_URL`. `.env` is git-ignored; keep it that
-   way.
+1. Copy `.env.example` to `.env` and fill it in. Required: `BOT_TOKEN`,
+   `GEMINI_API_KEY`, `GOOGLE_MAPS_API_KEY`, and a `POSTGRES_PASSWORD` of your
+   choosing — putting that same password into `DATABASE_URL`. Optional:
+   `GROQ_API_KEY`, which puts the GPT-OSS models ahead of Gemini in the model
+   chain; without it the bot logs a warning at startup and runs on Gemini
+   alone. Everything else has a working default. See **Secrets** below.
 2. ```bash
    docker compose up -d --build
    ```
@@ -48,6 +50,76 @@ setting. That is why the bot decides whether to act in code
    Telegram with a valid token. The bot resolves its own username through
    `get_me()` at startup rather than from configuration, so renaming the bot
    cannot silently stop mentions from matching.
+
+## Secrets
+
+There is no secret manager. Every credential lives in exactly one place: the
+`.env` file on the deployment host, written by hand.
+
+```bash
+cp .env.example .env
+chmod 600 .env          # it holds a bot token that grants full control of the bot
+$EDITOR .env
+```
+
+How that reaches the containers, and where it deliberately does not:
+
+- **Into the containers** via `env_file: .env` in `docker-compose.yml`. The
+  values become environment variables of the running process.
+- **Never into the image.** Verified on the built image: no `.env` anywhere in
+  the filesystem, and no secret values in its config. `.dockerignore` excludes
+  `.env`, so a build cannot pick it up even by accident.
+- **Never into git.** `.env` is in `.gitignore`; `git check-ignore -v .env`
+  confirms which rule covers it.
+- **Never into CI.** The workflow defines no secrets and reaches no live API.
+  Tests run against fake values from `tests/conftest.py` and a throwaway
+  Postgres.
+
+What that buys and what it does not. Anyone with host access — or root, or
+Docker socket access — can read `.env`, and `docker inspect` shows a running
+container's environment. This is appropriate for a private bot on a machine
+you control, and not appropriate for a shared or multi-tenant host. There is no
+audit trail and no automatic rotation.
+
+**Rotating a key** is editing `.env` and running `docker compose up -d`. The
+containers are recreated with the new environment; Postgres data is untouched.
+Revoke the old value at the source too — BotFather's `/revoke` for the bot
+token, the provider console for the API keys — since editing the file does not
+invalidate anything.
+
+## Running the published image
+
+CI builds and pushes `ghcr.io/poohpeer/bot-organizer` on every merge to `main`.
+`docker compose up -d --build` ignores it and builds from the working tree,
+which is the simplest thing on a machine that has the source. To run exactly
+the artifact that passed CI instead — or on a host with no build toolchain:
+
+```bash
+# The package is private because the repository is. A Personal Access Token
+# with the read:packages scope is required; a plain `gh auth token` does NOT
+# carry it and the pull fails with "denied" even after a successful login.
+echo "$GHCR_TOKEN" | docker login ghcr.io -u poohpeer --password-stdin
+
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+```
+
+Pin a specific build instead of `latest` with `BOT_IMAGE_TAG`, which takes any
+tag the workflow pushed — it tags every build with its commit sha:
+
+```bash
+BOT_IMAGE_TAG=28c50ea2e53921ae53890fb454c91873891393eb \
+  docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+```
+
+## Building the image by hand
+
+```bash
+docker build -t bot-organizer .
+```
+
+One image serves both processes; `docker-compose.yml` gives each a different
+`command`. There is no separate worker image to keep in step.
 
 ## Restarting and upgrading
 

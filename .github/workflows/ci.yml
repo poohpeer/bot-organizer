@@ -76,3 +76,65 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows]
+    permissions:
+      contents: read
+      packages: read
+
+    env:
+      # The credentials live on the deployment machine, not in the repository
+      # and not in Actions secrets. This is the persistent copy; the workspace
+      # gets a throwaway one below, because compose resolves `env_file: .env`
+      # relative to the compose file it is given.
+      ENV_FILE: C:\bots\bot-organizer\.env
+      # Deploy the exact artifact this run built. `latest` would race a newer
+      # merge and could roll out something this run never tested.
+      BOT_IMAGE_TAG: ${{ github.sha }}
+      COMPOSE: -f docker-compose.yml -f docker-compose.ghcr.yml
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the machine is set up
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:ENV_FILE)) {
+            throw "$env:ENV_FILE is missing. See docs/deployment.md — the runner does not create it, and deploying without it would start the stack with no credentials."
+          }
+          docker version --format '{{.Server.Os}}' | Tee-Object -Variable os
+          if ($os -ne 'linux') {
+            throw "Docker is in $os container mode; this image is linux/amd64. Switch Docker Desktop to Linux containers."
+          }
+
+      - name: Log in to GHCR
+        shell: pwsh
+        run: |
+          "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Deploy
+        shell: pwsh
+        run: |
+          Copy-Item $env:ENV_FILE .env -Force
+          docker compose $env:COMPOSE.Split(' ') pull
+          docker compose $env:COMPOSE.Split(' ') up -d --remove-orphans
+
+      - name: Verify the stack came up
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 15
+          docker compose $env:COMPOSE.Split(' ') ps
+          $bad = docker compose $env:COMPOSE.Split(' ') ps --format json |
+            ConvertFrom-Json | Where-Object { $_.State -ne 'running' }
+          if ($bad) {
+            docker compose $env:COMPOSE.Split(' ') logs --tail 50
+            throw "Not running after deploy: $($bad.Service -join ', ')"
+          }
+
+      - name: Remove the credentials from the workspace
+        if: always()
+        shell: pwsh
+        run: Remove-Item .env -Force -ErrorAction SilentlyContinue
