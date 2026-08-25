@@ -1,9 +1,11 @@
 import json
 import logging
+import time
 
 from google.genai import errors, types
 
 from bot.ai.client import CLASSIFIER_MODEL, gemini
+from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +29,9 @@ async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
     propagate into the dormant-mode filter and the session start/stop
     paths, turning a transient blip into a wrong action.
     """
+    started = time.perf_counter()
+    log.debug("AI extract -> %s | instruction=%s | text=%s",
+              CLASSIFIER_MODEL, truncate(instruction, 120), truncate(text))
     try:
         resp = await gemini.aio.models.generate_content(
             model=CLASSIFIER_MODEL,
@@ -53,6 +58,8 @@ async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
             log.warning("extract() got an empty response, defaulting to {}")
             return {}
 
+        log.debug("AI extract <- %.0fms | %s",
+                  (time.perf_counter() - started) * 1000, truncate(resp.text))
         parsed = json.loads(resp.text)
         # A model is not obliged to honor response_schema; a JSON array or
         # scalar parses fine but has no .get(), which would blow up in

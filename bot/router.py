@@ -7,6 +7,8 @@ that gate runs unless a human explicitly spoke to the bot.
 """
 
 import logging
+
+from bot.logging_setup import truncate
 from datetime import date
 
 from google.genai import types
@@ -293,7 +295,10 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     if not addressed_to_bot(message, bot_id, bot_username):
         # Listening is not speaking (R5 + R1): record whatever is worth
         # keeping and touch activity, but never send_message on this path.
+        log.debug("session %s: not addressed, silent capture only", session_id)
         extracted = await _silent_capture(pool, telegram_bot, session_id, text)
+        if any(extracted.get(k) for k in ("list_items", "checked_off_items", "facts")):
+            log.info("session %s: captured %s", session_id, truncate(extracted, 200))
         await session.touch_activity(pool, session_id)
         await decision_log.log_decision(
             pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="silent_capture",
@@ -364,6 +369,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             return
         # "unrelated" -> fall through to normal processing below.
 
+    log.debug("session %s: addressed, deciding intent", session_id)
     if await classify(_STOP_INSTRUCTION, text):
         # close_session returns False when someone (or the worker's auto-close)
         # got there first. Posting the summary regardless means two people

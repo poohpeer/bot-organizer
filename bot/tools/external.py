@@ -1,10 +1,12 @@
 import logging
 import os
+import time
 
 import httpx
 from google.genai import errors, types
 
 from bot.ai.client import MODELS, gemini
+from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +71,8 @@ async def web_search(query: str) -> dict:
     """
     last_error = None
     for model in SEARCH_MODELS:
+        started = time.perf_counter()
+        log.debug("web_search -> %s | query=%s", model, truncate(query, 150))
         try:
             resp = await gemini.aio.models.generate_content(
                 model=model,
@@ -101,9 +105,13 @@ async def web_search(query: str) -> dict:
             break
 
         text = (resp.text or "").strip()
+        elapsed = (time.perf_counter() - started) * 1000
         if not text:
+            log.debug("web_search <- %.0fms | empty result", elapsed)
             return {"found": False, "summary": None, "sources": []}
-        return {"found": True, "summary": text, "sources": _extract_sources(resp)}
+        sources = _extract_sources(resp)
+        log.debug("web_search <- %.0fms | %d sources | %s", elapsed, len(sources), truncate(text))
+        return {"found": True, "summary": text, "sources": sources}
 
     if last_error is not None:
         log.warning("web_search exhausted all search models for query=%r", query)
@@ -120,6 +128,9 @@ async def maps_lookup(query: str) -> dict:
     a transport error, unparsable JSON, or a response missing the fields
     we need — comes back as found=False rather than raising, so a flaky
     upstream never crashes the tool loop or produces a half-built answer."""
+    started = time.perf_counter()
+    # The API key travels in a header and is deliberately never logged.
+    log.debug("maps_lookup -> %s | query=%s", _TEXT_SEARCH_URL, truncate(query, 150))
     try:
         resp = await _client().post(
             _TEXT_SEARCH_URL,
@@ -162,6 +173,8 @@ async def maps_lookup(query: str) -> dict:
     if not name:
         return {"found": False}
 
+    log.debug("maps_lookup <- %.0fms | name=%s | lat=%s lon=%s | rating=%s",
+              (time.perf_counter() - started) * 1000, name, lat, lon, p.get("rating"))
     return {
         "found": True,
         "name": name,
@@ -181,6 +194,8 @@ async def weather_lookup(lat: float, lon: float, date: str) -> dict:
     """Daily forecast via Open-Meteo. Same fail-safe contract as
     maps_lookup: non-200, transport errors, malformed JSON, or a response
     missing the requested date's fields all resolve to found=False."""
+    started = time.perf_counter()
+    log.debug("weather_lookup -> lat=%s lon=%s date=%s", lat, lon, date)
     try:
         resp = await _client().get(_WEATHER_URL, params={
             "latitude": lat, "longitude": lon,
@@ -217,7 +232,11 @@ async def weather_lookup(lat: float, lon: float, date: str) -> dict:
         # past the forecast horizon). Reporting temp_max_c=None as a "found"
         # forecast would be exactly the confident-but-empty answer R10 forbids.
         if forecast["temp_max_c"] is None and forecast["weather_code"] is None:
+            log.debug("weather_lookup <- %.0fms | all-null row, treating as not found",
+                      (time.perf_counter() - started) * 1000)
             return {"found": False}
+        log.debug("weather_lookup <- %.0fms | %s",
+                  (time.perf_counter() - started) * 1000, truncate(forecast))
         return forecast
     except (KeyError, IndexError, TypeError):
         log.warning("weather_lookup response missing expected daily fields for date=%r", date, exc_info=True)

@@ -74,6 +74,7 @@ async def deliver_due_reminders(pool, telegram_bot, *, min_interval_hours: float
             continue
 
         target_chat_id = r["target_user_id"] if r["target_user_id"] is not None else r["chat_id"]
+        log.debug("reminder %s due, delivering to %s", r["id"], target_chat_id)
         try:
             await telegram_bot.send_message(chat_id=target_chat_id, text=r["message"])
         except Exception:
