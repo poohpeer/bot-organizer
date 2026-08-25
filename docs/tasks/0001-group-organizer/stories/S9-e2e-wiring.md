@@ -86,499 +86,174 @@ promotion, so a permission change never re-greets the chat.
 - Modify: `tests/test_router.py`
 
 **Interfaces:**
-- Consumes: `bot.session.close_session`/`record_closing_reply`/`touch_activity`
-  (S3), `bot.tools.core.get_pending_confirmation`/`resolve_confirmation`/
-  `execute_confirmed_action`/`list_show`/`get_participants` (S4),
-  `bot.tools.core.build_core_registry`, `bot.tools.external.build_external_registry`,
-  `bot.tools.composed.build_composed_registry` (S4/S5/S6),
-  `bot.ai.tool_loop.run_tool_loop`, `bot.ai.client.fallback` (S2),
-  `bot.addressing.addressed_to_bot` (S7).
-- Produces: `async bot.router.handle_active_message(pool, telegram_bot, active_session, message, bot_id, bot_username) -> None`.
+- Consumes: `bot.addressing.addressed_to_bot` (S7),
+  `bot.session.close_session`/`record_closing_reply`/`touch_activity` (S3),
+  `bot.tools.core.get_pending_confirmation`/`resolve_confirmation`/
+  `execute_confirmed_action` (S4), `build_core_registry` (S4),
+  `build_external_registry` (S5), `build_composed_registry` (S6),
+  `bot.ai.tool_loop.run_tool_loop`, `bot.ai.client.fallback`,
+  `bot.ai.classify.extract` (S2), `bot.decision_log.log_decision` (S3).
+- Produces:
+  `async bot.router.handle_active_message(pool, telegram_bot, active_session, message, bot_id, bot_username) -> None`
 
-**Split listening from speaking (R5 + R1).** An active session reads every
-message but answers only addressed ones:
+**Listening is not speaking (R5 + R1).** An active session reads every
+message and answers only addressed ones:
 
 ```
-unaddressed ──▶ silent capture: extract facts/list items, record them,
-                touch_activity, send nothing at all
-addressed   ──▶ closing-question reply? pending confirmation? otherwise the
-                full tool loop, and reply in chat
+addressed_to_bot?
+├── no  ──▶ SILENT CAPTURE. Extract any facts/list items worth keeping and
+│           record them, touch_activity, send NOTHING. Never send_message
+│           on this path — R1's "adds each item without announcing it".
+└── yes ──▶ 1. an outstanding closing question?  -> record_closing_reply
+            2. a pending destructive confirmation? -> resolve + execute
+            3. otherwise -> classify intent, then the full tool loop
 ```
 
-The silent-capture path is what makes R1 work ("надо купить помидоры" adds
-three items with no announcement). It must never call `send_message`.
+**Stopping is understood, never matched (R3).** There is no keyword list or
+regular expression for "we're done" anywhere in the router. The addressed
+path asks the model to classify intent among `stop` / `continue`, and any
+phrasing meaning "you're not needed" must close the session — including
+while R4's `closing_question_snoozed_until` is still in the future. The
+snooze suppresses the bot's *own* asking, never a human's instruction.
 
-**Stopping is model-understood, not matched (R3).** The addressed path asks
-the model to classify intent; there is no keyword list for "we're done". A
-stop closes the session immediately even when R4's `closing_question_snoozed_until`
-is still in the future — the snooze suppresses the bot's *own* asking, never
-a human's explicit instruction.
+**Tests must cover, at minimum:**
+- Unaddressed message in an active session: facts are recorded,
+  `touch_activity` called, and `telegram_bot.send_message` is **never**
+  awaited. Assert the silence directly — this is R1's whole behaviour.
+- Unaddressed message: the tool loop is **not** run (no reply means no
+  expensive turn).
+- Addressed "всё, спасибо, свободен": session closed with
+  `explicit_stop`, a summary posted.
+- Addressed stop **while snoozed**: still closes. This is the case from
+  the user's own brief — an event silently moved, "not yet" already
+  answered, and the group now wants the bot gone.
+- Several different stop phrasings all close the session, driven by the
+  classifier rather than a pattern list.
+- Addressed message answering an outstanding closing question ("да, всё"
+  / "нет, ещё нужен") routes to `record_closing_reply`, not to the tool
+  loop.
+- Addressed "да" while a destructive confirmation is pending: resolves and
+  executes it, and does **not** fall through to the tool loop.
+- Addressed ordinary request: the tool loop runs and its reply is posted.
+- An empty reply from the tool loop posts nothing.
+- Every branch writes a `decision_log` row (R10).
 
-- [ ] **Step 1: Write the failing test** — append to `tests/test_router.py`:
-  ```python
-  def _active_session(session_id=1, chat_id=1, closing_question_asked_at=None):
-      return {"id": session_id, "chat_id": chat_id, "closing_question_asked_at": closing_question_asked_at}
-
-
-  async def test_active_explicit_stop_closes_and_summarizes(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
-      monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="SUMMARY"))
-      monkeypatch.setattr(router.session, "close_session", AsyncMock())
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-
-      await router.handle_active_message(pool, telegram_bot, _active_session(), user_id=1, text="that's it, thanks")
-
-      router.session.close_session.assert_awaited_once_with(pool, 1, reason="explicit_stop")
-      telegram_bot.send_message.assert_awaited_once_with(chat_id=1, text="SUMMARY")
-
-
-  async def test_active_closing_reply_yes_closes_session(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))  # not an explicit stop
-      monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
-      monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="SUMMARY"))
-      monkeypatch.setattr(router.session, "record_closing_reply", AsyncMock())
-
-      from datetime import datetime
-      active = _active_session(closing_question_asked_at=datetime(2026, 8, 1))
-
-      await router.handle_active_message(pool, telegram_bot, active, user_id=1, text="yep all done")
-
-      router.session.record_closing_reply.assert_awaited_once_with(pool, 1, continued=False)
-      telegram_bot.send_message.assert_awaited_once_with(chat_id=1, text="SUMMARY")
-
-
-  async def test_active_closing_reply_no_stays_active(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
-      monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "no"}))
-      monkeypatch.setattr(router.session, "record_closing_reply", AsyncMock())
-
-      from datetime import datetime
-      active = _active_session(closing_question_asked_at=datetime(2026, 8, 1))
-
-      await router.handle_active_message(pool, telegram_bot, active, user_id=1, text="not yet, next week")
-
-      router.session.record_closing_reply.assert_awaited_once_with(pool, 1, continued=True)
-      telegram_bot.send_message.assert_awaited_once()
-
-
-  async def test_active_closing_reply_unrelated_falls_through_to_tool_loop(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
-      monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
-      monkeypatch.setattr(router.core_tools, "get_pending_confirmation", AsyncMock(return_value=None))
-      monkeypatch.setattr(router.session, "touch_activity", AsyncMock())
-      monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="tomatoes added"))
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-      monkeypatch.setattr(router, "_build_registry", lambda pool, bot: {})
-
-      from datetime import datetime
-      active = _active_session(closing_question_asked_at=datetime(2026, 8, 1))
-
-      await router.handle_active_message(pool, telegram_bot, active, user_id=1, text="also we need tomatoes")
-
-      router.run_tool_loop.assert_awaited_once()
-      telegram_bot.send_message.assert_awaited_once_with(chat_id=1, text="tomatoes added")
-
-
-  async def test_active_pending_confirmation_yes_executes(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
-      confirmation = {"id": 5, "action_type": "list_remove_item", "action_params": {"name": "tomatoes"}}
-      monkeypatch.setattr(router.core_tools, "get_pending_confirmation", AsyncMock(return_value=confirmation))
-      monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
-      monkeypatch.setattr(router.core_tools, "resolve_confirmation", AsyncMock(return_value=confirmation))
-      monkeypatch.setattr(router.core_tools, "execute_confirmed_action", AsyncMock(return_value={"status": "executed"}))
-
-      await router.handle_active_message(pool, telegram_bot, _active_session(), user_id=1, text="yes go ahead")
-
-      router.core_tools.execute_confirmed_action.assert_awaited_once()
-      telegram_bot.send_message.assert_awaited_once_with(chat_id=1, text="Готово.")
-
-
-  async def test_active_pending_confirmation_no_cancels(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
-      confirmation = {"id": 5, "action_type": "list_remove_item", "action_params": {"name": "tomatoes"}}
-      monkeypatch.setattr(router.core_tools, "get_pending_confirmation", AsyncMock(return_value=confirmation))
-      monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "no"}))
-      monkeypatch.setattr(router.core_tools, "resolve_confirmation", AsyncMock())
-
-      await router.handle_active_message(pool, telegram_bot, _active_session(), user_id=1, text="no don't")
-
-      router.core_tools.resolve_confirmation.assert_awaited_once_with(pool, 5, confirmed=False)
-      telegram_bot.send_message.assert_awaited_once_with(chat_id=1, text="Отменил.")
-
-
-  async def test_active_normal_message_runs_tool_loop_and_replies(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
-      monkeypatch.setattr(router.core_tools, "get_pending_confirmation", AsyncMock(return_value=None))
-      monkeypatch.setattr(router.session, "touch_activity", AsyncMock())
-      monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="Here's the list: tomatoes"))
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-      monkeypatch.setattr(router, "_build_registry", lambda pool, bot: {})
-
-      await router.handle_active_message(pool, telegram_bot, _active_session(), user_id=1, text="what's on the list")
-
-      router.session.touch_activity.assert_awaited_once_with(pool, 1)
-      telegram_bot.send_message.assert_awaited_once_with(chat_id=1, text="Here's the list: tomatoes")
-
-
-  async def test_active_silent_capture_sends_nothing(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
-      monkeypatch.setattr(router.core_tools, "get_pending_confirmation", AsyncMock(return_value=None))
-      monkeypatch.setattr(router.session, "touch_activity", AsyncMock())
-      monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="   "))
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-      monkeypatch.setattr(router, "_build_registry", lambda pool, bot: {})
-
-      await router.handle_active_message(pool, telegram_bot, _active_session(), user_id=1, text="we need tomatoes")
-
-      telegram_bot.send_message.assert_not_awaited()
-
-
-  async def test_active_tool_loop_failure_sends_fallback_message(monkeypatch):
-      pool, telegram_bot = _pool(), AsyncMock()
-      monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
-      monkeypatch.setattr(router.core_tools, "get_pending_confirmation", AsyncMock(return_value=None))
-      monkeypatch.setattr(router.session, "touch_activity", AsyncMock())
-      monkeypatch.setattr(router, "run_tool_loop", AsyncMock(side_effect=RuntimeError("boom")))
-      monkeypatch.setattr(router.decision_log, "log_decision", AsyncMock())
-      monkeypatch.setattr(router, "_build_registry", lambda pool, bot: {})
-
-      await router.handle_active_message(pool, telegram_bot, _active_session(), user_id=1, text="???")
-
-      telegram_bot.send_message.assert_awaited_once_with(chat_id=1, text=router._FALLBACK_MESSAGE)
-  ```
-
-- [ ] **Step 2: Run it, confirm it fails**
-  ```bash
-  uv run pytest tests/test_router.py -v
-  ```
-  Expected: `AttributeError: module 'bot.router' has no attribute 'handle_active_message'`.
-
-- [ ] **Step 3: Append to `bot/router.py`**
-  ```python
-  import bot.tools.composed as composed_tools
-  import bot.tools.core as core_tools
-  import bot.tools.external as external_tools
-  from bot.ai.client import fallback
-  from bot.ai.tool_loop import run_tool_loop
-
-  _FALLBACK_MESSAGE = "Не понял, переформулируй, пожалуйста."
-
-  _STOP_INSTRUCTION = (
-      "The bot is actively tracking an event for this chat. Answer true "
-      "only if this message is an explicit, direct instruction telling the "
-      "bot to stop (e.g. 'that's it, thanks', 'you can stop now', 'hatit'). "
-      "Chat that merely sounds like the event is wrapping up, without "
-      "directly telling the bot to stop, is false."
-  )
-
-  _YES_NO_UNRELATED_SCHEMA = types.Schema(
-      type=types.Type.OBJECT,
-      properties={"reply": types.Schema(type=types.Type.STRING, enum=["yes", "no", "unrelated"])},
-      required=["reply"],
-  )
-  _CLOSING_REPLY_INSTRUCTION = (
-      "The bot just asked in the group chat: 'How did it go — still need "
-      "me, or good to close?'. Classify the message below relative to that "
-      "question. 'yes' = it's over, close. 'no' = not yet, stay active. "
-      "'unrelated' = this message isn't actually answering that question."
-  )
-  _CONFIRMATION_REPLY_TEMPLATE = (
-      "The bot proposed a sensitive action and is waiting for confirmation: "
-      "{action_type} {action_params}. Classify the message below. 'yes' = "
-      "clearly confirms doing it. 'no' = clearly declines/cancels it. "
-      "'unrelated' = this message isn't actually answering that."
-  )
-  _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
-      "You are a group-chat organizing assistant, currently actively "
-      "tracking one event. Use the available tools to remember facts, "
-      "manage the shared list, track participant confirmations, schedule "
-      "reminders, and answer questions using grounded lookups — never "
-      "invent a fact that wasn't found by a tool. When a message only gives "
-      "you something to silently record (a fact, a list item) and doesn't "
-      "ask a question or need clarification, respond with an empty string — "
-      "do not narrate what you just recorded."
-  )
-
-
-  def _build_registry(pool, telegram_bot) -> dict:
-      return {
-          **core_tools.build_core_registry(pool, telegram_bot),
-          **external_tools.build_external_registry(),
-          **composed_tools.build_composed_registry(pool, telegram_bot),
-      }
-
-
-  async def _summarize_session(pool, session_id: int) -> str:
-      list_result = await core_tools.list_show(pool, session_id)
-      participants_result = await core_tools.get_participants(pool, session_id)
-      items = ", ".join(i["name"] for i in list_result["items"]) or "пусто"
-      confirmed = [p["display_name"] for p in participants_result["participants"] if p["status"] == "confirmed"]
-      return f"Готово, сессию закрываю. Список: {items}. Подтвердили: {', '.join(confirmed) or 'никто'}."
-
-
-  async def handle_active_message(pool, telegram_bot, active_session, user_id: int | None, text: str) -> None:
-      session_id, chat_id = active_session["id"], active_session["chat_id"]
-
-      if await classify(_STOP_INSTRUCTION, text):
-          summary = await _summarize_session(pool, session_id)
-          await session.close_session(pool, session_id, reason="explicit_stop")
-          await telegram_bot.send_message(chat_id=chat_id, text=summary)
-          await decision_log.log_decision(
-              pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_stop",
-              decision={"trigger": "explicit", "session_id": session_id},
-          )
-          return
-
-      if active_session["closing_question_asked_at"] is not None:
-          reply = (await extract(_CLOSING_REPLY_INSTRUCTION, text, _YES_NO_UNRELATED_SCHEMA)).get("reply")
-          if reply == "yes":
-              summary = await _summarize_session(pool, session_id)
-              await session.record_closing_reply(pool, session_id, continued=False)
-              await telegram_bot.send_message(chat_id=chat_id, text=summary)
-              return
-          if reply == "no":
-              await session.record_closing_reply(pool, session_id, continued=True)
-              await telegram_bot.send_message(chat_id=chat_id, text="Понял, продолжаю следить.")
-              return
-          # "unrelated" -> fall through to normal processing below
-
-      pending_confirmation = await core_tools.get_pending_confirmation(pool, chat_id)
-      if pending_confirmation is not None:
-          instruction = _CONFIRMATION_REPLY_TEMPLATE.format(
-              action_type=pending_confirmation["action_type"],
-              action_params=pending_confirmation["action_params"],
-          )
-          reply = (await extract(instruction, text, _YES_NO_UNRELATED_SCHEMA)).get("reply")
-          if reply == "yes":
-              resolved = await core_tools.resolve_confirmation(pool, pending_confirmation["id"], confirmed=True)
-              await core_tools.execute_confirmed_action(pool, telegram_bot, resolved)
-              await telegram_bot.send_message(chat_id=chat_id, text="Готово.")
-              return
-          if reply == "no":
-              await core_tools.resolve_confirmation(pool, pending_confirmation["id"], confirmed=False)
-              await telegram_bot.send_message(chat_id=chat_id, text="Отменил.")
-              return
-          # "unrelated" -> fall through to normal processing below
-
-      await session.touch_activity(pool, session_id)
-      registry = _build_registry(pool, telegram_bot)
-      try:
-          reply_text = await run_tool_loop(
-              fallback, text, registry, system_instruction=_ACTIVE_MODE_SYSTEM_INSTRUCTION
-          )
-      except Exception:
-          log.exception("Tool loop failed for chat_id=%s session_id=%s", chat_id, session_id)
-          reply_text = _FALLBACK_MESSAGE
-
-      await decision_log.log_decision(
-          pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="tool_call",
-          decision={"session_id": session_id, "reply": reply_text},
-      )
-      if reply_text.strip():
-          await telegram_bot.send_message(chat_id=chat_id, text=reply_text)
-  ```
-
-- [ ] **Step 4: Run tests, confirm pass**
-  ```bash
-  uv run pytest tests/test_router.py -v
-  ```
-  Expected: `14 passed`.
-
-- [ ] **Step 5: Commit**
-  ```bash
-  git add bot/router.py tests/test_router.py
-  git commit -m "Add active-session routing: stop, closing-question reply, confirmation gate, tool loop"
-  ```
 
 ---
 
 ### Task 3: `bot/main.py` — Telegram application wiring
 
-**Satisfies:** R10
+**Satisfies:** R5, R10
 
 **Files:**
 - Create: `bot/main.py`
 - Create: `tests/test_main.py`
 
 **Interfaces:**
-- Consumes: `bot.router.handle_dormant_message`/`handle_active_message`
-  (Tasks 1–2), `bot.dedup.is_duplicate` (S3), `db.pool.create_pool`/`init_db` (S1).
-- Produces: `async bot.main.route_update(pool, telegram_bot, *, update_id, chat_id, chat_title, user_id, text) -> None`,
-  `bot.main.main()` — the bot process entrypoint.
+- Consumes: `bot.router` (Tasks 1–2), `bot.dedup.is_duplicate` (S3),
+  `bot.session.get_active_session` (S3), `bot.addressing.bot_was_added` (S7),
+  `db.pool.create_pool`/`init_db` (S1).
+- Produces:
+  - `async bot.main.route_update(pool, telegram_bot, message, bot_id, bot_username, *, update_id) -> None`
+  - `async bot.main.route_membership(pool, telegram_bot, chat_member_updated, bot_id, bot_username) -> None`
+  - `bot.main.main()` — the bot process entrypoint.
 
-- [ ] **Step 1: Write the failing test** — create `tests/test_main.py`:
-  ```python
-  from unittest.mock import AsyncMock, MagicMock
+**The whole Message object is passed through**, not extracted text: the
+addressing gate needs `entities`, `caption_entities` and
+`reply_to_message`, none of which survive being flattened to a string.
 
-  import bot.main as main
+**`bot_username` comes from `await telegram_bot.get_me()` at startup.**
+Never a constant or an env var: if the bot is renamed, a stale username
+makes every mention stop matching and the bot goes permanently silent with
+no error in the logs — the hardest possible failure to diagnose.
 
+**Ignore messages sent by any bot** (`message.from_user.is_bot`). Two bots
+mentioning each other would otherwise loop.
 
-  async def test_route_update_drops_duplicate(monkeypatch):
-      pool = MagicMock()
-      monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=True))
-      monkeypatch.setattr(main.router, "handle_dormant_message", AsyncMock())
-      monkeypatch.setattr(main.router, "handle_active_message", AsyncMock())
+**Removal closes sessions.** When `my_chat_member` reports the bot leaving
+or being kicked, close that chat's active session with `explicit_stop`.
+Without this the worker keeps trying to ask its closing question in a chat
+it cannot reach, forever — the open item S8 recorded.
 
-      await main.route_update(
-          pool, AsyncMock(), update_id=1, chat_id=1, chat_title="Chat", user_id=1, text="hi"
-      )
+**Dedup before anything with side effects (R10):** `is_duplicate(update_id)`
+gates every path, membership updates included.
 
-      main.router.handle_dormant_message.assert_not_awaited()
-      main.router.handle_active_message.assert_not_awaited()
-
-
-  async def test_route_update_dormant_dispatches_to_dormant_handler(monkeypatch):
-      pool = MagicMock()
-      pool.execute = AsyncMock()
-      telegram_bot = AsyncMock()
-      monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
-      monkeypatch.setattr(main.session, "get_active_session", AsyncMock(return_value=None))
-      monkeypatch.setattr(main.router, "handle_dormant_message", AsyncMock())
-
-      await main.route_update(
-          pool, telegram_bot, update_id=1, chat_id=1, chat_title="Chat", user_id=1, text="hi"
-      )
-
-      main.router.handle_dormant_message.assert_awaited_once_with(pool, telegram_bot, 1, 1, "hi")
+**Tests must cover, at minimum:**
+- A duplicate `update_id` reaches neither router function.
+- A message from a bot is ignored.
+- Dormant chat -> `handle_dormant_message`; active chat ->
+  `handle_active_message`, with the session row passed through.
+- The bot being added -> the greeting path, no session created.
+- The bot being removed -> the chat's active session is closed with
+  `explicit_stop`; a chat with no active session is a no-op.
+- `main()` resolves `bot_username` via `get_me()` rather than a constant.
 
 
-  async def test_route_update_active_dispatches_to_active_handler(monkeypatch):
-      pool = MagicMock()
-      pool.execute = AsyncMock()
-      active = {"id": 1, "chat_id": 1}
-      monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
-      monkeypatch.setattr(main.session, "get_active_session", AsyncMock(return_value=active))
-      monkeypatch.setattr(main.router, "handle_active_message", AsyncMock())
+- [ ] Implement each task TDD-first: write the tests the spec above requires,
+  watch them fail, then implement `bot/router.py` / `bot/main.py`.
+- [ ] Run the full suite (184 passing on main) and commit per task.
+---
 
-      await main.route_update(
-          pool, AsyncMock(), update_id=1, chat_id=1, chat_title="Chat", user_id=1, text="hi"
-      )
+## Implementation notes (added during S9, after code review)
 
-      main.router.handle_active_message.assert_awaited_once()
+Handed to the subagent as a specification rather than literal code — the
+pre-pivot brief still had `route_update` taking a flat `text` and `chat_id`,
+which the addressing gate cannot work with (it reads `entities`,
+`caption_entities` and `reply_to_message`, none of which survive being
+flattened to a string).
 
+Four defects found during verification, each reproduced first.
 
-  async def test_route_update_ignores_empty_text(monkeypatch):
-      pool = MagicMock()
-      monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
-      monkeypatch.setattr(main.router, "handle_dormant_message", AsyncMock())
+1. **[Medium] Two simultaneous stops posted two summaries.** `close_session`
+   returns a bool specifically so the loser of a race can stay quiet; the
+   router ignored it. Reproduced with `asyncio.gather`: **2 messages** for one
+   closure.
 
-      await main.route_update(
-          pool, AsyncMock(), update_id=1, chat_id=1, chat_title="Chat", user_id=1, text=""
-      )
+2. **[Medium] A late "да" to an already-closed session posted a full summary.**
+   The worker's auto-close can beat a reply. `record_closing_reply`'s own
+   docstring says the caller should use its return value "so it can tell the
+   user the session already closed"; the caller ignored it, so the person was
+   told they had closed a session the worker closed hours earlier.
 
-      main.router.handle_dormant_message.assert_not_awaited()
-  ```
+3. **[Medium — R10] A confirmed destructive action reported success blindly.**
+   `resolve_confirmation` returns None if the row was already resolved, and
+   the delete legitimately finds nothing when the item was renamed or removed
+   between proposal and confirmation. "Готово" in either case is the
+   confident-but-wrong answer R10 exists to prevent.
 
-- [ ] **Step 2: Run it, confirm it fails**
-  ```bash
-  uv run pytest tests/test_main.py -v
-  ```
-  Expected: `ModuleNotFoundError: No module named 'bot.main'`.
+4. **[High — R2 was unbuilt] Participants' DM replies went nowhere.** The
+   subagent flagged this honestly as a gap rather than inventing routing, and
+   it was right to: R2 is listed against S9 in the epic, so it was in scope. A
+   DM carries no session, so a reply fell into the dormant path and tried to
+   start a new session. `handle_private_message` now finds the sender among
+   participants still marked unknown in any active session, records their
+   answer, and returns False when the message isn't an answer to a pending
+   nudge so ordinary handling still applies.
 
-- [ ] **Step 3: Implement `bot/main.py`**
-  ```python
-  import logging
-  import os
+**Divergence accepted from the subagent:** `route_membership` gained
+`*, update_id`. The spec's own R10 line requires dedup "membership updates
+included", which its stated signature made unreachable. Correct catch.
 
-  from telegram import Update
-  from telegram.ext import Application, ContextTypes, MessageHandler, filters
+## A production defect surfaced by a flaky test
 
-  import bot.dedup as dedup
-  import bot.router as router
-  import bot.session as session
-  import db.pool as db_pool_module
+The quiet-hours test picks whichever IANA zone is currently at the hour under
+test. It failed once with
+`asyncpg InvalidParameterValueError: time zone "US/Hawaii" not recognized`.
 
-  logging.basicConfig(
-      format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
-  )
-  logging.getLogger("google_genai").setLevel(logging.WARNING)
-  logging.getLogger("httpx").setLevel(logging.WARNING)
-  log = logging.getLogger(__name__)
+That was not just a test bug. **zoneinfo knows 599 zones; Postgres knows 487.**
+The 113 extras are mostly legacy aliases — `America/Buenos_Aires`,
+`US/Hawaii`, `Africa/Asmera` — exactly the names a model reaches for.
+`set_chat_timezone` validated only against zoneinfo, so one of them could be
+stored, and then `claim_sessions_for_closing_question` would raise for the
+**whole batch**: one chat's bad zone silences the bot in every chat.
 
+`known_to_postgres` now checks `pg_timezone_names` on write, so the two lists
+can no longer disagree about a stored value.
 
-  async def route_update(pool, telegram_bot, *, update_id, chat_id, chat_title, user_id, text) -> None:
-      if await dedup.is_duplicate(pool, update_id):
-          return
-      if not text:
-          return
+## Known gap
 
-      await pool.execute(
-          "INSERT INTO chats (chat_id, title) VALUES ($1, $2) ON CONFLICT (chat_id) DO NOTHING",
-          chat_id, chat_title,
-      )
-
-      active = await session.get_active_session(pool, chat_id)
-      if active is None:
-          await router.handle_dormant_message(pool, telegram_bot, chat_id, user_id, text)
-      else:
-          await router.handle_active_message(pool, telegram_bot, active, user_id, text)
-
-
-  async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-      pool = context.bot_data["pool"]
-      await route_update(
-          pool, context.bot,
-          update_id=update.update_id,
-          chat_id=update.effective_chat.id,
-          chat_title=update.effective_chat.title or update.effective_chat.first_name or "",
-          user_id=update.effective_user.id if update.effective_user else None,
-          text=update.effective_message.text or "",
-      )
-
-
-  async def post_init(app: Application) -> None:
-      pool = await db_pool_module.create_pool(os.environ["DATABASE_URL"])
-      await db_pool_module.init_db(pool)
-      app.bot_data["pool"] = pool
-
-
-  def main() -> None:
-      app = (
-          Application.builder()
-          .token(os.environ["BOT_TOKEN"])
-          .concurrent_updates(True)
-          .post_init(post_init)
-          .build()
-      )
-      app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-      log.info("Starting bot (long polling)")
-      app.run_polling()
-
-
-  if __name__ == "__main__":
-      main()
-  ```
-
-- [ ] **Step 4: Run tests, confirm pass**
-  ```bash
-  uv run pytest tests/test_main.py -v
-  ```
-  Expected: `4 passed`.
-
-- [ ] **Step 5: Manual smoke test**
-  ```bash
-  uv run python -m py_compile bot/main.py bot/router.py
-  DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bot_organizer \
-    BOT_TOKEN=<real token> GEMINI_API_KEY=<real key> GOOGLE_MAPS_API_KEY=<real key> \
-    uv run python -m bot.main
-  ```
-  In Telegram, add the bot to a test group. Confirm: (1) ordinary chat
-  produces no reply while dormant; (2) "start watching for X" gets a
-  confirmation reply and a session row appears in `sessions`; (3) "we need
-  tomatoes" while active is captured silently (no reply) and appears in
-  `list_items`; (4) "what's on the list" replies with the list; (5) "that's
-  it, thanks" closes the session with a summary.
-
-- [ ] **Step 6: Commit**
-  ```bash
-  git add bot/main.py tests/test_main.py
-  git commit -m "Add bot/main.py: Telegram application wiring and update routing"
-  ```
+`handle_private_message` resolves the sender to *some* active session where
+they are an unconfirmed participant, taking the most recent when there are
+several. Someone in two simultaneous outings could have the wrong one updated.
+Rare enough to leave, but it wants the nudge to carry its session id — worth
+doing if group DMs ever get busy.

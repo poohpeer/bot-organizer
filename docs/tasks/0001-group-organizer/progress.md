@@ -17,7 +17,7 @@
 | S6 | 0001-S6-composed-flows | complete | 7a0813b..HEAD | review: 6 defects fixed; tester PASS | — | maps verified LIVE (key supplied) |
 | S7 | 0001-S7-addressing-gate | complete | see PR | tester PASS | — | REPLACED the proactive trigger (PR #8) after a product decision |
 | S8 | 0001-S8-background-worker | complete | 02a44e6..HEAD | review: 5 defects fixed; tester PASS | — | R4 auto-close-without-asking caught |
-| S9 | — | blocked | — | — | — | brief rewritten for the addressing gate |
+| S9 | 0001-S9-e2e-wiring | complete | 0ab6507..HEAD | review: 4 defects + 1 prod issue fixed; tester PASS | — | R2 was unbuilt; zoneinfo/Postgres zone mismatch found |
 | S10 | — | blocked | — | — | — | waits on S8, S9 |
 | S11 | 0001-S11-per-chat-timezone | complete | see PR | tester PASS | — | added mid-epic; closes the timezone debt from S3/S4/S8 |
 
@@ -137,3 +137,16 @@
   zone, delaying rather than skipping. Tested by placing a chat in whichever
   IANA zone is currently at the hour under test — no faked clocks. Both
   "stay silent" tests confirmed to fail with the window removed. Suite: 184.
+- 2026-08-25: S9 implemented (3 tasks). Brief was handed over as a SPEC, not
+  code — the pre-pivot version still flattened Message to text, which the
+  addressing gate cannot use. Review found 4 defects, each reproduced: two
+  simultaneous stops posted two summaries, a late 'да' to an already-closed
+  session posted a summary as if that person closed it, a confirmed
+  destructive action reported success blindly (R10), and — flagged honestly
+  by the subagent — R2 was entirely unbuilt: participants' DM replies fell
+  into the dormant path and tried to start a session. Added
+  handle_private_message. Separately, a flaky quiet-hours test turned out to
+  be a PRODUCTION defect: zoneinfo knows 599 zones, Postgres 487, and storing
+  one of the 113 legacy aliases made the closing-question query raise for the
+  whole batch — one chat's bad zone silencing the bot everywhere. Zones are
+  now validated against pg_timezone_names on write. Suite: 218 passed.

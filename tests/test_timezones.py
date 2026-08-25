@@ -220,11 +220,14 @@ async def _due_at_local_hour(db_pool, hour, monkeypatch):
     monkeypatch.setattr(session, "QUIET_UNTIL_HOUR", 9)
     monkeypatch.setattr(session, "QUIET_FROM_HOUR", 21)
 
-    for zone in available_timezones():
-        if dt.datetime.now(ZoneInfo(zone)).hour == hour:
+    # Only zones Postgres also knows: zoneinfo carries 113 legacy aliases that
+    # `AT TIME ZONE` rejects, and picking one made this test fail at random.
+    pg_zones = {r["name"] for r in await db_pool.fetch("SELECT name FROM pg_timezone_names")}
+    for zone in sorted(pg_zones):
+        if zone in available_timezones() and dt.datetime.now(ZoneInfo(zone)).hour == hour:
             break
     else:
-        pytest.skip(f"no IANA zone is currently at {hour}:00")
+        pytest.skip(f"no usable zone is currently at {hour}:00")
 
     local_today = dt.datetime.now(ZoneInfo(zone)).date()
     session_id = await _dated_session(db_pool, 1, zone, local_today - dt.timedelta(days=1))
@@ -253,3 +256,22 @@ async def test_the_question_goes_out_once_the_group_is_awake(db_pool, monkeypatc
     would_speak, zone = await _due_at_local_hour(db_pool, 10, monkeypatch)
 
     assert would_speak is True, f"bot stayed silent at 10:00 in {zone}"
+
+
+async def test_a_zone_postgres_cannot_use_is_refused(db_pool):
+    """zoneinfo knows 599 zones, Postgres 487. Storing one of the 113 legacy
+    aliases would make the closing-question query raise for the whole batch —
+    one chat's bad zone silencing the bot in every chat."""
+    await _chat(db_pool, chat_id=1)
+
+    assert timezones.is_valid_timezone("US/Hawaii") is True, "Python accepts it"
+    assert await timezones.known_to_postgres(db_pool, "US/Hawaii") is False
+    assert await timezones.set_chat_timezone(db_pool, 1, "US/Hawaii") is False
+    assert await db_pool.fetchval("SELECT timezone FROM chats WHERE chat_id = 1") is None
+
+
+async def test_a_zone_both_agree_on_is_stored(db_pool):
+    await _chat(db_pool, chat_id=1)
+
+    assert await timezones.set_chat_timezone(db_pool, 1, "Pacific/Honolulu") is True
+    assert await db_pool.fetchval("SELECT timezone FROM chats WHERE chat_id = 1") == "Pacific/Honolulu"
