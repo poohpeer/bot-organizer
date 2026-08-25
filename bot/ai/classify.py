@@ -35,6 +35,14 @@ async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
                 system_instruction=instruction,
                 response_mime_type="application/json",
                 response_schema=schema,
+                # generate_content takes the SDK's automatic-function-calling
+                # path unless told otherwise — regardless of whether any tools
+                # were supplied — and logs a warning recommending a chat
+                # session. This call returns structured JSON and declares no
+                # tools at all, so there is nothing to call back into. The one
+                # place that does use function calling, bot/ai/tool_loop.py,
+                # already goes through AsyncChat as the SDK recommends.
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             ),
         )
         # resp.text is None whenever the response carries no text parts —
