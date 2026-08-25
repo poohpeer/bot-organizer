@@ -1,9 +1,15 @@
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from google.genai import errors
 
+from google.genai import types
+
 from bot.ai import classify as classify_module
+
+_SCHEMA = types.Schema(
+    type=types.Type.OBJECT, properties={"result": types.Schema(type=types.Type.BOOLEAN)}
+)
 
 
 async def test_classify_parses_true(monkeypatch):
@@ -38,8 +44,7 @@ async def test_classify_fails_closed_on_api_error(monkeypatch):
 
 
 async def test_extract_returns_parsed_json(monkeypatch):
-    from google.genai import types
-
+    
     resp = AsyncMock()
     resp.text = json.dumps({"is_start": True, "activity_type": "picnic"})
     monkeypatch.setattr(classify_module.gemini.aio.models, "generate_content", AsyncMock(return_value=resp))
@@ -101,3 +106,23 @@ async def test_extract_fails_closed_on_transport_error(monkeypatch):
     monkeypatch.setattr(classify_module.gemini.aio.models, "generate_content", boom)
 
     assert await classify_module.classify("Is this about food?", "anything") is False
+
+
+async def test_extract_does_not_use_automatic_function_calling():
+    """generate_content takes the SDK's AFC path unless explicitly told not to,
+    even with no tools in the config, and logs a warning about it. This call
+    runs on every incoming message, so the warning is not merely cosmetic
+    noise — it is the hottest path in the bot."""
+    from google.genai import _extra_utils
+
+    captured = {}
+
+    async def fake_generate_content(*, model, contents, config):
+        captured["config"] = config
+        raise RuntimeError("stop here — only the config matters")
+
+    with patch("bot.ai.classify.gemini") as client:
+        client.aio.models.generate_content = fake_generate_content
+        await classify_module.extract("инструкция", "текст", _SCHEMA)
+
+    assert _extra_utils.should_disable_afc(captured["config"]) is True
