@@ -8,6 +8,7 @@ that gate runs unless a human explicitly spoke to the bot.
 
 import logging
 import random
+import unicodedata
 
 from bot.logging_setup import truncate
 from datetime import date
@@ -48,6 +49,13 @@ _AI_UNAVAILABLE_MESSAGES = (
 
 def _ai_unavailable_message() -> str:
     return random.choice(_AI_UNAVAILABLE_MESSAGES)
+
+
+def _has_visible_text(text: str) -> bool:
+    return any(
+        not ch.isspace() and unicodedata.category(ch) not in {"Cc", "Cf"}
+        for ch in text
+    )
 
 _GREETING_TEMPLATE = (
     "Привет! Я включаюсь только когда меня зовут — упомяните {mention} или "
@@ -526,7 +534,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="tool_call",
         decision={"session_id": session_id, "reply": reply_text},
     )
-    if reply_text.strip():
+    if _has_visible_text(reply_text):
         await telegram_bot.send_message(chat_id=chat_id, text=reply_text)
 
 

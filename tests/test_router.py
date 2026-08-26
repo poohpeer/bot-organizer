@@ -45,6 +45,12 @@ async def test_session_bound_registry_forces_active_session_and_sender_identity(
     }
 
 
+def test_has_visible_text_rejects_zero_width_only_reply():
+    assert router._has_visible_text("\u200b\u200b") is False
+    assert router._has_visible_text("  \u200b\n") is False
+    assert router._has_visible_text("\u200bок") is True
+
+
 def _utf16_offset(text: str, marker: str) -> int:
     return len(text[: text.index(marker)].encode("utf-16-le")) // 2
 

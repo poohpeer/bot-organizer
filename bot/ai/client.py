@@ -20,11 +20,12 @@ GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 # separate account, separate quota, separate outage — ahead of the Gemini
 # models means a Gemini rate limit no longer takes the bot down.
 GEMINI_MODELS = [
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemma-4-31b-it",
 ]
 
 
@@ -37,7 +38,7 @@ def build_chain(groq_provider, gemini_provider) -> list[tuple]:
     the thing it was written to check.
     """
     groq_entries = [(groq_provider, model) for model in GROQ_MODELS] if groq_provider else []
-    return groq_entries + [(gemini_provider, model) for model in GEMINI_MODELS]
+    return [(gemini_provider, model) for model in GEMINI_MODELS] + groq_entries
 
 
 CHAIN = build_chain(_GROQ, _GEMINI)
