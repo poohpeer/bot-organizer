@@ -286,13 +286,96 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "with an empty string — do not narrate what you just recorded."
 )
 
+_SESSION_BOUND_TOOLS = frozenset({
+    "remember_fact", "get_facts", "list_add", "list_show", "list_check_off",
+    "list_remove_item", "set_participant", "get_participants",
+    "nudge_unconfirmed_participants", "reminder_set", "reminder_cancel",
+    "broadcast_message", "set_timezone", "resolve_and_save_place",
+    "send_location", "archive_lookup",
+})
 
-def _build_registry(pool, telegram_bot) -> dict:
-    return {
+_SELF_DISPLAY_NAMES = frozenset({
+    "i", "me", "myself", "user", "я", "меня", "мне", "сам", "сама",
+})
+
+
+def _display_name_of(user) -> str | None:
+    if user is None:
+        return None
+    full_name = getattr(user, "full_name", None)
+    if full_name:
+        return full_name
+    username = getattr(user, "username", None)
+    if username:
+        return f"@{username}"
+    first_name = getattr(user, "first_name", None)
+    last_name = getattr(user, "last_name", None)
+    name = " ".join(part for part in (first_name, last_name) if part)
+    return name or None
+
+
+def _active_mode_instruction(session_id: int, current_user) -> str:
+    user_id = getattr(current_user, "id", None)
+    display_name = _display_name_of(current_user)
+    user_context = (
+        f"Current sender: {display_name} (telegram user_id={user_id}). "
+        if user_id is not None and display_name else ""
+    )
+    return (
+        _ACTIVE_MODE_SYSTEM_INSTRUCTION
+        + "\nCurrent session_id is "
+        + str(session_id)
+        + ". Always use this exact session_id for every session-bound tool. "
+        + user_context
+        + "When the current sender refers to themselves as I/me/я/меня, "
+        + "record that actual sender, not a literal name like 'I', 'Я', or 'User'."
+    )
+
+
+def _bind_session_context(registry: dict, session_id: int, current_user) -> dict:
+    """Trust active-session context from the router, not tool args from the model."""
+    user_id = getattr(current_user, "id", None)
+    display_name = _display_name_of(current_user)
+    bound = {}
+
+    for name, fn in registry.items():
+        if name not in _SESSION_BOUND_TOOLS:
+            bound[name] = fn
+            continue
+
+        async def call(*, _fn=fn, _name=name, **kwargs):
+            requested_session_id = kwargs.get("session_id")
+            if requested_session_id != session_id:
+                log.warning(
+                    "Model requested %s with session_id=%r; forcing active session_id=%s",
+                    _name, requested_session_id, session_id,
+                )
+            kwargs["session_id"] = session_id
+
+            if _name == "set_participant":
+                raw_name = str(kwargs.get("display_name") or "").strip().lower()
+                if raw_name in _SELF_DISPLAY_NAMES:
+                    if display_name:
+                        kwargs["display_name"] = display_name
+                    if user_id is not None:
+                        kwargs["user_id"] = user_id
+
+            return await _fn(**kwargs)
+
+        bound[name] = call
+
+    return bound
+
+
+def _build_registry(pool, telegram_bot, *, session_id: int | None = None, current_user=None) -> dict:
+    registry = {
         **core_tools.build_core_registry(pool, telegram_bot),
         **external_tools.build_external_registry(),
         **composed_tools.build_composed_registry(pool, telegram_bot),
     }
+    if session_id is not None:
+        registry = _bind_session_context(registry, session_id, current_user)
+    return registry
 
 
 async def _summarize_session(pool, session_id: int) -> str:
@@ -423,10 +506,11 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         return
 
     await session.touch_activity(pool, session_id)
-    registry = _build_registry(pool, telegram_bot)
+    registry = _build_registry(pool, telegram_bot, session_id=session_id, current_user=message.from_user)
     try:
         reply_text = await run_tool_loop(
-            fallback, text, registry, system_instruction=_ACTIVE_MODE_SYSTEM_INSTRUCTION
+            fallback, text, registry,
+            system_instruction=_active_mode_instruction(session_id, message.from_user),
         )
     except AllModelsUnavailable:
         # Every provider is rate-limited or down. Telling the user to

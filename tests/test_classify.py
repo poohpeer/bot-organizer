@@ -126,3 +126,33 @@ async def test_extract_does_not_use_automatic_function_calling():
         await classify_module.extract("инструкция", "текст", _SCHEMA)
 
     assert _extra_utils.should_disable_afc(captured["config"]) is True
+
+
+def test_groq_json_schema_requires_every_object_property():
+    schema = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "list_items": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(type=types.Type.STRING),
+            ),
+            "facts": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "key": types.Schema(type=types.Type.STRING),
+                        "value": types.Schema(type=types.Type.STRING),
+                    },
+                    required=["key", "value"],
+                ),
+            ),
+        },
+    )
+
+    rendered = classify_module._json_schema_of(schema)
+
+    assert rendered["required"] == ["list_items", "facts"]
+    fact_item = rendered["properties"]["facts"]["items"]
+    assert fact_item["required"] == ["key", "value"]
+    assert fact_item["additionalProperties"] is False

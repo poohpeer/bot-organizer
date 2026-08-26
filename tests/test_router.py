@@ -23,6 +23,28 @@ _BOT = User(id=BOT_ID, first_name="Organizer", is_bot=True, username=BOT_USERNAM
 _HUMAN = User(id=7, first_name="Sasha", is_bot=False)
 
 
+async def test_session_bound_registry_forces_active_session_and_sender_identity():
+    seen = {}
+
+    async def set_participant(**kwargs):
+        seen.update(kwargs)
+        return {"status": "ok"}
+
+    registry = router._bind_session_context({"set_participant": set_participant}, 1, _HUMAN)
+
+    result = await registry["set_participant"](
+        session_id=14, display_name="Я", status="confirmed"
+    )
+
+    assert result == {"status": "ok"}
+    assert seen == {
+        "session_id": 1,
+        "display_name": "Sasha",
+        "status": "confirmed",
+        "user_id": 7,
+    }
+
+
 def _utf16_offset(text: str, marker: str) -> int:
     return len(text[: text.index(marker)].encode("utf-16-le")) // 2
 
