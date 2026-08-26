@@ -1,6 +1,98 @@
 import json
+import logging
+import time
 
 import asyncpg
+
+from bot.logging_setup import truncate
+
+log = logging.getLogger(__name__)
+
+
+# asyncpg runs these itself on every acquire/release, and our own setup hook
+# re-pins the schema just as often. Logging them puts two lines of pool
+# housekeeping around every single real query, which is how a debug log stops
+# being readable.
+_HOUSEKEEPING = ("SELECT pg_advisory_unlock_all()", "SET search_path", "RESET ALL")
+
+
+def _is_housekeeping(query: str) -> bool:
+    stripped = query.strip()
+    return any(stripped.startswith(prefix) for prefix in _HOUSEKEEPING)
+
+
+def _sql_summary(query: str) -> str:
+    """The shape of a statement, not the statement.
+
+    Our SQL is heavily commented and formatted across many lines; logging it
+    verbatim on every call would make the log unreadable and bury everything
+    else. Comments are cut to end-of-line — dropping only the `--` token would
+    leave the entire explanation behind it in the log, which is most of the
+    text in several of these statements.
+    """
+    lines = [line.split("--", 1)[0] for line in query.splitlines()]
+    return truncate(" ".join(" ".join(lines).split()), 110)
+
+
+class _LoggingConnection(asyncpg.Connection):
+    """Logs every statement with its duration and result size at DEBUG.
+
+    Done at the connection class rather than at each call site: there are
+    dozens of queries across bot/ and worker/, and instrumenting them
+    individually would guarantee the interesting one is the one nobody
+    instrumented. Parameters are logged too — this bot stores group-chat
+    logistics, not credentials — but truncated, and rows are counted rather
+    than dumped.
+    """
+
+    async def _log_call(self, kind, query, args, run):
+        if _is_housekeeping(query):
+            return await run()
+        started = time.perf_counter()
+        try:
+            result = await run()
+        except Exception as e:
+            log.warning(
+                "DB %s FAILED in %.0fms: %s | args=%s | %s",
+                kind, (time.perf_counter() - started) * 1000,
+                _sql_summary(query), truncate(args, 120), e,
+            )
+            raise
+        elapsed = (time.perf_counter() - started) * 1000
+        if log.isEnabledFor(logging.DEBUG):
+            if isinstance(result, list):
+                size = f"{len(result)} rows"
+            elif result is None:
+                size = "no row"
+            elif kind == "execute":
+                size = truncate(result, 40)
+            else:
+                size = "1 row"
+            log.debug(
+                "DB %s %.0fms -> %s | %s | args=%s",
+                kind, elapsed, size, _sql_summary(query), truncate(args, 120),
+            )
+        return result
+
+    async def fetch(self, query, *args, **kwargs):
+        return await self._log_call(
+            "fetch", query, args, lambda: super(_LoggingConnection, self).fetch(query, *args, **kwargs)
+        )
+
+    async def fetchrow(self, query, *args, **kwargs):
+        return await self._log_call(
+            "fetchrow", query, args, lambda: super(_LoggingConnection, self).fetchrow(query, *args, **kwargs)
+        )
+
+    async def fetchval(self, query, *args, **kwargs):
+        return await self._log_call(
+            "fetchval", query, args, lambda: super(_LoggingConnection, self).fetchval(query, *args, **kwargs)
+        )
+
+    async def execute(self, query, *args, **kwargs):
+        return await self._log_call(
+            "execute", query, args, lambda: super(_LoggingConnection, self).execute(query, *args, **kwargs)
+        )
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS chats (
@@ -74,6 +166,11 @@ CREATE TABLE IF NOT EXISTS list_items (
     checked_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_list_items_session ON list_items (session_id);
+-- One row per item name per session. A shopping list with "огурцы" twice is
+-- never what anyone meant, and a model that re-adds an item it already added
+-- (observed on gpt-oss-120b) would otherwise quietly corrupt the list.
+CREATE UNIQUE INDEX IF NOT EXISTS one_item_name_per_session
+    ON list_items (session_id, lower(name));
 
 CREATE TABLE IF NOT EXISTS reminders (
     id              BIGSERIAL PRIMARY KEY,
@@ -167,7 +264,9 @@ async def create_pool(dsn: str, *, init=None) -> asyncpg.Pool:
     # back to the pool, so anything the caller's `init` needs to hold across
     # acquisitions (like pinning a schema) must be re-applied on every
     # acquire.
-    return await asyncpg.create_pool(dsn, init=_init_connection, setup=init)
+    return await asyncpg.create_pool(
+        dsn, init=_init_connection, setup=init, connection_class=_LoggingConnection
+    )
 
 
 # Columns added after a database may already have been created. `CREATE TABLE

@@ -6,15 +6,22 @@ import os
 from telegram import Bot
 
 import db.pool as db_pool_module
+from bot.logging_setup import configure_logging
 from worker.closing import fire_auto_closes, fire_closing_questions
 from worker.reminders import deliver_due_reminders
 
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
-)
+configure_logging()
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 60
+
+
+def _did_something(result) -> bool:
+    """True when a step actually acted. Steps return either a list of ids or a
+    dict of id lists; both are empty on an idle poll."""
+    if isinstance(result, dict):
+        return any(result.values())
+    return bool(result)
 
 
 async def poll_once(pool, telegram_bot, *, min_interval_hours: float) -> None:
@@ -33,9 +40,16 @@ async def poll_once(pool, telegram_bot, *, min_interval_hours: float) -> None:
     )
     for name, step in steps:
         try:
-            await step()
+            result = await step()
         except Exception:
             log.exception("Worker step %r failed this poll", name)
+            continue
+        # A poll that found nothing is the overwhelmingly common case — 1440 of
+        # them a day. Logging those would drown the ones that did something.
+        # Filtered here rather than by making the steps return nothing, which
+        # would change their contract for a logging convenience.
+        if _did_something(result):
+            log.info("Worker %s: %s", name, result)
 
 
 async def main() -> None:

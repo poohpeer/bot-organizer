@@ -7,6 +7,10 @@ that gate runs unless a human explicitly spoke to the bot.
 """
 
 import logging
+import random
+import unicodedata
+
+from bot.logging_setup import truncate
 from datetime import date
 
 from google.genai import types
@@ -18,13 +22,40 @@ import bot.tools.core as core_tools
 import bot.tools.external as external_tools
 from bot.addressing import addressed_to_bot, bot_was_added
 from bot.ai.classify import classify, extract
-from bot.ai.client import fallback
+from bot.ai.client import AllModelsUnavailable, fallback
 from bot.ai.tool_loop import run_tool_loop
 from bot.session import SessionAlreadyActiveError, start_session
 
 log = logging.getLogger(__name__)
 
 _FALLBACK_MESSAGE = "Не понял, переформулируй, пожалуйста."
+
+# Shown when every model in the chain is refusing. Deliberately different from
+# _FALLBACK_MESSAGE: "переформулируй" invites the user to retype a message that
+# was perfectly fine, and they would keep retyping while nothing worked. This
+# says the problem is mine and that waiting is the fix. Rotated so a chat that
+# hits it several times in a row doesn't get the same line every time.
+_AI_UNAVAILABLE_MESSAGES = (
+    "Мой искусственный интеллект временно закончился. Остался только "
+    "естественный, а он у меня, честно говоря, так себе. Попробуйте попозже.",
+    "Все нейросети, которые я знаю, дружно сделали вид, что меня не существует. "
+    "Обидно, но переживу. Напишите через несколько минут.",
+    "Технически я всё ещё здесь. Интеллектуально — уже нет. Дайте мне немного "
+    "времени прийти в себя.",
+    "Нейронка прилегла отдохнуть и меня с собой не позвала. Загляните чуть позже, "
+    "я к тому времени, надеюсь, снова начну соображать.",
+)
+
+
+def _ai_unavailable_message() -> str:
+    return random.choice(_AI_UNAVAILABLE_MESSAGES)
+
+
+def _has_visible_text(text: str) -> bool:
+    return any(
+        not ch.isspace() and unicodedata.category(ch) not in {"Cc", "Cf"}
+        for ch in text
+    )
 
 _GREETING_TEMPLATE = (
     "Привет! Я включаюсь только когда меня зовут — упомяните {mention} или "
@@ -245,18 +276,114 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "one event. Use the available tools to remember facts, manage the "
     "shared list, track participant confirmations, schedule reminders, and "
     "answer questions using grounded lookups — never invent a fact that "
-    "wasn't found by a tool. If a message only gives you something to "
+    "wasn't found by a tool.\n"
+    "When someone says they already have, bought or brought something that "
+    "belongs on the shared list, call list_check_off for that item. Do not "
+    "record it with remember_fact instead: the list is what the group reads, "
+    "and a fact nobody looks at leaves the item showing as still needed.\n"
+    "Add each item only once. If list_add reports already_present, the item "
+    "is on the list — say so rather than adding it again.\n"
+    "Keep item names exactly as the group wrote them, in their language. "
+    "Never translate or transliterate a name: \"cucumbers\" and \"огурцы\" are "
+    "two different items to the list, so translating one turns checking it "
+    "off into adding a second copy. If list_check_off reports not_found it "
+    "returns the names actually on the list — pick the matching one and call "
+    "it again rather than adding anything.\n"
+    "If a message only gives you something to "
     "silently record and doesn't ask a question or need a reply, respond "
     "with an empty string — do not narrate what you just recorded."
 )
 
+_SESSION_BOUND_TOOLS = frozenset({
+    "remember_fact", "get_facts", "list_add", "list_show", "list_check_off",
+    "list_remove_item", "set_participant", "get_participants",
+    "nudge_unconfirmed_participants", "reminder_set", "reminder_cancel",
+    "broadcast_message", "set_timezone", "resolve_and_save_place",
+    "send_location", "archive_lookup",
+})
 
-def _build_registry(pool, telegram_bot) -> dict:
-    return {
+_SELF_DISPLAY_NAMES = frozenset({
+    "i", "me", "myself", "user", "я", "меня", "мне", "сам", "сама",
+})
+
+
+def _display_name_of(user) -> str | None:
+    if user is None:
+        return None
+    full_name = getattr(user, "full_name", None)
+    if full_name:
+        return full_name
+    username = getattr(user, "username", None)
+    if username:
+        return f"@{username}"
+    first_name = getattr(user, "first_name", None)
+    last_name = getattr(user, "last_name", None)
+    name = " ".join(part for part in (first_name, last_name) if part)
+    return name or None
+
+
+def _active_mode_instruction(session_id: int, current_user) -> str:
+    user_id = getattr(current_user, "id", None)
+    display_name = _display_name_of(current_user)
+    user_context = (
+        f"Current sender: {display_name} (telegram user_id={user_id}). "
+        if user_id is not None and display_name else ""
+    )
+    return (
+        _ACTIVE_MODE_SYSTEM_INSTRUCTION
+        + "\nCurrent session_id is "
+        + str(session_id)
+        + ". Always use this exact session_id for every session-bound tool. "
+        + user_context
+        + "When the current sender refers to themselves as I/me/я/меня, "
+        + "record that actual sender, not a literal name like 'I', 'Я', or 'User'."
+    )
+
+
+def _bind_session_context(registry: dict, session_id: int, current_user) -> dict:
+    """Trust active-session context from the router, not tool args from the model."""
+    user_id = getattr(current_user, "id", None)
+    display_name = _display_name_of(current_user)
+    bound = {}
+
+    for name, fn in registry.items():
+        if name not in _SESSION_BOUND_TOOLS:
+            bound[name] = fn
+            continue
+
+        async def call(*, _fn=fn, _name=name, **kwargs):
+            requested_session_id = kwargs.get("session_id")
+            if requested_session_id != session_id:
+                log.warning(
+                    "Model requested %s with session_id=%r; forcing active session_id=%s",
+                    _name, requested_session_id, session_id,
+                )
+            kwargs["session_id"] = session_id
+
+            if _name == "set_participant":
+                raw_name = str(kwargs.get("display_name") or "").strip().lower()
+                if raw_name in _SELF_DISPLAY_NAMES:
+                    if display_name:
+                        kwargs["display_name"] = display_name
+                    if user_id is not None:
+                        kwargs["user_id"] = user_id
+
+            return await _fn(**kwargs)
+
+        bound[name] = call
+
+    return bound
+
+
+def _build_registry(pool, telegram_bot, *, session_id: int | None = None, current_user=None) -> dict:
+    registry = {
         **core_tools.build_core_registry(pool, telegram_bot),
         **external_tools.build_external_registry(),
         **composed_tools.build_composed_registry(pool, telegram_bot),
     }
+    if session_id is not None:
+        registry = _bind_session_context(registry, session_id, current_user)
+    return registry
 
 
 async def _summarize_session(pool, session_id: int) -> str:
@@ -293,7 +420,10 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     if not addressed_to_bot(message, bot_id, bot_username):
         # Listening is not speaking (R5 + R1): record whatever is worth
         # keeping and touch activity, but never send_message on this path.
+        log.debug("session %s: not addressed, silent capture only", session_id)
         extracted = await _silent_capture(pool, telegram_bot, session_id, text)
+        if any(extracted.get(k) for k in ("list_items", "checked_off_items", "facts")):
+            log.info("session %s: captured %s", session_id, truncate(extracted, 200))
         await session.touch_activity(pool, session_id)
         await decision_log.log_decision(
             pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="silent_capture",
@@ -364,6 +494,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             return
         # "unrelated" -> fall through to normal processing below.
 
+    log.debug("session %s: addressed, deciding intent", session_id)
     if await classify(_STOP_INSTRUCTION, text):
         # close_session returns False when someone (or the worker's auto-close)
         # got there first. Posting the summary regardless means two people
@@ -383,11 +514,18 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         return
 
     await session.touch_activity(pool, session_id)
-    registry = _build_registry(pool, telegram_bot)
+    registry = _build_registry(pool, telegram_bot, session_id=session_id, current_user=message.from_user)
     try:
         reply_text = await run_tool_loop(
-            fallback, text, registry, system_instruction=_ACTIVE_MODE_SYSTEM_INSTRUCTION
+            fallback, text, registry,
+            system_instruction=_active_mode_instruction(session_id, message.from_user),
         )
+    except AllModelsUnavailable:
+        # Every provider is rate-limited or down. Telling the user to
+        # rephrase would be a lie and would have them retyping a fine message
+        # into a bot that cannot answer any of them.
+        log.warning("Every model refused for chat_id=%s session_id=%s", chat_id, session_id)
+        reply_text = _ai_unavailable_message()
     except Exception:
         log.exception("Tool loop failed for chat_id=%s session_id=%s", chat_id, session_id)
         reply_text = _FALLBACK_MESSAGE
@@ -396,7 +534,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="tool_call",
         decision={"session_id": session_id, "reply": reply_text},
     )
-    if reply_text.strip():
+    if _has_visible_text(reply_text):
         await telegram_bot.send_message(chat_id=chat_id, text=reply_text)
 
 

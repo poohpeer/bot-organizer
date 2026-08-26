@@ -1,18 +1,24 @@
 import logging
 import os
+import time
+from datetime import date as date_type
 
 import httpx
 from google.genai import errors, types
 
-from bot.ai.client import MODELS, gemini
+from bot.ai.client import GROQ_MODELS, MODELS, gemini, groq_client
+from bot.ai.providers import is_retryable
+from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 10.0
 
-# Grounded search needs a model that actually supports the Google Search tool.
-# Gemma does not, so it is excluded here even though it is the last resort in
-# the chat fallback chain.
+# Grounded search needs a model with a real search tool behind it. Groq's
+# GPT-OSS models carry a server-side `browser_search`; Gemini has its own
+# Google Search grounding. Gemma has neither, so it is excluded even though it
+# is the last resort in the chat chain.
+GROQ_SEARCH_MODELS = GROQ_MODELS if groq_client is not None else []
 SEARCH_MODELS = [m for m in MODELS if m.startswith("gemini-")]
 
 # Seconds. Without this a hung grounded-search call blocks the tool loop, and
@@ -68,13 +74,45 @@ async def web_search(query: str) -> dict:
     rest of the bot happily degrades to a later model.
     """
     last_error = None
+
+    for model in GROQ_SEARCH_MODELS:
+        started = time.perf_counter()
+        log.debug("web_search -> groq/%s | query=%s", model, truncate(query, 150))
+        try:
+            resp = await groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": query}],
+                tools=[{"type": "browser_search"}],
+                tool_choice="required",
+            )
+        except Exception as e:
+            last_error = e
+            if not is_retryable(e):
+                log.warning("web_search on groq/%s failed non-retryably", model, exc_info=True)
+                break
+            log.warning("web_search on groq/%s unavailable (%s), trying the next", model, e)
+            continue
+
+        text = (resp.choices[0].message.content or "").strip()
+        elapsed = (time.perf_counter() - started) * 1000
+        if text:
+            log.debug("web_search <- groq/%s %.0fms | %s", model, elapsed, truncate(text))
+            # Groq's browser_search does not surface the pages it read, so
+            # there are no source URLs to hand back. Saying so honestly beats
+            # inventing them.
+            return {"found": True, "summary": text, "sources": []}
+        log.debug("web_search <- groq/%s %.0fms | empty result", model, elapsed)
+
     for model in SEARCH_MODELS:
+        started = time.perf_counter()
+        log.debug("web_search -> gemini/%s | query=%s", model, truncate(query, 150))
         try:
             resp = await gemini.aio.models.generate_content(
                 model=model,
                 contents=query,
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                     http_options=types.HttpOptions(timeout=_SEARCH_TIMEOUT_MS),
                 ),
             )
@@ -82,31 +120,36 @@ async def web_search(query: str) -> dict:
             last_error = e
             retryable = e.code == 429 or (e.code is not None and e.code >= 500)
             if retryable:
-                log.warning("web_search on %s failed (%s), trying next model", model, e.code)
+                log.warning("web_search on gemini/%s failed (%s), trying next model", model, e.code)
                 continue
-            log.warning("web_search on %s failed non-retryably (%s)", model, e.code)
+            log.warning("web_search on gemini/%s failed non-retryably (%s)", model, e.code)
             break
         except Exception as e:
             # Transport failures (httpx ConnectError/ReadTimeout, DNS) are not
-            # APIError subclasses; the contract above says any failure is
-            # found=False, so they must not escape either.
+            # APIError subclasses; the contract says any failure is found=False,
+            # so they must not escape either.
             last_error = e
-            log.warning("web_search on %s raised %s", model, type(e).__name__, exc_info=True)
+            log.warning("web_search on gemini/%s raised %s", model, type(e).__name__, exc_info=True)
             break
 
         text = (resp.text or "").strip()
+        elapsed = (time.perf_counter() - started) * 1000
         if not text:
+            log.debug("web_search <- gemini/%s %.0fms | empty result", model, elapsed)
             return {"found": False, "summary": None, "sources": []}
-        return {"found": True, "summary": text, "sources": _extract_sources(resp)}
+        sources = _extract_sources(resp)
+        log.debug("web_search <- gemini/%s %.0fms | %d sources | %s", model, elapsed, len(sources), truncate(text))
+        return {"found": True, "summary": text, "sources": sources}
 
     if last_error is not None:
-        log.warning("web_search exhausted all search models for query=%r", query)
+        log.warning("web_search exhausted every search model for query=%r", query)
     return {"found": False, "summary": None, "sources": []}
 
 
 _MAPS_API_KEY = os.environ["GOOGLE_MAPS_API_KEY"]
 _TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 _WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+_WEATHER_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 
 async def maps_lookup(query: str) -> dict:
@@ -114,6 +157,9 @@ async def maps_lookup(query: str) -> dict:
     a transport error, unparsable JSON, or a response missing the fields
     we need — comes back as found=False rather than raising, so a flaky
     upstream never crashes the tool loop or produces a half-built answer."""
+    started = time.perf_counter()
+    # The API key travels in a header and is deliberately never logged.
+    log.debug("maps_lookup -> %s | query=%s", _TEXT_SEARCH_URL, truncate(query, 150))
     try:
         resp = await _client().post(
             _TEXT_SEARCH_URL,
@@ -156,6 +202,8 @@ async def maps_lookup(query: str) -> dict:
     if not name:
         return {"found": False}
 
+    log.debug("maps_lookup <- %.0fms | name=%s | lat=%s lon=%s | rating=%s",
+              (time.perf_counter() - started) * 1000, name, lat, lon, p.get("rating"))
     return {
         "found": True,
         "name": name,
@@ -175,10 +223,24 @@ async def weather_lookup(lat: float, lon: float, date: str) -> dict:
     """Daily forecast via Open-Meteo. Same fail-safe contract as
     maps_lookup: non-200, transport errors, malformed JSON, or a response
     missing the requested date's fields all resolve to found=False."""
+    started = time.perf_counter()
+    log.debug("weather_lookup -> lat=%s lon=%s date=%s", lat, lon, date)
     try:
-        resp = await _client().get(_WEATHER_URL, params={
+        requested_date = date_type.fromisoformat(date)
+    except (TypeError, ValueError):
+        return {"found": False}
+
+    is_past = requested_date < date_type.today()
+    url = _WEATHER_ARCHIVE_URL if is_past else _WEATHER_URL
+    daily = (
+        "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum"
+        if is_past else
+        "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+    )
+    try:
+        resp = await _client().get(url, params={
             "latitude": lat, "longitude": lon,
-            "daily": "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "daily": daily,
             "timezone": "auto", "start_date": date, "end_date": date,
         })
         resp.raise_for_status()
@@ -200,18 +262,26 @@ async def weather_lookup(lat: float, lon: float, date: str) -> dict:
 
     idx = dates.index(date)
     try:
+        weather_code_key = "weather_code" if is_past else "weathercode"
         forecast = {
             "found": True,
-            "weather_code": daily["weathercode"][idx],
+            "weather_code": daily[weather_code_key][idx],
             "temp_max_c": daily["temperature_2m_max"][idx],
             "temp_min_c": daily["temperature_2m_min"][idx],
-            "precipitation_probability_max": daily["precipitation_probability_max"][idx],
         }
+        if is_past:
+            forecast["precipitation_sum_mm"] = daily["precipitation_sum"][idx]
+        else:
+            forecast["precipitation_probability_max"] = daily["precipitation_probability_max"][idx]
         # Open-Meteo returns nulls for variables it can't supply (e.g. a date
         # past the forecast horizon). Reporting temp_max_c=None as a "found"
         # forecast would be exactly the confident-but-empty answer R10 forbids.
         if forecast["temp_max_c"] is None and forecast["weather_code"] is None:
+            log.debug("weather_lookup <- %.0fms | all-null row, treating as not found",
+                      (time.perf_counter() - started) * 1000)
             return {"found": False}
+        log.debug("weather_lookup <- %.0fms | %s",
+                  (time.perf_counter() - started) * 1000, truncate(forecast))
         return forecast
     except (KeyError, IndexError, TypeError):
         log.warning("weather_lookup response missing expected daily fields for date=%r", date, exc_info=True)

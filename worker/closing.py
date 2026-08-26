@@ -27,6 +27,7 @@ async def fire_closing_questions(pool, telegram_bot) -> list[int]:
                 pool, row["id"], row["prev_asked_at"], row["prev_retries"]
             )
             continue
+        log.info("Asked the closing question for session %s in chat %s", row["id"], row["chat_id"])
         asked.append(row["id"])
     return asked
 
@@ -41,6 +42,8 @@ async def fire_auto_closes(pool, telegram_bot) -> list[int]:
     """
     closed = []
     for row in await session.claim_sessions_for_auto_close(pool):
+        log.info("Auto-closing session %s in chat %s after two unanswered questions",
+                 row["id"], row["chat_id"])
         closed.append(row["id"])
         try:
             await telegram_bot.send_message(chat_id=row["chat_id"], text=_AUTO_CLOSE_NOTICE)
