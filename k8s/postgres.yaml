@@ -46,7 +46,7 @@ spec:
                   name: bot-organizer-secrets
                   key: POSTGRES_PASSWORD
           volumeMounts:
-            - name: postgres-data
+            - name: bot-organizer-postgres-data
               mountPath: /var/lib/postgresql/data
           readinessProbe:
             exec:
