@@ -21,14 +21,27 @@ def _json_schema_of(schema) -> dict:
     """Groq wants a JSON Schema; our declarations are written in Gemini's."""
     from bot.ai.tool_schema_openai import _TYPES
 
-    return {
-        "type": "object",
-        "properties": {
-            name: {"type": _TYPES[prop.type]} for name, prop in (schema.properties or {}).items()
-        },
-        "required": list(schema.required or []),
-        "additionalProperties": False,
-    }
+    def render(node) -> dict:
+        rendered = {"type": _TYPES[node.type]}
+        if node.description:
+            rendered["description"] = node.description
+        if getattr(node, "enum", None):
+            rendered["enum"] = list(node.enum)
+        if node.type == types.Type.ARRAY:
+            rendered["items"] = render(node.items)
+        if node.type == types.Type.OBJECT:
+            properties = {
+                name: render(prop) for name, prop in (node.properties or {}).items()
+            }
+            rendered["properties"] = properties
+            # Groq/OpenAI strict JSON schema requires every declared property
+            # to be present in `required`. Optional fields are represented by
+            # empty strings/arrays at the prompt-contract level instead.
+            rendered["required"] = list(properties)
+            rendered["additionalProperties"] = False
+        return rendered
+
+    return render(schema)
 
 
 async def _extract_via_chain(instruction: str, text: str, schema) -> str | None:

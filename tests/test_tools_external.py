@@ -110,6 +110,29 @@ async def test_weather_lookup_found(monkeypatch):
     assert result["precipitation_probability_max"] == 10
 
 
+async def test_weather_lookup_uses_archive_for_past_dates(monkeypatch):
+    body = {"daily": {
+        "time": ["2025-07-04"],
+        "weather_code": [1],
+        "temperature_2m_max": [31.0],
+        "temperature_2m_min": [23.0],
+        "precipitation_sum": [0.0],
+    }}
+    get = AsyncMock(return_value=_http_response(body))
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
+
+    result = await external.weather_lookup(31.959019, 34.927831, "2025-07-04")
+
+    assert result == {
+        "found": True,
+        "weather_code": 1,
+        "temp_max_c": 31.0,
+        "temp_min_c": 23.0,
+        "precipitation_sum_mm": 0.0,
+    }
+    assert get.await_args.args[0] == "https://archive-api.open-meteo.com/v1/archive"
+
+
 async def test_weather_lookup_date_out_of_range(monkeypatch):
     monkeypatch.setattr(
         httpx.AsyncClient, "get",
