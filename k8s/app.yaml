@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot
+  namespace: bot-organizer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bot
+  template:
+    metadata:
+      labels:
+        app: bot
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: bot
+          image: ghcr.io/poohpeer/bot-organizer:latest
+          imagePullPolicy: Always
+          command: ["uv", "run", "--no-sync", "python", "-m", "bot.main"]
+          envFrom:
+            - secretRef:
+                name: bot-secrets
+            - configMapRef:
+                name: bot-organizer-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: bot-organizer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: worker
+          image: ghcr.io/poohpeer/bot-organizer:latest
+          imagePullPolicy: Always
+          command: ["uv", "run", "--no-sync", "python", "-m", "worker.main"]
+          envFrom:
+            - secretRef:
+                name: bot-secrets
+            - configMapRef:
+                name: bot-organizer-config

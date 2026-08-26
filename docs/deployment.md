@@ -105,6 +105,40 @@ which the bot may start a conversation on its own.
 docker compose logs -f bot worker
 ```
 
+## Kubernetes
+
+The `k8s/` directory contains the equivalent deployment: one bot pod, one
+worker pod, and a single-replica PostgreSQL StatefulSet with a 10Gi PVC. The
+bot and worker do not expose HTTP ports; they only make outbound connections.
+
+The GitHub Actions workflow `.github/workflows/deploy-k8s.yml` builds and
+publishes the image, then restarts the deployments from a self-hosted runner.
+The runner must have `kubectl` installed and a kubeconfig that can access the
+target cluster. Application secrets are not stored in GitHub: copy
+`k8s/secret.example.yaml` to `k8s/secret.yaml`, fill in the values, and apply
+it manually on the Kubernetes machine.
+
+First-time Kubernetes setup:
+
+```bash
+kubectl apply -f k8s/namespace.yaml
+kubectl create secret docker-registry ghcr-pull-secret \
+  --namespace bot-organizer \
+  --docker-server=ghcr.io \
+  --docker-username=<github-username> \
+  --docker-password=<github-pat-with-read-packages>
+kubectl apply -f k8s/secret.yaml
+kubectl apply -k k8s/
+```
+
+The real `k8s/secret.yaml` is gitignored. The GHCR pull secret is also created
+manually and is not managed by the workflow.
+
+The workflow currently deploys pushes to `0001-S10-deployment`. Change the
+branch filter after merging this work to the branch that should be deployed.
+The PostgreSQL PVC is retained when workloads are redeployed; deleting the
+PVC or its namespace deletes the stored database.
+
 | Symptom | Cause |
 |---|---|
 | Bot ignores everything in a group | Privacy mode still on — see above; re-add the bot after disabling |
