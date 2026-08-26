@@ -129,16 +129,16 @@ async def test_the_switch_is_sticky():
     assert provider.started == ["b"], "should not have re-tried the rate-limited model"
 
 
-def test_the_chain_puts_the_two_gpt_oss_models_first():
+def test_the_chain_puts_the_two_gpt_oss_models_last():
     from bot.ai.client import GEMINI_MODELS, build_chain
 
     chain = build_chain(_FakeProvider("groq"), _FakeProvider("gemini"))
 
-    assert [(p.name, m) for p, m in chain[:2]] == [
+    assert [(p.name, m) for p, m in chain[-2:]] == [
         ("groq", "openai/gpt-oss-120b"),
         ("groq", "openai/gpt-oss-20b"),
     ]
-    assert [m for p, m in chain[2:]] == GEMINI_MODELS
+    assert [m for p, m in chain[:-2]] == GEMINI_MODELS
 
 
 def test_without_a_groq_key_the_chain_is_gemini_only():
