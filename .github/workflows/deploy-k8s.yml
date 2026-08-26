@@ -7,7 +7,6 @@ on:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
-  NAMESPACE: bot-organizer
 
 jobs:
   build:
@@ -42,12 +41,12 @@ jobs:
         run: kubectl version --client && kubectl cluster-info
       - name: Restart bot
         shell: pwsh
-        run: kubectl -n $env:NAMESPACE rollout restart deployment/bot
+        run: kubectl rollout restart deployment/bot-organizer-bot
       - name: Restart worker
         shell: pwsh
-        run: kubectl -n $env:NAMESPACE rollout restart deployment/worker
+        run: kubectl rollout restart deployment/bot-organizer-worker
       - name: Wait for rollout
         shell: pwsh
         run: |
-          kubectl -n $env:NAMESPACE rollout status deployment/bot --timeout=180s
-          kubectl -n $env:NAMESPACE rollout status deployment/worker --timeout=180s
+          kubectl rollout status deployment/bot-organizer-bot --timeout=180s
+          kubectl rollout status deployment/bot-organizer-worker --timeout=180s
