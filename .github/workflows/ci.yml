@@ -39,7 +39,7 @@ jobs:
 
       # No GROQ_API_KEY: the chain treats Groq as optional and falls back to
       # Gemini alone, which is the configuration the suite is written against.
-      # BOT_TOKEN / GEMINI_API_KEY / GOOGLE_MAPS_API_KEY get fake values from
+      # BOT_ORGANIZER_BOT_TOKEN / GEMINI_API_KEY / GOOGLE_MAPS_API_KEY get fake values from
       # tests/conftest.py. Nothing here reaches a live API.
       - run: uv run pytest -q
         env:

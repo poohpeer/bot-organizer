@@ -39,7 +39,7 @@ is never committed to Git.
 
    ```powershell
    Copy-Item k8s/secret.example.yaml k8s/secret.yaml
-   # Fill in BOT_TOKEN, GEMINI_API_KEY, GOOGLE_MAPS_API_KEY,
+   # Fill in BOT_ORGANIZER_BOT_TOKEN, GEMINI_API_KEY, GOOGLE_MAPS_API_KEY,
    # POSTGRES_PASSWORD, and the matching DATABASE_URL.
    kubectl apply -f k8s/secret.yaml
    ```

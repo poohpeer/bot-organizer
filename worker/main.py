@@ -55,7 +55,7 @@ async def poll_once(pool, telegram_bot, *, min_interval_hours: float) -> None:
 async def main() -> None:
     pool = await db_pool_module.create_pool(os.environ["DATABASE_URL"])
     await db_pool_module.init_db(pool)
-    telegram_bot = Bot(token=os.environ["BOT_TOKEN"])
+    telegram_bot = Bot(token=os.environ["BOT_ORGANIZER_BOT_TOKEN"])
     min_interval_hours = float(os.environ.get("REMINDER_MIN_INTERVAL_HOURS", "6"))
 
     log.info("Worker started, polling every %ds", POLL_INTERVAL_SECONDS)

@@ -24,7 +24,7 @@ setting. That is why the bot decides whether to act in code
 
 ## First run
 
-1. Copy `.env.example` to `.env` and fill it in. Required: `BOT_TOKEN`,
+1. Copy `.env.example` to `.env` and fill it in. Required: `BOT_ORGANIZER_BOT_TOKEN`,
    `GEMINI_API_KEY`, `GOOGLE_MAPS_API_KEY`, and a `POSTGRES_PASSWORD` of your
    choosing — putting that same password into `DATABASE_URL`. Optional:
    `GROQ_API_KEY`, which puts the GPT-OSS models ahead of Gemini in the model
@@ -252,7 +252,7 @@ PVC or its namespace deletes the stored database.
 | Symptom | Cause |
 |---|---|
 | Bot ignores everything in a group | Privacy mode still on — see above; re-add the bot after disabling |
-| `KeyError: 'BOT_TOKEN'` on startup | `.env` missing or incomplete; the app crashes deliberately rather than running half-configured |
+| `KeyError: 'BOT_ORGANIZER_BOT_TOKEN'` on startup | `.env` missing or incomplete; the app crashes deliberately rather than running half-configured |
 | `asyncpg … password authentication failed` | `POSTGRES_PASSWORD` and the password inside `DATABASE_URL` disagree |
 | `time zone "…" not recognized` | `DEFAULT_TIMEZONE` is not in `pg_timezone_names` |
 | Reminders arrive at the wrong hour | The chat's timezone is unknown and `DEFAULT_TIMEZONE` doesn't match reality; tell the bot where you are and existing reminders are re-anchored |
