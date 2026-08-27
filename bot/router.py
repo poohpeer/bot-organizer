@@ -16,6 +16,7 @@ from datetime import date, datetime
 from google.genai import types
 
 import bot.decision_log as decision_log
+import bot.list_render as list_render
 import bot.session as session
 import bot.timezones as timezones
 import bot.tools.composed as composed_tools
@@ -315,6 +316,11 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "repeat_end_in_the_past, say what is wrong and ask again; do not "
     "schedule a one-off instead without saying so. To answer \"what is "
     "scheduled\", call reminder_list — never say you have no way to check.\n"
+    "When someone names an amount, pass it to list_add as quantity, in their "
+    "words — \"пару бутылок\", \"кг\". Never invent an amount that was not "
+    "said. When someone says they will bring something, call list_claim with "
+    "their name; if they say they cannot after all, call list_unclaim. "
+    "Categorise each item with one of: " + ", ".join(list_render.LIST_CATEGORIES) + ".\n"
     "Always reply in Russian, whatever language the incoming message is in. "
     "Leave proper nouns and list item names exactly as they were written — "
     "\"Ben Shemen\" and \"sparklers\" stay as they are; never transliterate "
@@ -323,6 +329,7 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
 
 _SESSION_BOUND_TOOLS = frozenset({
     "remember_fact", "get_facts", "list_add", "list_show", "list_check_off",
+    "list_claim", "list_unclaim",
     "list_remove_item", "set_participant", "get_participants",
     "nudge_unconfirmed_participants", "reminder_set", "reminder_list", "reminder_cancel",
     "broadcast_message", "set_timezone", "resolve_and_save_place",
