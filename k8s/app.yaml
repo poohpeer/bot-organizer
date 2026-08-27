@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot-organizer-bot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bot-organizer-bot
+  template:
+    metadata:
+      labels:
+        app: bot-organizer-bot
+    spec:
+      imagePullSecrets:
+        - name: bot-organizer-ghcr-pull-secret
+      containers:
+        - name: bot
+          image: ghcr.io/poohpeer/bot-organizer:latest
+          imagePullPolicy: Always
+          command: ["uv", "run", "--no-sync", "python", "-m", "bot.main"]
+          envFrom:
+            - secretRef:
+                name: bot-organizer-secrets
+            - configMapRef:
+                name: bot-organizer-config
+          # Measured: 73 MiB just to import the app, before any connections.
+          # The request is set above that so scheduling reflects reality; the
+          # limit is deliberate headroom, so only a genuine leak is killed.
+          # A CPU limit at all is because this namespace is shared — both
+          # processes are I/O bound and should never approach half a core.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot-organizer-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bot-organizer-worker
+  template:
+    metadata:
+      labels:
+        app: bot-organizer-worker
+    spec:
+      imagePullSecrets:
+        - name: bot-organizer-ghcr-pull-secret
+      containers:
+        - name: worker
+          image: ghcr.io/poohpeer/bot-organizer:latest
+          imagePullPolicy: Always
+          command: ["uv", "run", "--no-sync", "python", "-m", "worker.main"]
+          envFrom:
+            - secretRef:
+                name: bot-organizer-secrets
+            - configMapRef:
+                name: bot-organizer-config
+          # Measured: 73 MiB just to import the app, before any connections.
+          # The request is set above that so scheduling reflects reality; the
+          # limit is deliberate headroom, so only a genuine leak is killed.
+          # A CPU limit at all is because this namespace is shared — both
+          # processes are I/O bound and should never approach half a core.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

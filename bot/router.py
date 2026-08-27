@@ -11,12 +11,13 @@ import random
 import unicodedata
 
 from bot.logging_setup import truncate
-from datetime import date
+from datetime import date, datetime
 
 from google.genai import types
 
 import bot.decision_log as decision_log
 import bot.session as session
+import bot.timezones as timezones
 import bot.tools.composed as composed_tools
 import bot.tools.core as core_tools
 import bot.tools.external as external_tools
@@ -51,7 +52,21 @@ def _ai_unavailable_message() -> str:
     return random.choice(_AI_UNAVAILABLE_MESSAGES)
 
 
+# A chat model cannot reliably emit nothing at all: asked for "an empty
+# string" it wrote those two words into the group chat instead. A sentinel is
+# something it can actually produce, and the phrasings it reached for before
+# are caught alongside it — the model changing its mind about how to say
+# "nothing" must not become a message.
+_SILENT = "<silent>"
+_MEANT_TO_BE_SILENT = frozenset({
+    _SILENT, "silent", "empty string", "empty", "(empty string)", "\"\"", "''",
+    "пустая строка", "пустая строка.", "empty_string", "none", "null",
+})
+
+
 def _has_visible_text(text: str) -> bool:
+    if text.strip().strip(".").lower() in _MEANT_TO_BE_SILENT:
+        return False
     return any(
         not ch.isspace() and unicodedata.category(ch) not in {"Cc", "Cf"}
         for ch in text
@@ -289,9 +304,9 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "off into adding a second copy. If list_check_off reports not_found it "
     "returns the names actually on the list — pick the matching one and call "
     "it again rather than adding anything.\n"
-    "If a message only gives you something to "
-    "silently record and doesn't ask a question or need a reply, respond "
-    "with an empty string — do not narrate what you just recorded."
+    "If a message only gives you something to record and needs no reply, "
+    f"answer with exactly {_SILENT!r} and nothing else — do not narrate what "
+    "you just recorded. Never write the words \"empty string\"."
 )
 
 _SESSION_BOUND_TOOLS = frozenset({
@@ -322,9 +337,15 @@ def _display_name_of(user) -> str | None:
     return name or None
 
 
-def _active_mode_instruction(session_id: int, current_user) -> str:
+async def _active_mode_instruction(pool, chat_id: int, session_id: int, current_user) -> str:
     user_id = getattr(current_user, "id", None)
     display_name = _display_name_of(current_user)
+    # Without this the model has no idea what day it is and dates it from
+    # whatever its training data suggests: "напомни через 5 минут" was stored
+    # as 2025-07-20, over a year in the past. That only looked like it worked
+    # because an overdue reminder fires on the next poll.
+    tz = await timezones.chat_timezone(pool, chat_id)
+    now = datetime.now(tz)
     user_context = (
         f"Current sender: {display_name} (telegram user_id={user_id}). "
         if user_id is not None and display_name else ""
@@ -336,7 +357,10 @@ def _active_mode_instruction(session_id: int, current_user) -> str:
         + ". Always use this exact session_id for every session-bound tool. "
         + user_context
         + "When the current sender refers to themselves as I/me/я/меня, "
-        + "record that actual sender, not a literal name like 'I', 'Я', or 'User'."
+        + "record that actual sender, not a literal name like 'I', 'Я', or 'User'. "
+        + f"\nRight now it is {now:%Y-%m-%d %H:%M} ({tz}), a {now:%A}. "
+        + "Work out every date and time from that, and pass reminder_set an "
+        + "ISO-8601 local time — never a date you assumed from memory."
     )
 
 
@@ -518,7 +542,9 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     try:
         reply_text = await run_tool_loop(
             fallback, text, registry,
-            system_instruction=_active_mode_instruction(session_id, message.from_user),
+            system_instruction=await _active_mode_instruction(
+                pool, chat_id, session_id, message.from_user
+            ),
         )
     except AllModelsUnavailable:
         # Every provider is rate-limited or down. Telling the user to

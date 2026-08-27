@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 venv/
 .env
+k8s/secret.yaml
 *.db
 .pytest_cache/
 .idea/

@@ -125,7 +125,7 @@ async def post_init(app: Application) -> None:
 def main() -> None:
     app = (
         Application.builder()
-        .token(os.environ["BOT_TOKEN"])
+        .token(os.environ["BOT_ORGANIZER_BOT_TOKEN"])
         .concurrent_updates(True)
         .post_init(post_init)
         .build()

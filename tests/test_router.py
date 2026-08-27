@@ -1,4 +1,5 @@
 import datetime as dt
+from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock
 
 from telegram import (
@@ -554,3 +555,77 @@ def test_every_unavailable_message_offers_to_try_later():
     """Sarcasm is the tone, but the line still has to tell the user what to do."""
     for message in router._AI_UNAVAILABLE_MESSAGES:
         assert any(word in message.lower() for word in ("позже", "позднее", "через", "времени"))
+
+
+async def test_the_bot_never_posts_the_words_it_was_told_to_answer_with(db_pool, monkeypatch):
+    """Observed in a real chat: told to "respond with an empty string", the
+    model wrote those two words into the group. A chat model cannot reliably
+    emit nothing, so the instruction now asks for a sentinel — and every
+    phrasing it reached for is treated as silence, because the model changing
+    its mind about how to say "nothing" must not become a message."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
+
+    for said in ("empty string", "<silent>", "Empty String.", "пустая строка", ""):
+        monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value=said))
+        telegram_bot = AsyncMock()
+
+        await router.handle_active_message(
+            db_pool, telegram_bot, active, _message("@orgbot записал"), BOT_ID, BOT_USERNAME
+        )
+
+        telegram_bot.send_message.assert_not_awaited()
+
+
+async def test_a_real_answer_is_still_posted(db_pool, monkeypatch):
+    """The silence guard must not swallow ordinary replies."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="Готово, записал."))
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot что там"), BOT_ID, BOT_USERNAME
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] == "Готово, записал."
+
+
+async def test_the_model_is_told_what_day_it_is(db_pool):
+    """Observed in a real chat: asked to remind "через 5 минут", the model
+    stored 2025-07-20 — over a year in the past — because nothing told it the
+    date and it used whatever its training data suggested. It only looked like
+    it worked because an overdue reminder fires on the next poll."""
+    import datetime as dt
+
+    active = await _new_active_session(db_pool)
+    await db_pool.execute("UPDATE chats SET timezone = 'Europe/Moscow' WHERE chat_id = $1", active["chat_id"])
+
+    instruction = await router._active_mode_instruction(
+        db_pool, active["chat_id"], active["id"], _HUMAN
+    )
+
+    today = dt.datetime.now(ZoneInfo("Europe/Moscow"))
+    assert today.strftime("%Y-%m-%d") in instruction
+    assert "Europe/Moscow" in instruction
+    assert "reminder_set" in instruction
+
+
+async def test_the_date_follows_the_chats_own_timezone(db_pool):
+    """A chat on the other side of the date line must not be told the server's
+    day."""
+    import datetime as dt
+
+    active = await _new_active_session(db_pool)
+    await db_pool.execute(
+        "UPDATE chats SET timezone = 'Pacific/Kiritimati' WHERE chat_id = $1", active["chat_id"]
+    )
+
+    instruction = await router._active_mode_instruction(
+        db_pool, active["chat_id"], active["id"], _HUMAN
+    )
+
+    local = dt.datetime.now(ZoneInfo("Pacific/Kiritimati"))
+    assert local.strftime("%Y-%m-%d") in instruction

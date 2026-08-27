@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # 0001-S10-deployment is where the cluster is deployed from until it is
+    # merged; drop it from this list then.
+    branches: [main, 0001-S10-deployment]
   pull_request:
 
 env:
@@ -39,7 +41,7 @@ jobs:
 
       # No GROQ_API_KEY: the chain treats Groq as optional and falls back to
       # Gemini alone, which is the configuration the suite is written against.
-      # BOT_TOKEN / GEMINI_API_KEY / GOOGLE_MAPS_API_KEY get fake values from
+      # BOT_ORGANIZER_BOT_TOKEN / GEMINI_API_KEY / GOOGLE_MAPS_API_KEY get fake values from
       # tests/conftest.py. Nothing here reaches a live API.
       - run: uv run pytest -q
         env:
@@ -47,10 +49,9 @@ jobs:
 
   build-and-push:
     needs: test
-    # Only for main. A pull request cannot push to the registry anyway, and
-    # building the image twice per change buys nothing — the Dockerfile is
-    # already exercised by the build step below on every merge.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Pushes only. A pull request cannot push to the registry anyway, and
+    # building the image twice per change buys nothing.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -78,63 +79,104 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
+    # Behind `test`, through build-and-push. The separate deploy-k8s.yml this
+    # replaces built and pushed its own image with no test gate at all, so a
+    # commit that broke the suite still reached the cluster.
     needs: build-and-push
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Windows]
-    permissions:
-      contents: read
-      packages: read
-
-    env:
-      # The credentials live on the deployment machine, not in the repository
-      # and not in Actions secrets. This is the persistent copy; the workspace
-      # gets a throwaway one below, because compose resolves `env_file: .env`
-      # relative to the compose file it is given.
-      ENV_FILE: C:\bots\bot-organizer\.env
-      # Deploy the exact artifact this run built. `latest` would race a newer
-      # merge and could roll out something this run never tested.
-      BOT_IMAGE_TAG: ${{ github.sha }}
-      COMPOSE: -f docker-compose.yml -f docker-compose.ghcr.yml
-
+    if: github.event_name == 'push'
+    runs-on: self-hosted
     steps:
+      # The manifests are applied from the workspace, so this job needs the
+      # repository. It did not before, when it only issued kubectl commands.
       - uses: actions/checkout@v5
 
-      - name: Check the machine is set up
-        shell: pwsh
+      # Windows PowerShell 5.1, not pwsh and not bash. pwsh (PowerShell 7) is
+      # not installed on this runner, and `bash` on its PATH resolves to the
+      # WSL stub in WindowsApps, which fails with execvpe(/bin/bash) because no
+      # distro is installed. 5.1 ships with Windows and always works — at the
+      # cost of no `&&`, which is why these are separate statements.
+      - name: Preflight
+        shell: powershell
         run: |
-          if (-not (Test-Path $env:ENV_FILE)) {
-            throw "$env:ENV_FILE is missing. See docs/deployment.md — the runner does not create it, and deploying without it would start the stack with no credentials."
+          $ErrorActionPreference = 'Continue'
+          if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+            throw "kubectl is not on the runner service PATH."
           }
-          docker version --format '{{.Server.Os}}' | Tee-Object -Variable os
-          if ($os -ne 'linux') {
-            throw "Docker is in $os container mode; this image is linux/amd64. Switch Docker Desktop to Linux containers."
+          kubectl version --client
+          Write-Host "--- cluster ---"
+          kubectl cluster-info
+          if ($LASTEXITCODE -ne 0) { throw "No reachable cluster for the runner user." }
+          Write-Host "--- namespace ---"
+          kubectl config view --minify -o "jsonpath={..namespace}"
+          Write-Host ""
+          Write-Host "--- our resources ---"
+          kubectl get deployment bot-organizer-bot bot-organizer-worker
+          kubectl get statefulset bot-organizer-postgres
+          kubectl get secret bot-organizer-secrets bot-organizer-ghcr-pull-secret
+          Write-Host "--- verdict ---"
+          kubectl get deployment bot-organizer-bot | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Deployments do not exist yet. Run 'kubectl apply -k k8s/' once, per k8s/README.md."
           }
+          Write-Host "ok"
 
-      - name: Log in to GHCR
-        shell: pwsh
+      # Without this the workflow only ever restarts pods, so a change to a
+      # manifest — an added env var, a resource limit, a new volume — lives in
+      # git and never reaches the cluster. The Secret is deliberately not in
+      # the kustomization: it is gitignored and applied by hand.
+      - name: Apply manifests
+        shell: powershell
         run: |
-          "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          kubectl apply -k k8s/
+          if ($LASTEXITCODE -ne 0) { throw "kubectl apply failed" }
 
-      - name: Deploy
-        shell: pwsh
-        run: |
-          Copy-Item $env:ENV_FILE .env -Force
-          docker compose $env:COMPOSE.Split(' ') pull
-          docker compose $env:COMPOSE.Split(' ') up -d --remove-orphans
+      # Still needed after the apply: the image tag is :latest, so a rebuilt
+      # image is not a spec change and apply alone would see nothing to do.
+      - name: Restart bot
+        shell: powershell
+        run: kubectl rollout restart deployment/bot-organizer-bot
 
-      - name: Verify the stack came up
-        shell: pwsh
+      - name: Restart worker
+        shell: powershell
+        run: kubectl rollout restart deployment/bot-organizer-worker
+
+      - name: Wait for rollout
+        shell: powershell
         run: |
-          Start-Sleep -Seconds 15
-          docker compose $env:COMPOSE.Split(' ') ps
-          $bad = docker compose $env:COMPOSE.Split(' ') ps --format json |
-            ConvertFrom-Json | Where-Object { $_.State -ne 'running' }
-          if ($bad) {
-            docker compose $env:COMPOSE.Split(' ') logs --tail 50
-            throw "Not running after deploy: $($bad.Service -join ', ')"
+          kubectl rollout status deployment/bot-organizer-bot --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "bot rollout did not complete" }
+          kubectl rollout status deployment/bot-organizer-worker --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "worker rollout did not complete" }
+
+      # A completed rollout is weaker evidence than it looks: these pods have
+      # no readiness probe, so one counts as available the moment it starts,
+      # and a crash thirty seconds later would not fail the step above. The
+      # startup lines are the real proof — the bot only logs its identity
+      # after a successful getMe against Telegram.
+      - name: Verify the bot is actually running
+        shell: powershell
+        run: |
+          Start-Sleep -Seconds 20
+          kubectl get pods -l app=bot-organizer-bot
+          kubectl get pods -l app=bot-organizer-worker
+
+          $restarts = kubectl get pods -l app=bot-organizer-bot -o "jsonpath={.items[*].status.containerStatuses[*].restartCount}"
+          Write-Host "bot restarts: $restarts"
+
+          $botLog = kubectl logs deployment/bot-organizer-bot --tail=100 2>&1 | Out-String
+          $workerLog = kubectl logs deployment/bot-organizer-worker --tail=50 2>&1 | Out-String
+          Write-Host "--- bot ---"
+          Write-Host $botLog
+          Write-Host "--- worker ---"
+          Write-Host $workerLog
+
+          if ($botLog -notmatch 'Resolved bot identity') {
+            throw "The bot never reached Telegram: no 'Resolved bot identity' line."
           }
-
-      - name: Remove the credentials from the workspace
-        if: always()
-        shell: pwsh
-        run: Remove-Item .env -Force -ErrorAction SilentlyContinue
+          if ($workerLog -notmatch 'Worker started') {
+            throw "The worker never started its poll loop."
+          }
+          if ($botLog -match 'GROQ_API_KEY is not set') {
+            Write-Host "::warning::GROQ_API_KEY is missing from the cluster Secret - the bot is running on Gemini alone."
+          }
+          Write-Host "both processes are up"

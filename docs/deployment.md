@@ -24,7 +24,7 @@ setting. That is why the bot decides whether to act in code
 
 ## First run
 
-1. Copy `.env.example` to `.env` and fill it in. Required: `BOT_TOKEN`,
+1. Copy `.env.example` to `.env` and fill it in. Required: `BOT_ORGANIZER_BOT_TOKEN`,
    `GEMINI_API_KEY`, `GOOGLE_MAPS_API_KEY`, and a `POSTGRES_PASSWORD` of your
    choosing — putting that same password into `DATABASE_URL`. Optional:
    `GROQ_API_KEY`, which puts the GPT-OSS models ahead of Gemini in the model
@@ -215,10 +215,43 @@ search result, a SQL statement — reaches a log line.
 Secrets are never logged: API keys travel in headers that are not rendered, and
 a test asserts the maps key cannot appear in `bot.tools.external`'s output.
 
+## Kubernetes
+
+The `k8s/` directory contains the equivalent deployment: one bot pod, one
+worker pod, and a single-replica PostgreSQL StatefulSet with a 10Gi PVC. The
+resources use the current Kubernetes namespace and have `bot-organizer-`
+prefixed names so multiple bots can share one namespace without collisions.
+
+The GitHub Actions workflow `.github/workflows/ci.yml` tests, builds and
+publishes the image, then restarts the deployments from a self-hosted runner.
+The runner must have `kubectl` installed and a kubeconfig that can access the
+target cluster. Application secrets are not stored in GitHub: copy
+`k8s/secret.example.yaml` to `k8s/secret.yaml`, fill in the values, and apply
+it manually on the Kubernetes machine.
+
+First-time Kubernetes setup:
+
+```bash
+kubectl create secret docker-registry bot-organizer-ghcr-pull-secret \
+  --docker-server=ghcr.io \
+  --docker-username=<github-username> \
+  --docker-password=<github-pat-with-read-packages>
+kubectl apply -f k8s/secret.yaml
+kubectl apply -k k8s/
+```
+
+The real `k8s/secret.yaml` is gitignored. The GHCR pull secret is also created
+manually and is not managed by the workflow.
+
+The workflow currently deploys pushes to `0001-S10-deployment`. Change the
+branch filter after merging this work to the branch that should be deployed.
+The PostgreSQL PVC is retained when workloads are redeployed; deleting the
+PVC deletes the stored database.
+
 | Symptom | Cause |
 |---|---|
 | Bot ignores everything in a group | Privacy mode still on — see above; re-add the bot after disabling |
-| `KeyError: 'BOT_TOKEN'` on startup | `.env` missing or incomplete; the app crashes deliberately rather than running half-configured |
+| `KeyError: 'BOT_ORGANIZER_BOT_TOKEN'` on startup | `.env` missing or incomplete; the app crashes deliberately rather than running half-configured |
 | `asyncpg … password authentication failed` | `POSTGRES_PASSWORD` and the password inside `DATABASE_URL` disagree |
 | `time zone "…" not recognized` | `DEFAULT_TIMEZONE` is not in `pg_timezone_names` |
 | Reminders arrive at the wrong hour | The chat's timezone is unknown and `DEFAULT_TIMEZONE` doesn't match reality; tell the bot where you are and existing reminders are re-anchored |

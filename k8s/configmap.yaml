@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bot-organizer-config
+data:
+  DEFAULT_TIMEZONE: Asia/Jerusalem
+  QUIET_UNTIL_HOUR: "9"
+  QUIET_FROM_HOUR: "21"
+  REMINDER_MIN_INTERVAL_HOURS: "6"
