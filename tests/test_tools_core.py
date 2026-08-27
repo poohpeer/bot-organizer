@@ -4,8 +4,10 @@ import bot.tools.core as core
 import bot.tools.schema as schema
 
 
-async def _new_session(db_pool, chat_id=1):
-    await db_pool.execute("INSERT INTO chats (chat_id, title) VALUES ($1, 'Chat')", chat_id)
+async def _new_session(db_pool, chat_id=1, tz=None):
+    await db_pool.execute(
+        "INSERT INTO chats (chat_id, title, timezone) VALUES ($1, 'Chat', $2)", chat_id, tz
+    )
     row = await db_pool.fetchrow(
         "INSERT INTO sessions (chat_id, activity_type) VALUES ($1, 'picnic') RETURNING id",
         chat_id,
@@ -260,7 +262,7 @@ def test_build_core_registry_covers_every_core_tool(db_pool):
     assert set(registry) == {
         "remember_fact", "get_facts", "list_add", "list_show", "list_check_off",
         "list_remove_item", "set_participant", "get_participants",
-        "nudge_unconfirmed_participants", "reminder_set", "reminder_cancel",
+        "nudge_unconfirmed_participants", "reminder_set", "reminder_list", "reminder_cancel",
         "broadcast_message", "set_timezone",
     }
 
@@ -532,6 +534,104 @@ async def test_reminder_set_without_a_repeat_is_unchanged(db_pool):
     row = await db_pool.fetchrow("SELECT * FROM reminders WHERE id = $1", result["reminder_id"])
     assert row["repeat_every_minutes"] is None
     assert row["repeat_until"] is None
+
+
+async def test_reminder_list_renders_in_the_chats_own_timezone(db_pool):
+    """R2: next delivery time is shown in the chat's own timezone, not UTC."""
+    session_id = await _new_session(db_pool, tz="Europe/Moscow")
+    created = await core.reminder_set(
+        db_pool, session_id, message="Выезжаем", remind_at="2026-09-01T09:00:00",
+    )
+
+    result = await core.reminder_list(db_pool, session_id)
+
+    assert len(result["reminders"]) == 1
+    entry = result["reminders"][0]
+    assert entry["reminder_id"] == created["reminder_id"]
+    assert entry["message"] == "Выезжаем"
+    assert entry["next_at"] == "2026-09-01T09:00:00"  # the local hour it was asked for, not UTC
+
+
+async def test_reminder_list_omits_sent_and_cancelled(db_pool):
+    session_id = await _new_session(db_pool)
+    pending = await core.reminder_set(db_pool, session_id, message="pending", remind_at="2026-09-01T09:00:00")
+    sent = await core.reminder_set(db_pool, session_id, message="sent", remind_at="2026-09-01T09:00:00")
+    cancelled = await core.reminder_set(db_pool, session_id, message="cancelled", remind_at="2026-09-01T09:00:00")
+    await db_pool.execute("UPDATE reminders SET status = 'sent' WHERE id = $1", sent["reminder_id"])
+    await core.reminder_cancel(db_pool, session_id, cancelled["reminder_id"])
+
+    result = await core.reminder_list(db_pool, session_id)
+
+    assert [r["reminder_id"] for r in result["reminders"]] == [pending["reminder_id"]]
+
+
+async def test_reminder_list_empty_when_nothing_scheduled(db_pool):
+    """R2's second criterion: the bot must be able to say "nothing scheduled"
+    plainly, which only works if the tool distinguishes that from an error."""
+    session_id = await _new_session(db_pool)
+
+    result = await core.reminder_list(db_pool, session_id)
+
+    assert result == {"reminders": []}
+
+
+async def test_reminder_list_shows_group_target_as_gruppa(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.reminder_set(db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00")
+
+    result = await core.reminder_list(db_pool, session_id)
+
+    assert result["reminders"][0]["target"] == "группа"
+
+
+async def test_reminder_list_shows_a_known_participants_name(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.set_participant(db_pool, session_id, "Маша", "confirmed", user_id=333)
+    await core.reminder_set(
+        db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00", target_user_id=333,
+    )
+
+    result = await core.reminder_list(db_pool, session_id)
+
+    assert result["reminders"][0]["target"] == "Маша"
+
+
+async def test_reminder_list_falls_back_to_the_id_for_an_unknown_target(db_pool):
+    """The person isn't in participants — dropping the row would hide a real,
+    scheduled reminder; falling back to the id keeps it visible."""
+    session_id = await _new_session(db_pool)
+    await core.reminder_set(
+        db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00", target_user_id=999,
+    )
+
+    result = await core.reminder_list(db_pool, session_id)
+
+    assert result["reminders"][0]["target"] == "999"
+
+
+async def test_reminder_list_includes_repeat_fields(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.reminder_set(
+        db_pool, session_id, message="Пей воду", remind_at="2026-09-01T09:00:00",
+        repeat_every_minutes=30, repeat_until="2026-09-01T12:00:00",
+    )
+
+    result = await core.reminder_list(db_pool, session_id)
+
+    entry = result["reminders"][0]
+    assert entry["repeats_every_minutes"] == 30
+    assert entry["repeats_until"] == "2026-09-01T12:00:00"
+
+
+async def test_reminder_list_non_repeating_has_none_repeat_fields(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.reminder_set(db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00")
+
+    result = await core.reminder_list(db_pool, session_id)
+
+    entry = result["reminders"][0]
+    assert entry["repeats_every_minutes"] is None
+    assert entry["repeats_until"] is None
 
 
 async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):

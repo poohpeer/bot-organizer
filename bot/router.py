@@ -317,7 +317,7 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
 _SESSION_BOUND_TOOLS = frozenset({
     "remember_fact", "get_facts", "list_add", "list_show", "list_check_off",
     "list_remove_item", "set_participant", "get_participants",
-    "nudge_unconfirmed_participants", "reminder_set", "reminder_cancel",
+    "nudge_unconfirmed_participants", "reminder_set", "reminder_list", "reminder_cancel",
     "broadcast_message", "set_timezone", "resolve_and_save_place",
     "send_location", "archive_lookup",
 })

@@ -22,6 +22,16 @@ _CONFIRMATION_PROMPTS = {
 }
 
 
+def _local_iso(when: datetime, tz) -> str:
+    """Render a stored UTC instant as a naive local ISO string.
+
+    Naive, not offset-suffixed: this is the same shape reminder_set already
+    accepts for remind_at/repeat_until, so a time this function renders can be
+    fed straight back into another tool call.
+    """
+    return when.astimezone(tz).replace(tzinfo=None).isoformat()
+
+
 async def _session_row(pool, session_id, columns="chat_id"):
     """Fetch a session, or None. Tools take session_id from the model, so a
     hallucinated or stale id must produce a usable result rather than a
@@ -368,7 +378,7 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
     result = {"status": "ok", "reminder_id": row["id"]}
     if repeat_every_minutes is not None:
         result["repeats_every_minutes"] = repeat_every_minutes
-        result["repeats_until"] = repeat_until_utc.astimezone(tz).replace(tzinfo=None).isoformat()
+        result["repeats_until"] = _local_iso(repeat_until_utc, tz)
     if known is None and local_time is not None:
         # Nobody has said where this group is, so the time was interpreted in
         # the configured default. Say so instead of silently guessing: the
@@ -381,6 +391,53 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
             "the reminder will be corrected automatically."
         )
     return result
+
+
+async def reminder_list(pool, session_id) -> dict:
+    """List everything currently scheduled for this session (R2).
+
+    Only 'pending' rows: sent and cancelled ones already happened or won't.
+    Distinguishing "nothing scheduled" (empty list) from "cannot check" is
+    what lets the model say the former plainly instead of claiming the
+    latter, which is the complaint in `bugs` this story closes.
+
+    Mirrors list_show in not treating a hallucinated session_id as an error —
+    it just has nothing to show.
+    """
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"reminders": []}
+
+    tz = await timezones.chat_timezone(pool, session_row["chat_id"])
+    rows = await pool.fetch(
+        """
+        SELECT id, message, remind_at, target_user_id, repeat_every_minutes, repeat_until
+        FROM reminders WHERE session_id = $1 AND status = 'pending' ORDER BY remind_at
+        """,
+        session_id,
+    )
+
+    reminders = []
+    for r in rows:
+        if r["target_user_id"] is None:
+            target = "группа"
+        else:
+            # Fall back to the raw id rather than dropping the row: an
+            # unresolved target is still a real, scheduled reminder.
+            name = await pool.fetchval(
+                "SELECT display_name FROM participants WHERE session_id = $1 AND user_id = $2",
+                session_id, r["target_user_id"],
+            )
+            target = name if name is not None else str(r["target_user_id"])
+        reminders.append({
+            "reminder_id": r["id"],
+            "message": r["message"],
+            "next_at": _local_iso(r["remind_at"], tz),
+            "repeats_every_minutes": r["repeat_every_minutes"],
+            "repeats_until": _local_iso(r["repeat_until"], tz) if r["repeat_until"] is not None else None,
+            "target": target,
+        })
+    return {"reminders": reminders}
 
 
 async def reminder_cancel(pool, session_id, reminder_id) -> dict:
@@ -439,6 +496,7 @@ def build_core_registry(pool, telegram_bot) -> dict:
         "get_participants": functools.partial(get_participants, pool),
         "nudge_unconfirmed_participants": functools.partial(nudge_unconfirmed_participants, pool, telegram_bot),
         "reminder_set": functools.partial(reminder_set, pool),
+        "reminder_list": functools.partial(reminder_list, pool),
         "reminder_cancel": functools.partial(reminder_cancel, pool),
         "broadcast_message": functools.partial(broadcast_message, pool),
         "set_timezone": functools.partial(set_timezone, pool),
