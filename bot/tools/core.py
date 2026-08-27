@@ -294,6 +294,17 @@ async def list_remove_item(pool, session_id, name) -> dict:
     )
 
 
+async def get_participant_status(pool, session_id, *, user_id) -> str | None:
+    """Whether this telegram user is already a known participant, and if so
+    what their status is. None means "never recorded" — the caller's cue to
+    treat this as a genuinely new join rather than a rejoin.
+    """
+    return await pool.fetchval(
+        "SELECT status FROM participants WHERE session_id = $1 AND user_id = $2",
+        session_id, user_id,
+    )
+
+
 async def set_participant(pool, session_id, display_name, status, user_id=None) -> dict:
     """Record or update one participant's status.
 

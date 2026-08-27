@@ -255,3 +255,25 @@ async def test_post_init_resolves_bot_username_via_get_me(monkeypatch):
     assert app.bot_data["bot_id"] == 555
     assert app.bot_data["bot_username"] == "renamed_bot"
     assert app.bot_data["pool"] is fake_pool
+
+
+async def test_rejoin_does_not_overwrite_a_confirmed_status(db_pool, monkeypatch):
+    """A rejoin (someone who left and came back, or Telegram simply
+    redelivering new_chat_members) must not reset an already-confirmed
+    participant back to "unknown" — that silently destroys a real answer and
+    the announcement then falsely claims the bot is waiting for confirmation
+    from someone who already gave one."""
+    await _ensure_chat(db_pool)
+    active = await session.start_session(db_pool, chat_id=-100, activity_type="picnic")
+    await core_tools.set_participant(db_pool, active["id"], "Nova", "confirmed", user_id=555)
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    telegram_bot = AsyncMock()
+    msg = _join_message([User(id=555, first_name="Nova", is_bot=False)])
+
+    await main.route_update(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
+
+    status = await db_pool.fetchval(
+        "SELECT status FROM participants WHERE session_id = $1 AND user_id = 555", active["id"]
+    )
+    assert status == "confirmed"
+    telegram_bot.send_message.assert_not_awaited()

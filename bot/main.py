@@ -59,6 +59,15 @@ async def handle_new_members(pool, telegram_bot, message) -> None:
         if member.is_bot:
             continue
         display_name = _display_name_of_new_member(member)
+        existing = await core_tools.get_participant_status(pool, active["id"], user_id=member.id)
+        if existing is not None:
+            # A rejoin — someone who left and came back, or Telegram simply
+            # redelivering new_chat_members. set_participant with a fixed
+            # "unknown" status would silently overwrite a real "confirmed" or
+            # "declined" answer and then announce "жду подтверждения" about
+            # someone who already answered, which is both false and destroys
+            # the confirmation that had already been recorded.
+            continue
         await core_tools.set_participant(
             pool, active["id"], display_name, "unknown", user_id=member.id
         )
