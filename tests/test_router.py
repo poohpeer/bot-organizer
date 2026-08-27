@@ -12,6 +12,7 @@ from telegram import (
     MessageEntity,
     User,
 )
+from telegram.error import Forbidden
 
 import bot.router as router
 import bot.session as session
@@ -44,6 +45,41 @@ async def test_session_bound_registry_forces_active_session_and_sender_identity(
         "status": "confirmed",
         "user_id": 7,
     }
+
+
+async def test_bind_session_context_forces_current_user_id_for_send_private_message():
+    """R5: current_user_id is the recipient of a private message — it must
+    come from the router's own record of who is actually talking, never from
+    the model, or a model-chosen recipient could DM anyone in any chat the
+    bot has seen (the same hole chat_id closed in 0001's S4/S6)."""
+    seen = {}
+
+    async def send_private_message(**kwargs):
+        seen.update(kwargs)
+        return {"status": "ok"}
+
+    registry = router._bind_session_context({"send_private_message": send_private_message}, 1, _HUMAN)
+
+    await registry["send_private_message"](text="hello")
+
+    assert seen == {"session_id": 1, "current_user_id": 7, "text": "hello"}
+
+
+async def test_bind_session_context_binds_current_user_id_none_when_no_sender():
+    """A channel post has no from_user. Binding None here — rather than
+    skipping the bind or crashing — is what lets send_private_message report
+    'failed' instead of the router blowing up before the tool ever runs."""
+    seen = {}
+
+    async def send_private_message(**kwargs):
+        seen.update(kwargs)
+        return {"status": "ok"}
+
+    registry = router._bind_session_context({"send_private_message": send_private_message}, 1, None)
+
+    await registry["send_private_message"](text="hello")
+
+    assert seen["current_user_id"] is None
 
 
 def test_has_visible_text_rejects_zero_width_only_reply():
@@ -630,6 +666,104 @@ async def test_a_real_answer_is_still_posted(db_pool, monkeypatch):
     )
 
     assert telegram_bot.send_message.await_args.kwargs["text"] == "Готово, записал."
+
+
+# --- S4: private replies (R5) ------------------------------------------------
+
+async def test_private_reply_request_dms_the_asker_and_acks_in_group(db_pool, monkeypatch):
+    """R5's first criterion: the answer arrives as a DM to the person who
+    asked, and the group sees at most a short acknowledgement — proven by
+    asserting the DM's chat_id is the asker's own id (_HUMAN, 7), not -100."""
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    private_text = "Вот список: помидоры, хлеб"
+
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction):
+        result = await registry["send_private_message"](text=private_text)
+        assert result == {"status": "ok"}
+        return "Отправил в личку."
+
+    monkeypatch.setattr(router, "run_tool_loop", fake_run_tool_loop)
+    msg = _message("пошли мне в личку список")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_any_await(chat_id=_HUMAN.id, text=private_text)
+    telegram_bot.send_message.assert_any_await(chat_id=-100, text="Отправил в личку.")
+    assert telegram_bot.send_message.await_count == 2
+
+
+async def test_private_reply_cannot_reach_tells_group_to_start_a_chat_without_leaking_content(db_pool, monkeypatch):
+    """R5's second criterion: a Forbidden DM must not be silently dropped, and
+    the natural failure mode — pasting the content into the group instead —
+    is exactly what the person was trying to avoid."""
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    telegram_bot.send_message = AsyncMock(side_effect=[Forbidden("bot was blocked by the user"), None])
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    private_text = "Вот список: помидоры, хлеб, секретный ингредиент"
+
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction):
+        result = await registry["send_private_message"](text=private_text)
+        assert result["status"] == "cannot_reach"
+        return "Не получилось отправить в личку — откройте чат со мной и нажмите Start."
+
+    monkeypatch.setattr(router, "run_tool_loop", fake_run_tool_loop)
+    msg = _message("пошли мне в личку список")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    group_text = telegram_bot.send_message.await_args_list[-1].kwargs["text"]
+    assert telegram_bot.send_message.await_args_list[-1].kwargs["chat_id"] == -100
+    assert "start" in group_text.lower()
+    assert private_text not in group_text
+
+
+async def test_private_reply_with_no_from_user_does_not_crash(db_pool, monkeypatch):
+    """A channel post has no from_user — the router must bind current_user_id
+    as None rather than crash, and the tool must fail gracefully rather than
+    attempting a send with no destination."""
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction):
+        result = await registry["send_private_message"](text="что угодно")
+        assert result == {"status": "failed", "detail": "no telegram user to message"}
+        return "Не получилось понять, кому писать в личку."
+
+    monkeypatch.setattr(router, "run_tool_loop", fake_run_tool_loop)
+    handle = f"@{BOT_USERNAME}"
+    text = f"{handle} пошли в личку список"
+    msg = Message(
+        message_id=1, date=dt.datetime.now(dt.timezone.utc),
+        chat=Chat(id=-100, type="channel"), from_user=None, text=text,
+        entities=[MessageEntity(type=MessageEntity.MENTION, offset=0, length=len(handle))],
+    )
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_awaited_once_with(
+        chat_id=-100, text="Не получилось понять, кому писать в личку."
+    )
+
+
+def test_send_private_message_is_session_bound():
+    assert "send_private_message" in router._SESSION_BOUND_TOOLS
+
+
+def test_the_system_instruction_covers_private_replies():
+    """R5. The instruction has to name send_private_message directly, cover
+    the cannot_reach failure with what to tell the group, and explicitly
+    forbid pasting the private content into the group — the natural model
+    behaviour on a failed DM, and precisely what the person asked to avoid."""
+    instruction = router._ACTIVE_MODE_SYSTEM_INSTRUCTION
+
+    assert "send_private_message" in instruction
+    assert "cannot_reach" in instruction
+    assert "Start" in instruction
+    assert "do not repeat the private content" in instruction.lower()
 
 
 def test_the_system_instruction_demands_russian_without_transliterating_names():

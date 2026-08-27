@@ -321,6 +321,12 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "said. When someone says they will bring something, call list_claim with "
     "their name; if they say they cannot after all, call list_unclaim. "
     "Categorise each item with one of: " + ", ".join(list_render.LIST_CATEGORIES) + ".\n"
+    "When someone asks you to send them something privately — \"пошли мне в "
+    "личку\", \"в лс\" — call send_private_message and reply in the group "
+    "with one short line saying you have sent it. If it returns "
+    "cannot_reach, tell them in the group that they need to open a chat with "
+    "you first and press Start; do not repeat the private content in the "
+    "group.\n"
     "Always reply in Russian, whatever language the incoming message is in. "
     "Leave proper nouns and list item names exactly as they were written — "
     "\"Ben Shemen\" and \"sparklers\" stay as they are; never transliterate "
@@ -333,8 +339,14 @@ _SESSION_BOUND_TOOLS = frozenset({
     "list_remove_item", "set_participant", "get_participants",
     "nudge_unconfirmed_participants", "reminder_set", "reminder_list", "reminder_cancel",
     "broadcast_message", "set_timezone", "resolve_and_save_place",
-    "send_location", "archive_lookup",
+    "send_location", "archive_lookup", "send_private_message",
 })
+
+# Tools whose recipient must be whoever is actually talking, never a
+# model-supplied id (R5) — the same reasoning that keeps session_id off the
+# model for _SESSION_BOUND_TOOLS above. Every one of these is also in
+# _SESSION_BOUND_TOOLS, since current_user_id is bound in the same wrapper.
+_CURRENT_USER_BOUND_TOOLS = frozenset({"send_private_message"})
 
 _SELF_DISPLAY_NAMES = frozenset({
     "i", "me", "myself", "user", "я", "меня", "мне", "сам", "сама",
@@ -402,6 +414,13 @@ def _bind_session_context(registry: dict, session_id: int, current_user) -> dict
                     _name, requested_session_id, session_id,
                 )
             kwargs["session_id"] = session_id
+
+            if _name in _CURRENT_USER_BOUND_TOOLS:
+                # Overwritten unconditionally, exactly like session_id above —
+                # the declaration doesn't even expose this parameter to the
+                # model, so there is nothing here to compare against, only to
+                # supply.
+                kwargs["current_user_id"] = user_id
 
             if _name == "set_participant":
                 raw_name = str(kwargs.get("display_name") or "").strip().lower()
