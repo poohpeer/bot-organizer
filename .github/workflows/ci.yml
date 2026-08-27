@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets a fresh deploy be triggered on demand — to re-verify the cluster
+  # matches main without needing a throwaway commit, or to re-run after a
+  # transient runner failure. Still gated behind the same test and build
+  # jobs as an ordinary push.
+  workflow_dispatch:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
