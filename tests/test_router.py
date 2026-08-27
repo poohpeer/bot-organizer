@@ -643,6 +643,17 @@ def test_the_system_instruction_demands_russian_without_transliterating_names():
     assert "transliterat" in instruction
 
 
+def test_the_system_instruction_covers_repeating_reminders_and_the_schedule_view():
+    """R1/R2. The `bugs` complaint was the bot saying it had no way to check
+    what was scheduled — the instruction has to point at reminder_list now
+    that one exists, and at repeat_until so the model asks how long to keep
+    reminding instead of guessing."""
+    instruction = router._ACTIVE_MODE_SYSTEM_INSTRUCTION.lower()
+
+    assert "reminder_list" in instruction
+    assert "repeat_until" in instruction
+
+
 async def test_the_model_is_told_what_day_it_is(db_pool):
     """Observed in a real chat: asked to remind "через 5 минут", the model
     stored 2025-07-20 — over a year in the past — because nothing told it the
