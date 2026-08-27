@@ -1,3 +1,4 @@
+import datetime as dt
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -97,3 +98,56 @@ async def test_description_going_from_set_to_empty_counts_as_change(db_pool):
 
     assert result["title_changed"] is False
     assert result["description_changed"] is True
+
+
+# --- extract_event --------------------------------------------------------
+
+async def test_title_with_date_and_place_extracts_both(monkeypatch):
+    monkeypatch.setattr(
+        group_info, "extract",
+        AsyncMock(return_value={
+            "activity_type": "поход", "event_date": "2026-09-15", "place": "Ханания",
+        }),
+    )
+
+    event = await group_info.extract_event(
+        "Поход 15 сентября, поляна Ханания", None, dt.date(2026, 8, 24)
+    )
+
+    assert event == {"activity_type": "поход", "event_date": "2026-09-15", "place": "Ханания"}
+
+
+async def test_title_with_neither_extracts_neither(monkeypatch):
+    monkeypatch.setattr(group_info, "extract", AsyncMock(return_value={}))
+
+    event = await group_info.extract_event("Общий чат", None, dt.date(2026, 8, 24))
+
+    assert event == {"activity_type": None, "event_date": None, "place": None}
+
+
+async def test_bare_date_resolves_against_the_passed_in_today(monkeypatch):
+    """Mirrors 0001's S11 fix for reminders: without a reference "today" in the
+    instruction, "4 июля" with no year resolves against the model's training
+    data instead of the actual next 4 July. This checks our side of that
+    contract — that `today` actually reaches the instruction — since the
+    resolution itself happens inside a mocked model call."""
+    extract_mock = AsyncMock(return_value={"event_date": "2026-07-04"})
+    monkeypatch.setattr(group_info, "extract", extract_mock)
+
+    event = await group_info.extract_event("Едем 4 июля", None, dt.date(2026, 6, 1))
+
+    instruction = extract_mock.await_args.args[0]
+    assert "2026-06-01" in instruction
+    assert "next upcoming occurrence" in instruction
+    assert event["event_date"] == "2026-07-04"
+
+
+async def test_extract_returning_empty_dict_produces_all_none_rather_than_raising(monkeypatch):
+    """extract() already fails closed to {} on any classifier failure; this
+    checks extract_event doesn't reach past that with a .get() on a missing
+    key or otherwise turn a failure into a crash."""
+    monkeypatch.setattr(group_info, "extract", AsyncMock(return_value={}))
+
+    event = await group_info.extract_event("Поход", "15 сентября", dt.date(2026, 8, 24))
+
+    assert event == {"activity_type": None, "event_date": None, "place": None}
