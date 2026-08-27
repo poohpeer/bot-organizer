@@ -36,36 +36,48 @@ jobs:
     needs: build
     runs-on: self-hosted
     steps:
-      # One preflight that reports everything at once. Each run of this
-      # workflow rebuilds the image first, so discovering the next missing
-      # piece one failure at a time is expensive.
+      # Windows PowerShell 5.1, not pwsh and not bash. pwsh (PowerShell 7) is
+      # not installed on this runner, and `bash` on its PATH resolves to the
+      # WSL stub in WindowsApps, which fails with execvpe(/bin/bash) because no
+      # distro is installed. 5.1 ships with Windows and always works — at the
+      # cost of no `&&`, which is why these are separate statements.
       - name: Preflight
-        shell: bash
+        shell: powershell
         run: |
-          set +e
-          echo "--- kubectl ---"
-          command -v kubectl || { echo "MISSING: kubectl is not on the runner service PATH"; exit 1; }
+          $ErrorActionPreference = 'Continue'
+          if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+            throw "kubectl is not on the runner service PATH."
+          }
           kubectl version --client
-          echo "--- cluster ---"
-          kubectl cluster-info || { echo "MISSING: no reachable cluster / kubeconfig for the runner user"; exit 1; }
-          echo "--- namespace ---"
-          kubectl config view --minify -o "jsonpath={..namespace}"; echo
-          echo "--- our resources ---"
-          kubectl get deployment bot-organizer-bot bot-organizer-worker 2>&1
-          kubectl get statefulset bot-organizer-postgres 2>&1
-          kubectl get secret bot-organizer-secrets bot-organizer-ghcr-pull-secret 2>&1
-          echo "--- verdict ---"
-          kubectl get deployment bot-organizer-bot >/dev/null 2>&1 \
-            || { echo "MISSING: deployments do not exist yet. Run 'kubectl apply -k k8s/' once, per k8s/README.md."; exit 1; }
-          echo "ok"
+          Write-Host "--- cluster ---"
+          kubectl cluster-info
+          if ($LASTEXITCODE -ne 0) { throw "No reachable cluster for the runner user." }
+          Write-Host "--- namespace ---"
+          kubectl config view --minify -o "jsonpath={..namespace}"
+          Write-Host ""
+          Write-Host "--- our resources ---"
+          kubectl get deployment bot-organizer-bot bot-organizer-worker
+          kubectl get statefulset bot-organizer-postgres
+          kubectl get secret bot-organizer-secrets bot-organizer-ghcr-pull-secret
+          Write-Host "--- verdict ---"
+          kubectl get deployment bot-organizer-bot | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Deployments do not exist yet. Run 'kubectl apply -k k8s/' once, per k8s/README.md."
+          }
+          Write-Host "ok"
+
       - name: Restart bot
-        shell: bash
+        shell: powershell
         run: kubectl rollout restart deployment/bot-organizer-bot
+
       - name: Restart worker
-        shell: bash
+        shell: powershell
         run: kubectl rollout restart deployment/bot-organizer-worker
+
       - name: Wait for rollout
-        shell: bash
+        shell: powershell
         run: |
           kubectl rollout status deployment/bot-organizer-bot --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "bot rollout did not complete" }
           kubectl rollout status deployment/bot-organizer-worker --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "worker rollout did not complete" }
