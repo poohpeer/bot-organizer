@@ -754,6 +754,19 @@ async def test_an_invented_category_lands_in_prochee(db_pool):
     assert row["category"] == "прочее"
 
 
+async def test_list_show_includes_the_rendered_text(db_pool):
+    """R4: list_show hands back both the raw rows, for the model to reason
+    about, and the rendered plain text it should actually show."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "молоко", quantity="2 л", category="молочка")
+
+    shown = await core.list_show(db_pool, session_id)
+
+    assert shown["items"][0]["quantity"] == "2 л"
+    assert shown["items"][0]["category"] == "молочка"
+    assert shown["rendered"] == "Ещё не разобрали:\nМолочка\n— молоко, 2 л"
+
+
 async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):
     """Observed live: asked to check off "огурцы", the model translated the
     name, added "cucumbers" and checked that off instead — leaving the real

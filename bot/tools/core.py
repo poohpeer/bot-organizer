@@ -3,7 +3,9 @@ import logging
 import os
 from datetime import datetime, timezone
 
+import bot.list_render as list_render
 import bot.timezones as timezones
+from bot.list_render import LIST_CATEGORIES
 
 log = logging.getLogger(__name__)
 
@@ -147,23 +149,12 @@ async def execute_confirmed_action(pool, bot, confirmation) -> dict:
     return {"status": "unknown_action_type"}
 
 
-# Fixed and closed (S3): sorting has to be stable across calls, and a model
-# asked to invent categories will say "молочка" once and "молочные продукты"
-# the next time, which sorts differently and looks broken. Order matters —
-# bot.list_render sorts by this tuple's index, not alphabetically, because
-# that is the order people actually shop in.
-LIST_CATEGORIES = (
-    "мясо", "молочка", "овощи и фрукты", "напитки", "хлеб и выпечка",
-    "бакалея", "посуда", "прочее",
-)
-_DEFAULT_CATEGORY = "прочее"
-
-
 def _normalize_category(category) -> str:
     """An unrecognized category — including one the model invents — falls
     back to прочее rather than being rejected: refusing here would cost a
-    whole turn to fix a cosmetic detail."""
-    return category if category in LIST_CATEGORIES else _DEFAULT_CATEGORY
+    whole turn to fix a cosmetic detail. The vocabulary itself lives in
+    bot.list_render, which also needs it for the shown order."""
+    return category if category in LIST_CATEGORIES else list_render.DEFAULT_CATEGORY
 
 
 async def list_add(pool, session_id, name, quantity=None, category=None) -> dict:
@@ -205,11 +196,24 @@ async def list_add(pool, session_id, name, quantity=None, category=None) -> dict
 
 
 async def list_show(pool, session_id) -> dict:
+    """Return the raw rows (so the model can reason about them) and the
+    rendered plain text (what it should actually show — R4)."""
     rows = await pool.fetch(
-        "SELECT name, status FROM list_items WHERE session_id = $1 ORDER BY created_at",
+        """
+        SELECT name, status, quantity, category, claimed_by, claimed_by_user_id
+        FROM list_items WHERE session_id = $1 ORDER BY created_at
+        """,
         session_id,
     )
-    return {"items": [{"name": r["name"], "status": r["status"]} for r in rows]}
+    items = [
+        {
+            "name": r["name"], "status": r["status"], "quantity": r["quantity"],
+            "category": r["category"], "claimed_by": r["claimed_by"],
+            "claimed_by_user_id": r["claimed_by_user_id"],
+        }
+        for r in rows
+    ]
+    return {"items": items, "rendered": list_render.render(items)}
 
 
 async def list_check_off(pool, session_id, name) -> dict:
