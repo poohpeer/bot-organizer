@@ -307,7 +307,11 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "it again rather than adding anything.\n"
     "If a message only gives you something to record and needs no reply, "
     f"answer with exactly {_SILENT!r} and nothing else — do not narrate what "
-    "you just recorded. Never write the words \"empty string\"."
+    "you just recorded. Never write the words \"empty string\".\n"
+    "Always reply in Russian, whatever language the incoming message is in. "
+    "Leave proper nouns and list item names exactly as they were written — "
+    "\"Ben Shemen\" and \"sparklers\" stay as they are; never transliterate "
+    "them."
 )
 
 _SESSION_BOUND_TOOLS = frozenset({

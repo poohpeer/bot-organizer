@@ -632,6 +632,17 @@ async def test_a_real_answer_is_still_posted(db_pool, monkeypatch):
     assert telegram_bot.send_message.await_args.kwargs["text"] == "Готово, записал."
 
 
+def test_the_system_instruction_demands_russian_without_transliterating_names():
+    """R6. The second sentence isn't decoration: 0001's S6 already had a model
+    translate "огурцы" to "cucumbers" and check off a second copy — R4 makes
+    item names a database key, so telling the model to answer in Russian
+    without the no-transliteration caveat invites that bug straight back."""
+    instruction = router._ACTIVE_MODE_SYSTEM_INSTRUCTION.lower()
+
+    assert "russian" in instruction
+    assert "transliterat" in instruction
+
+
 async def test_the_model_is_told_what_day_it_is(db_pool):
     """Observed in a real chat: asked to remind "через 5 минут", the model
     stored 2025-07-20 — over a year in the past — because nothing told it the
