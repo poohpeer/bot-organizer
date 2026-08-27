@@ -261,6 +261,7 @@ def test_build_core_registry_covers_every_core_tool(db_pool):
 
     assert set(registry) == {
         "remember_fact", "get_facts", "list_add", "list_show", "list_check_off",
+        "list_claim", "list_unclaim",
         "list_remove_item", "set_participant", "get_participants",
         "nudge_unconfirmed_participants", "reminder_set", "reminder_list", "reminder_cancel",
         "broadcast_message", "set_timezone",
@@ -632,6 +633,125 @@ async def test_reminder_list_non_repeating_has_none_repeat_fields(db_pool):
     entry = result["reminders"][0]
     assert entry["repeats_every_minutes"] is None
     assert entry["repeats_until"] is None
+
+
+# --- S3: quantity, category and claiming ---
+
+
+async def test_list_add_with_quantity_and_category(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.list_add(db_pool, session_id, "молоко", quantity="2 л", category="молочка")
+
+    assert result["status"] == "ok"
+    row = await db_pool.fetchrow("SELECT quantity, category FROM list_items WHERE id = $1", result["item_id"])
+    assert row["quantity"] == "2 л"
+    assert row["category"] == "молочка"
+
+
+async def test_list_add_without_a_quantity_leaves_it_blank(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.list_add(db_pool, session_id, "картошка")
+
+    assert result["status"] == "ok"
+    row = await db_pool.fetchrow("SELECT quantity FROM list_items WHERE id = $1", result["item_id"])
+    assert row["quantity"] is None
+
+
+async def test_list_add_fills_in_a_blank_quantity(db_pool):
+    """R4: "возьмите картошки" then "картошки, килограмма два" is adding
+    information, not repeating the same request — it must update the row
+    rather than reporting already_present."""
+    session_id = await _new_session(db_pool)
+    first = await core.list_add(db_pool, session_id, "картошка")
+
+    result = await core.list_add(db_pool, session_id, "картошка", quantity="килограмма два")
+
+    assert result["status"] == "updated"
+    assert result["item_id"] == first["item_id"]
+    row = await db_pool.fetchrow("SELECT quantity FROM list_items WHERE id = $1", first["item_id"])
+    assert row["quantity"] == "килограмма два"
+
+
+async def test_list_add_never_overwrites_an_existing_quantity(db_pool):
+    """Filling in a blank is adding information; overwriting a set value would
+    be losing it, so a second stated amount is reported, not silently applied."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "молоко", quantity="2 л")
+
+    result = await core.list_add(db_pool, session_id, "молоко", quantity="3 л")
+
+    assert result["status"] == "already_present"
+    assert result["quantity"] == "2 л"
+    row = await db_pool.fetchrow(
+        "SELECT quantity FROM list_items WHERE session_id = $1 AND lower(name) = 'молоко'", session_id
+    )
+    assert row["quantity"] == "2 л"
+
+
+async def test_list_claim_sets_claimant(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "хлеб")
+
+    result = await core.list_claim(db_pool, session_id, "хлеб", "Alex", claimed_by_user_id=42)
+
+    assert result["status"] == "ok"
+    row = await db_pool.fetchrow(
+        "SELECT claimed_by, claimed_by_user_id FROM list_items WHERE session_id = $1 AND lower(name) = 'хлеб'",
+        session_id,
+    )
+    assert row["claimed_by"] == "Alex"
+    assert row["claimed_by_user_id"] == 42
+
+
+async def test_list_claim_missing_item_returns_real_names(db_pool):
+    """Mirrors list_check_off's not_found affordance (0001's S6): a model that
+    invents a name rather than matching one needs the real names to retry with."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "огурцы")
+
+    result = await core.list_claim(db_pool, session_id, "cucumbers", "Alex")
+
+    assert result["status"] == "not_found"
+    assert result["items_on_the_list"] == ["огурцы"]
+
+
+async def test_list_unclaim_clears_claim(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "хлеб")
+    await core.list_claim(db_pool, session_id, "хлеб", "Alex")
+
+    result = await core.list_unclaim(db_pool, session_id, "хлеб")
+
+    assert result["status"] == "ok"
+    row = await db_pool.fetchrow(
+        "SELECT claimed_by, claimed_by_user_id FROM list_items WHERE session_id = $1 AND lower(name) = 'хлеб'",
+        session_id,
+    )
+    assert row["claimed_by"] is None
+    assert row["claimed_by_user_id"] is None
+
+
+async def test_list_unclaim_missing_item_returns_real_names(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "огурцы")
+
+    result = await core.list_unclaim(db_pool, session_id, "cucumbers")
+
+    assert result["status"] == "not_found"
+    assert result["items_on_the_list"] == ["огурцы"]
+
+
+async def test_an_invented_category_lands_in_prochee(db_pool):
+    """The category vocabulary is fixed in code (S3): a model-invented category
+    must not be rejected, and must not corrupt the sort in Task 3."""
+    session_id = await _new_session(db_pool)
+
+    result = await core.list_add(db_pool, session_id, "хлеб", category="выпечка домашняя")
+
+    row = await db_pool.fetchrow("SELECT category FROM list_items WHERE id = $1", result["item_id"])
+    assert row["category"] == "прочее"
 
 
 async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):
