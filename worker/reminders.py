@@ -42,6 +42,27 @@ async def _claim(pool, reminder_id):
     )
 
 
+async def _advance(pool, reminder_id, next_at) -> None:
+    """Move a repeating reminder to its next occurrence after a successful
+    send.
+
+    Runs after the claim already flipped the row to 'sent', so no other
+    worker's claim query (`WHERE status = 'pending'`) can see it in between —
+    putting it back to 'pending' here is safe from the same race _claim
+    guards against. attempts resets to 0: a failure on an earlier occurrence
+    must not count against a later one, or a reminder that failed twice years
+    ago would need only one more failure to stop repeating forever.
+    """
+    await pool.execute(
+        """
+        UPDATE reminders
+        SET remind_at = $2, status = 'pending', attempts = 0, sent_at = NULL
+        WHERE id = $1
+        """,
+        reminder_id, next_at,
+    )
+
+
 async def _release(pool, reminder_id) -> str:
     """Hand a claimed reminder back after a failed send, or retire it.
 
@@ -64,7 +85,11 @@ async def _release(pool, reminder_id) -> str:
 async def deliver_due_reminders(pool, telegram_bot, *, min_interval_hours: float) -> dict:
     delivered, deferred, failed = [], [], []
     for r in await _due_reminders(pool):
-        if r["target_user_id"] is not None:
+        # A cadence someone explicitly asked for out loud is not the unbidden
+        # pestering REMINDER_MIN_INTERVAL_HOURS exists to stop — a half-hourly
+        # repeat would otherwise be deferred by it forever. See EPIC.md and
+        # S2-reminders.md.
+        if r["target_user_id"] is not None and r["repeat_every_minutes"] is None:
             last_sent = await _last_sent_at(pool, r["target_user_id"])
             if last_sent is not None and (datetime.now(timezone.utc) - last_sent) < timedelta(hours=min_interval_hours):
                 deferred.append(r["id"])
@@ -85,6 +110,15 @@ async def deliver_due_reminders(pool, telegram_bot, *, min_interval_hours: float
             if await _release(pool, r["id"]) == "failed":
                 failed.append(r["id"])
             continue
+
+        if r["repeat_every_minutes"] is not None:
+            # Advance from the *scheduled* remind_at (the row as fetched at
+            # the top of this poll), not from now(): a late tick must not
+            # drift the whole series later, and over a day of half-hourly
+            # reminders a few late ticks add up to real accumulated lag.
+            next_at = r["remind_at"] + timedelta(minutes=r["repeat_every_minutes"])
+            if next_at <= r["repeat_until"]:
+                await _advance(pool, r["id"], next_at)
 
         delivered.append(r["id"])
 
