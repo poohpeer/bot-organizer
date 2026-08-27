@@ -110,3 +110,22 @@ is required after changing them.
   replicas cause `409 Conflict` errors.
 - No Service or Ingress is needed for the bot or worker. PostgreSQL is
   available inside the namespace as `bot-organizer-postgres:5432`.
+
+## Two deliberate choices
+
+**`PGDATA` is left at the mount root.** The PVC is mounted straight at
+`/var/lib/postgresql/data`, which on some storage classes fails because the
+volume root already contains `lost+found` and `initdb` refuses a non-empty
+directory. The usual fix is to point `PGDATA` at a subdirectory — and it is
+not applied here on purpose: this database already has data at the current
+path, and moving `PGDATA` now would have Postgres initialise an empty cluster
+in the subdirectory while the real one sat untouched beside it. Every session,
+list and fact would look deleted. If the volume is ever recreated from scratch
+on a storage class that does create `lost+found`, set `PGDATA` then, on an
+empty volume.
+
+**Resource limits are set on all three containers.** The requests come from a
+measurement — 73 MiB to import the application, before any connections — not
+from a guess. CPU limits exist because this namespace is shared: both app
+processes are I/O bound and should never approach half a core, so a limit
+costs nothing and stops a runaway loop from crowding the neighbours.

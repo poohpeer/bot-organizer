@@ -45,6 +45,13 @@ spec:
                 secretKeyRef:
                   name: bot-organizer-secrets
                   key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
           volumeMounts:
             - name: bot-organizer-postgres-data
               mountPath: /var/lib/postgresql/data

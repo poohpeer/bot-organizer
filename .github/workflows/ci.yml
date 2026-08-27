@@ -116,6 +116,18 @@ jobs:
           }
           Write-Host "ok"
 
+      # Without this the workflow only ever restarts pods, so a change to a
+      # manifest — an added env var, a resource limit, a new volume — lives in
+      # git and never reaches the cluster. The Secret is deliberately not in
+      # the kustomization: it is gitignored and applied by hand.
+      - name: Apply manifests
+        shell: powershell
+        run: |
+          kubectl apply -k k8s/
+          if ($LASTEXITCODE -ne 0) { throw "kubectl apply failed" }
+
+      # Still needed after the apply: the image tag is :latest, so a rebuilt
+      # image is not a spec change and apply alone would see nothing to do.
       - name: Restart bot
         shell: powershell
         run: kubectl rollout restart deployment/bot-organizer-bot
