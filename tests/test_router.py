@@ -237,7 +237,24 @@ async def test_session_already_active_tells_user_and_does_not_duplicate(db_pool,
 
 # --- handle_bot_added --------------------------------------------------------
 
-async def test_bot_added_sends_one_greeting_and_no_session(db_pool):
+def _no_group_info(monkeypatch):
+    """Stubs group_info.fetch/extract_event to report nothing.
+
+    handle_bot_added now always calls these to build the greeting; without a
+    stub, an AsyncMock telegram_bot's get_chat would happily return another
+    AsyncMock rather than raising, so group_info.fetch would not fail closed
+    to {} — and extract_event would go on to make a real classifier call,
+    which tests must never do.
+    """
+    monkeypatch.setattr(router.group_info, "fetch", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        router.group_info, "extract_event",
+        AsyncMock(return_value={"activity_type": None, "event_date": None, "place": None}),
+    )
+
+
+async def test_bot_added_sends_one_greeting_and_no_session(db_pool, monkeypatch):
+    _no_group_info(monkeypatch)
     telegram_bot = AsyncMock()
     update = _member_update("left", "member")
 
@@ -255,6 +272,68 @@ async def test_bot_promoted_sends_nothing(db_pool):
     await router.handle_bot_added(db_pool, telegram_bot, update, BOT_ID, BOT_USERNAME)
 
     telegram_bot.send_message.assert_not_awaited()
+
+
+async def test_bot_added_with_bare_title_sends_todays_plain_greeting(db_pool, monkeypatch):
+    """R7's last criterion, applied to the greeting: a title/description with
+    nothing stated must not scaffold an empty "Поездка: не указано" — the
+    greeting is exactly what it was before this story."""
+    _no_group_info(monkeypatch)
+    telegram_bot = AsyncMock()
+    update = _member_update("left", "member")
+
+    await router.handle_bot_added(db_pool, telegram_bot, update, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_awaited_once_with(
+        chat_id=-100, text=router._GREETING_TEMPLATE.format(mention=f"@{BOT_USERNAME}")
+    )
+
+
+async def test_bot_added_with_rich_info_names_activity_date_place_and_count(db_pool, monkeypatch):
+    monkeypatch.setattr(
+        router.group_info, "fetch",
+        AsyncMock(return_value={
+            "title": "Поход выходного дня", "description": "15 сентября, поляна Ханания",
+            "member_count": 9,
+        }),
+    )
+    monkeypatch.setattr(
+        router.group_info, "extract_event",
+        AsyncMock(return_value={
+            "activity_type": "поход", "event_date": "2026-09-15", "place": "поляна Ханания",
+        }),
+    )
+    telegram_bot = AsyncMock()
+    update = _member_update("left", "member")
+
+    await router.handle_bot_added(db_pool, telegram_bot, update, BOT_ID, BOT_USERNAME)
+
+    text = telegram_bot.send_message.await_args.kwargs["text"]
+    assert "поход" in text
+    assert "15.09.2026" in text
+    assert "поляна Ханания" in text
+    assert "9" in text
+    assert await session.get_active_session(db_pool, -100) is None
+
+
+async def test_bot_added_greeting_never_claims_to_know_member_names(db_pool, monkeypatch):
+    """It has a number from get_chat_member_count, not a roster — the
+    greeting must read that way (R7)."""
+    monkeypatch.setattr(
+        router.group_info, "fetch",
+        AsyncMock(return_value={"title": "Поход", "description": "15 сентября", "member_count": 9}),
+    )
+    monkeypatch.setattr(
+        router.group_info, "extract_event",
+        AsyncMock(return_value={"activity_type": "поход", "event_date": "2026-09-15", "place": None}),
+    )
+    telegram_bot = AsyncMock()
+    update = _member_update("left", "member")
+
+    await router.handle_bot_added(db_pool, telegram_bot, update, BOT_ID, BOT_USERNAME)
+
+    text = telegram_bot.send_message.await_args.kwargs["text"].lower()
+    assert "участник" not in text
 
 
 # --- handle_active_message ---------------------------------------------------
@@ -854,3 +933,17 @@ async def test_the_date_follows_the_chats_own_timezone(db_pool):
 
     local = dt.datetime.now(ZoneInfo("Pacific/Kiritimati"))
     assert local.strftime("%Y-%m-%d") in instruction
+
+
+def test_the_system_instruction_covers_the_roster_gap_remark():
+    """R7's last three criteria: the roster is partial by construction, so a
+    list of three names in a group of nine is misleading on its own and the
+    person asking cannot tell the difference. The instruction has to name the
+    exact fields and the exact condition — only when they differ, never when
+    the count is unknown, or a stray 0 would read as an empty group."""
+    instruction = router._ACTIVE_MODE_SYSTEM_INSTRUCTION
+
+    assert "chat_member_count" in instruction
+    assert "recorded_count" in instruction
+    assert "В чате" in instruction
+    assert "null" in instruction.lower()

@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 from telegram import Chat, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, Message, User
 
 import bot.main as main
+import bot.session as session
+import bot.tools.core as core_tools
 
 BOT_ID = 4242
 BOT_USERNAME = "orgbot"
@@ -18,6 +20,14 @@ def _message(from_user=_HUMAN, chat_id=-100, text="hi"):
     return Message(
         message_id=1, date=dt.datetime.now(dt.timezone.utc),
         chat=Chat(id=chat_id, type="group"), from_user=from_user, text=text,
+    )
+
+
+def _join_message(members, chat_id=-100, from_user=_HUMAN):
+    return Message(
+        message_id=1, date=dt.datetime.now(dt.timezone.utc),
+        chat=Chat(id=chat_id, type="group"), from_user=from_user,
+        new_chat_members=members,
     )
 
 
@@ -90,6 +100,75 @@ async def test_route_update_active_chat_dispatches_with_session_row(monkeypatch)
     await main.route_update(pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
 
     active_handler.assert_awaited_once_with(pool, telegram_bot, active_row, msg, BOT_ID, BOT_USERNAME)
+
+
+# --- new_chat_members -------------------------------------------------------
+
+async def _ensure_chat(db_pool, chat_id=-100):
+    await db_pool.execute(
+        "INSERT INTO chats (chat_id, title) VALUES ($1, 'Chat') ON CONFLICT DO NOTHING", chat_id
+    )
+
+
+async def test_new_chat_member_in_active_session_adds_participant_and_announces_once(db_pool, monkeypatch):
+    await _ensure_chat(db_pool)
+    active = await session.start_session(db_pool, chat_id=-100, activity_type="picnic")
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    telegram_bot = AsyncMock()
+    msg = _join_message([User(id=555, first_name="Nova", is_bot=False)])
+
+    await main.route_update(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
+
+    telegram_bot.send_message.assert_awaited_once()
+    assert telegram_bot.send_message.await_args.kwargs["chat_id"] == -100
+    rows = await db_pool.fetch(
+        "SELECT display_name, status, user_id FROM participants WHERE session_id = $1", active["id"]
+    )
+    assert len(rows) == 1
+    assert (rows[0]["display_name"], rows[0]["status"], rows[0]["user_id"]) == ("Nova", "unknown", 555)
+
+
+async def test_new_chat_member_in_dormant_chat_does_nothing(db_pool, monkeypatch):
+    """R5: a dormant chat is not being tracked, so a join there is recorded
+    nowhere and announced to nobody."""
+    await _ensure_chat(db_pool)
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    telegram_bot = AsyncMock()
+    msg = _join_message([User(id=555, first_name="Nova", is_bot=False)])
+
+    await main.route_update(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
+
+    telegram_bot.send_message.assert_not_awaited()
+
+
+async def test_bot_joining_is_ignored(db_pool, monkeypatch):
+    """Same reasoning route_update already applies to a message *sent* by a
+    bot: a bot is never a person to nudge for confirmation."""
+    await _ensure_chat(db_pool)
+    active = await session.start_session(db_pool, chat_id=-100, activity_type="picnic")
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    telegram_bot = AsyncMock()
+    msg = _join_message([User(id=999, first_name="HelperBot", is_bot=True, username="helperbot")])
+
+    await main.route_update(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
+
+    telegram_bot.send_message.assert_not_awaited()
+    rows = await db_pool.fetch("SELECT id FROM participants WHERE session_id = $1", active["id"])
+    assert rows == []
+
+
+async def test_rejoin_of_an_already_listed_member_does_not_duplicate(db_pool, monkeypatch):
+    await _ensure_chat(db_pool)
+    active = await session.start_session(db_pool, chat_id=-100, activity_type="picnic")
+    await core_tools.set_participant(db_pool, active["id"], "Nova", "confirmed", user_id=555)
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    telegram_bot = AsyncMock()
+    msg = _join_message([User(id=555, first_name="Nova", is_bot=False)])
+
+    await main.route_update(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
+
+    rows = await db_pool.fetch("SELECT id FROM participants WHERE session_id = $1", active["id"])
+    assert len(rows) == 1
 
 
 # --- route_membership -----------------------------------------------------
@@ -176,3 +255,25 @@ async def test_post_init_resolves_bot_username_via_get_me(monkeypatch):
     assert app.bot_data["bot_id"] == 555
     assert app.bot_data["bot_username"] == "renamed_bot"
     assert app.bot_data["pool"] is fake_pool
+
+
+async def test_rejoin_does_not_overwrite_a_confirmed_status(db_pool, monkeypatch):
+    """A rejoin (someone who left and came back, or Telegram simply
+    redelivering new_chat_members) must not reset an already-confirmed
+    participant back to "unknown" — that silently destroys a real answer and
+    the announcement then falsely claims the bot is waiting for confirmation
+    from someone who already gave one."""
+    await _ensure_chat(db_pool)
+    active = await session.start_session(db_pool, chat_id=-100, activity_type="picnic")
+    await core_tools.set_participant(db_pool, active["id"], "Nova", "confirmed", user_id=555)
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    telegram_bot = AsyncMock()
+    msg = _join_message([User(id=555, first_name="Nova", is_bot=False)])
+
+    await main.route_update(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
+
+    status = await db_pool.fetchval(
+        "SELECT status FROM participants WHERE session_id = $1 AND user_id = 555", active["id"]
+    )
+    assert status == "confirmed"
+    telegram_bot.send_message.assert_not_awaited()

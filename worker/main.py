@@ -8,6 +8,7 @@ from telegram import Bot
 import db.pool as db_pool_module
 from bot.logging_setup import configure_logging
 from worker.closing import fire_auto_closes, fire_closing_questions
+from worker.group_sync import sync_group_info
 from worker.reminders import deliver_due_reminders
 
 configure_logging()
@@ -37,6 +38,7 @@ async def poll_once(pool, telegram_bot, *, min_interval_hours: float) -> None:
             deliver_due_reminders, pool, telegram_bot, min_interval_hours=min_interval_hours)),
         ("closing questions", functools.partial(fire_closing_questions, pool, telegram_bot)),
         ("auto-closes", functools.partial(fire_auto_closes, pool, telegram_bot)),
+        ("group sync", functools.partial(sync_group_info, pool, telegram_bot)),
     )
     for name, step in steps:
         try:

@@ -184,7 +184,10 @@ bots, and the same reasoning applies to adding them as participants.
 
 **Tests must cover:** a join in an active-session chat adding a participant and
 announcing once; a join in a dormant chat doing nothing; a bot joining being
-ignored; a rejoin of someone already listed not duplicating them.
+ignored; a rejoin of someone already listed not duplicating them **and not
+resetting their status** — a rejoin must not overwrite an existing
+"confirmed"/"declined" answer back to "unknown", or announce "жду
+подтверждения" about someone who already answered.
 
 - [ ] **Step 1–5.**
 

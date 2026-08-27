@@ -294,6 +294,17 @@ async def list_remove_item(pool, session_id, name) -> dict:
     )
 
 
+async def get_participant_status(pool, session_id, *, user_id) -> str | None:
+    """Whether this telegram user is already a known participant, and if so
+    what their status is. None means "never recorded" — the caller's cue to
+    treat this as a genuinely new join rather than a rejoin.
+    """
+    return await pool.fetchval(
+        "SELECT status FROM participants WHERE session_id = $1 AND user_id = $2",
+        session_id, user_id,
+    )
+
+
 async def set_participant(pool, session_id, display_name, status, user_id=None) -> dict:
     """Record or update one participant's status.
 
@@ -347,14 +358,37 @@ async def set_participant(pool, session_id, display_name, status, user_id=None) 
 
 
 async def get_participants(pool, session_id) -> dict:
+    """List recorded participants, plus how complete that list is.
+
+    The roster is partial by construction (see EPIC.md's "What the Telegram
+    Bot API cannot do" — there is no way to list a group's members), so every
+    caller needs both counts to say so rather than presenting a handful of
+    names as if that were everyone. chat_member_count is read from the stored
+    column rather than calling Telegram here: that keeps an ordinary
+    participants question off the network path, and a value at most
+    GROUP_SYNC_INTERVAL_SECONDS old is accurate enough for a caveat. It comes
+    back None — never 0 — when it has never been fetched, since 0 would read
+    as an empty group rather than "unknown".
+    """
+    session_row = await _session_row(pool, session_id, columns="chat_id")
     rows = await pool.fetch(
         "SELECT user_id, display_name, status FROM participants WHERE session_id = $1",
         session_id,
     )
-    return {"participants": [
+    participants = [
         {"user_id": r["user_id"], "display_name": r["display_name"], "status": r["status"]}
         for r in rows
-    ]}
+    ]
+    chat_member_count = None
+    if session_row is not None:
+        chat_member_count = await pool.fetchval(
+            "SELECT member_count FROM chats WHERE chat_id = $1", session_row["chat_id"]
+        )
+    return {
+        "participants": participants,
+        "chat_member_count": chat_member_count,
+        "recorded_count": len(participants),
+    }
 
 
 async def nudge_unconfirmed_participants(pool, telegram_bot, session_id) -> dict:

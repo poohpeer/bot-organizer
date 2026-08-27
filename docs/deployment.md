@@ -171,6 +171,13 @@ environment and is not — a bad value there breaks the closing-question query.
 `QUIET_UNTIL_HOUR` / `QUIET_FROM_HOUR` bound the hours, local to each chat, in
 which the bot may start a conversation on its own.
 
+## Group title/description sync
+
+`GROUP_SYNC_INTERVAL_SECONDS` (default `60`) caps how often the worker calls
+`get_chat` for a chat with an active session, to notice a changed title or
+description. The worker's own poll runs every 60s regardless; this is a
+separate, per-chat gate on top of that, not a second poll loop.
+
 ## Logs and troubleshooting
 
 ```bash

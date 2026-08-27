@@ -12,6 +12,7 @@ from telegram.ext import Application, ChatMemberHandler, ContextTypes, MessageHa
 import bot.dedup as dedup
 import bot.router as router
 import bot.session as session
+import bot.tools.core as core_tools
 import db.pool as db_pool_module
 from bot.logging_setup import configure_logging, truncate
 
@@ -32,6 +33,49 @@ def _bot_was_removed(chat_member_updated, bot_id: int) -> bool:
     return new.status in _ABSENT and old.status not in _ABSENT
 
 
+_NEW_MEMBER_TEXT = "У нас новый участник — {name}. Я добавил его в список, жду подтверждения."
+
+
+def _display_name_of_new_member(user) -> str:
+    return user.full_name or (f"@{user.username}" if user.username else str(user.id))
+
+
+async def handle_new_members(pool, telegram_bot, message) -> None:
+    """Record each newly joined human as a participant and say so.
+
+    `new_chat_members` plus someone speaking are the *only* roster growth the
+    Bot API allows at all (see EPIC.md's "What the Telegram Bot API cannot
+    do" — there is still no way to list who is already in the chat). A
+    dormant chat is not being tracked (R5): a join there is recorded nowhere
+    and announced to nobody, so the active-session check happens before a
+    single participant row is touched. Bots joining are ignored for the same
+    reason route_update already drops messages *sent* by a bot — a bot in the
+    roster is never a person to nudge for confirmation.
+    """
+    active = await session.get_active_session(pool, message.chat.id)
+    if active is None:
+        return
+    for member in message.new_chat_members:
+        if member.is_bot:
+            continue
+        display_name = _display_name_of_new_member(member)
+        existing = await core_tools.get_participant_status(pool, active["id"], user_id=member.id)
+        if existing is not None:
+            # A rejoin — someone who left and came back, or Telegram simply
+            # redelivering new_chat_members. set_participant with a fixed
+            # "unknown" status would silently overwrite a real "confirmed" or
+            # "declined" answer and then announce "жду подтверждения" about
+            # someone who already answered, which is both false and destroys
+            # the confirmation that had already been recorded.
+            continue
+        await core_tools.set_participant(
+            pool, active["id"], display_name, "unknown", user_id=member.id
+        )
+        await telegram_bot.send_message(
+            chat_id=message.chat.id, text=_NEW_MEMBER_TEXT.format(name=display_name)
+        )
+
+
 async def route_update(pool, telegram_bot, message, bot_id, bot_username, *, update_id) -> None:
     # One line per incoming message, before anything can drop it. When someone
     # reports "the bot didn't answer", this is where you look first: either the
@@ -49,6 +93,15 @@ async def route_update(pool, telegram_bot, message, bot_id, bot_username, *, upd
     if message.from_user is not None and message.from_user.is_bot:
         # Two bots addressing each other would otherwise loop forever.
         log.debug("update %s: dropped, sender is a bot", update_id)
+        return
+
+    if message.new_chat_members:
+        # A join is a service message, not ordinary chat — it must never
+        # reach handle_dormant_message/handle_active_message, which would
+        # otherwise spend a model call trying to extract meaning from it.
+        log.debug("update %s: %d new member(s) in chat %s",
+                   update_id, len(message.new_chat_members), message.chat.id)
+        await handle_new_members(pool, telegram_bot, message)
         return
 
     # A private chat carries no session of its own; it is where participants
