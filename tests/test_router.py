@@ -400,6 +400,45 @@ async def test_addressed_ordinary_request_runs_tool_loop_and_replies(db_pool, mo
     assert await _decision_log_count(db_pool) == 1
 
 
+async def test_markdown_in_tool_loop_reply_is_converted_before_sending(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="**Куда:** Ben Shemen"))
+    msg = _message("куда едем")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text="Куда: Ben Shemen")
+
+
+async def test_markdown_wrapped_silent_sentinel_still_silences(db_pool, monkeypatch):
+    """A model answering with '**<silent>**' instead of the bare sentinel must
+    still be silenced — the conversion has to run before the sentinel check,
+    not after, or the bold markers leave the comparison never matching."""
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="**<silent>**"))
+    msg = _message("записал")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_not_awaited()
+
+
+async def test_a_reply_with_no_markdown_passes_through_unchanged(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="Готово, записал."))
+    msg = _message("ладно")
+
+    await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
+
+    telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text="Готово, записал.")
+
+
 async def test_empty_tool_loop_reply_posts_nothing(db_pool, monkeypatch):
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
