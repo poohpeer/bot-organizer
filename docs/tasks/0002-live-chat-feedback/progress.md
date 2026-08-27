@@ -11,7 +11,7 @@
 | Unit | Branch | Status | Commits | Verification | PR | Notes |
 |------|--------|--------|---------|--------------|----|-------|
 | S1 | 0002-S1-reply-formatting | complete | 364e053..HEAD | 5 defects fixed; tester PASS | — | word-boundary rule for emphasis |
-| S2 | — | next | — | — | — | |
+| S2 | 0002-S2-reminders | in_progress | — | — | — | |
 | S3 | — | pending | — | — | — | |
 | S4 | — | pending | — | — | — | |
 | S5 | — | pending | — | — | — | |
