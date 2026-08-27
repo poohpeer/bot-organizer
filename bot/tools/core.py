@@ -1,10 +1,17 @@
 import functools
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 
 import bot.timezones as timezones
 
 log = logging.getLogger(__name__)
+
+# The floor beneath REMINDER_MIN_INTERVAL_HOURS's per-target rate limit, which
+# repeating reminders are exempt from (see worker/reminders.py). Someone asked
+# out loud for a cadence still shouldn't be able to spam the chat every few
+# seconds.
+REMINDER_MIN_REPEAT_MINUTES = int(os.environ.get("REMINDER_MIN_REPEAT_MINUTES", "5"))
 
 # Actions the model is never allowed to perform directly (R10). Each is
 # proposed as a pending_confirmation and only executed after an explicit human
@@ -303,12 +310,17 @@ async def nudge_unconfirmed_participants(pool, telegram_bot, session_id) -> dict
     return {"nudged": nudged, "skipped_no_user_id": skipped, "failed_to_reach": failed}
 
 
-async def reminder_set(pool, session_id, message, remind_at, target_user_id=None) -> dict:
+async def reminder_set(pool, session_id, message, remind_at, target_user_id=None,
+                        repeat_every_minutes=None, repeat_until=None) -> dict:
     """Queue a reminder for later delivery by the worker.
 
     chat_id is derived from the session rather than taken from the model: a
     hallucinated chat_id would post this chat's reminder into a different
     group.
+
+    A repeat with no stated end schedules nothing and asks for one instead of
+    guessing (R1's second criterion): relying on the system instruction alone
+    would make that a suggestion the model is free to skip.
     """
     session_row = await _session_row(pool, session_id)
     if session_row is None:
@@ -327,16 +339,36 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
     local_time = when.replace(tzinfo=None) if when.tzinfo is None else None
     when = timezones.to_utc(when, tz)
 
+    repeat_until_utc = None
+    if repeat_every_minutes is not None:
+        if repeat_until is None:
+            return {"status": "repeat_needs_an_end",
+                    "detail": "repeat_every_minutes was given without repeat_until — ask how long to keep reminding"}
+        if repeat_every_minutes < REMINDER_MIN_REPEAT_MINUTES:
+            return {"status": "repeat_too_frequent", "minimum_minutes": REMINDER_MIN_REPEAT_MINUTES}
+        try:
+            repeat_until_local = datetime.fromisoformat(repeat_until)
+        except (TypeError, ValueError):
+            return {"status": "bad_datetime", "detail": f"could not parse {repeat_until!r} as ISO-8601"}
+        # Same path as remind_at, so a repeat that crosses a DST boundary is
+        # anchored to the wall-clock hour that was asked for, not an offset.
+        repeat_until_utc = timezones.to_utc(repeat_until_local, tz)
+        if repeat_until_utc <= datetime.now(timezone.utc):
+            return {"status": "repeat_end_in_the_past"}
+
     row = await pool.fetchrow(
         """
         INSERT INTO reminders (session_id, chat_id, target_user_id, message, remind_at,
-                               local_time, assumed_timezone)
-        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
+                               local_time, assumed_timezone, repeat_every_minutes, repeat_until)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id
         """,
         session_id, chat_id, target_user_id, message, when, local_time,
-        None if known else str(tz),
+        None if known else str(tz), repeat_every_minutes, repeat_until_utc,
     )
     result = {"status": "ok", "reminder_id": row["id"]}
+    if repeat_every_minutes is not None:
+        result["repeats_every_minutes"] = repeat_every_minutes
+        result["repeats_until"] = repeat_until_utc.astimezone(tz).replace(tzinfo=None).isoformat()
     if known is None and local_time is not None:
         # Nobody has said where this group is, so the time was interpreted in
         # the configured default. Say so instead of silently guessing: the

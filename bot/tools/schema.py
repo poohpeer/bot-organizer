@@ -49,10 +49,13 @@ ALL_TOOLS = types.Tool(function_declarations=[
     # chat_id is deliberately NOT a parameter on the tools below: it is derived
     # from session_id in code, so a hallucinated chat_id cannot make the bot
     # write into a different group's chat.
-    _fn("reminder_set", "Schedule a reminder to be delivered later, to one person or the whole chat.",
+    _fn("reminder_set", "Schedule a reminder to be delivered later, to one person or the whole chat. "
+        "Pass repeat_every_minutes and repeat_until to make it repeat until that time.",
         {"session_id": _S(Type.INTEGER), "message": _S(Type.STRING),
          "remind_at": _S(Type.STRING, "ISO-8601 datetime."),
-         "target_user_id": _S(Type.INTEGER, "Telegram user id, or omit to post in the group chat.")},
+         "target_user_id": _S(Type.INTEGER, "Telegram user id, or omit to post in the group chat."),
+         "repeat_every_minutes": _S(Type.INTEGER, "Repeat interval in minutes, or omit for a one-off reminder."),
+         "repeat_until": _S(Type.STRING, "ISO-8601 datetime the repeats stop at. Required if repeat_every_minutes is given.")},
         ["session_id", "message", "remind_at"]),
     _fn("reminder_cancel", "Cancel a previously scheduled reminder belonging to this session.",
         {"session_id": _S(Type.INTEGER), "reminder_id": _S(Type.INTEGER)},

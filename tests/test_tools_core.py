@@ -1,4 +1,7 @@
+import inspect
+
 import bot.tools.core as core
+import bot.tools.schema as schema
 
 
 async def _new_session(db_pool, chat_id=1):
@@ -441,6 +444,94 @@ async def test_confirmation_prompt_reads_as_a_sentence(db_pool):
 
     assert "{" not in proposed["message_for_user"]
     assert "tomatoes" in proposed["message_for_user"]
+
+
+def test_declared_parameters_match_the_bound_signatures(db_pool):
+    """Mirrors test_tools_composed.py's guard of the same name: the model can
+    only pass what the declaration advertises, so a drifted declaration is
+    either a TypeError at call time or a chat_id the model gets to choose."""
+    from unittest.mock import AsyncMock
+
+    registry = core.build_core_registry(db_pool, AsyncMock())
+    declared = {
+        fn.name: set(fn.parameters.properties)
+        for fn in schema.ALL_TOOLS.function_declarations
+        if fn.name in registry
+    }
+
+    for name, tool in registry.items():
+        bound = set(inspect.signature(tool).parameters)
+        assert bound == declared[name], f"{name}: declared {declared[name]}, accepts {bound}"
+
+
+async def test_reminder_set_with_a_repeat_stores_both_columns(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.reminder_set(
+        db_pool, session_id, message="Пей воду", remind_at="2026-09-01T09:00:00",
+        repeat_every_minutes=30, repeat_until="2026-09-01T12:00:00",
+    )
+
+    assert result["status"] == "ok"
+    assert result["repeats_every_minutes"] == 30
+    assert result["repeats_until"] == "2026-09-01T12:00:00"
+    row = await db_pool.fetchrow("SELECT * FROM reminders WHERE id = $1", result["reminder_id"])
+    assert row["repeat_every_minutes"] == 30
+    assert row["repeat_until"] is not None
+
+
+async def test_reminder_set_repeat_without_an_end_schedules_nothing(db_pool):
+    """R1's second criterion in mechanical form: the tool refuses so the model
+    has to ask, rather than the instruction alone being a suggestion it can
+    skip."""
+    session_id = await _new_session(db_pool)
+
+    result = await core.reminder_set(
+        db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00",
+        repeat_every_minutes=30,
+    )
+
+    assert result["status"] == "repeat_needs_an_end"
+    assert await db_pool.fetch("SELECT id FROM reminders WHERE session_id = $1", session_id) == []
+
+
+async def test_reminder_set_refuses_an_interval_below_the_floor(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.reminder_set(
+        db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00",
+        repeat_every_minutes=2, repeat_until="2026-09-01T12:00:00",
+    )
+
+    assert result == {"status": "repeat_too_frequent", "minimum_minutes": 5}
+    assert await db_pool.fetch("SELECT id FROM reminders WHERE session_id = $1", session_id) == []
+
+
+async def test_reminder_set_refuses_an_end_already_in_the_past(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.reminder_set(
+        db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00",
+        repeat_every_minutes=30, repeat_until="2020-01-01T00:00:00",
+    )
+
+    assert result["status"] == "repeat_end_in_the_past"
+    assert await db_pool.fetch("SELECT id FROM reminders WHERE session_id = $1", session_id) == []
+
+
+async def test_reminder_set_without_a_repeat_is_unchanged(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await core.reminder_set(
+        db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00",
+    )
+
+    assert result["status"] == "ok"
+    assert "repeats_every_minutes" not in result
+    assert "repeats_until" not in result
+    row = await db_pool.fetchrow("SELECT * FROM reminders WHERE id = $1", result["reminder_id"])
+    assert row["repeat_every_minutes"] is None
+    assert row["repeat_until"] is None
 
 
 async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):
