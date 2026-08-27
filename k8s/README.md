@@ -1,8 +1,7 @@
 # Deploying to Kubernetes
 
 Images are built and pushed to `ghcr.io/poohpeer/bot-organizer` by
-`.github/workflows/ci.yml` on pushes to `main` (and to `0001-S10-deployment`
-until that branch is merged), after the test suite passes — no
+`.github/workflows/ci.yml` on pushes to `main`, after the test suite passes — no
 manual `docker build`/`docker push` is needed.
 
 All resources use the current Kubernetes namespace, the same way as the
@@ -52,9 +51,11 @@ this bot can share the namespace with other bots without name collisions.
 
 ## Deploying a new version
 
-Pushes to `0001-S10-deployment` build, test, and publish a new `:latest` and
+Pushes to `main` test, build, and publish a new `:latest` and
 `:<sha>` image. After the image is pushed, the `deploy` job runs on the
-self-hosted Runner and automatically restarts both application Deployments:
+self-hosted Runner: it applies the kustomization, restarts both application
+Deployments, and then checks the bot actually reached Telegram rather than
+trusting that the rollout completed.
 
 ```powershell
 kubectl rollout restart deployment/bot-organizer-bot

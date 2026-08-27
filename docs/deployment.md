@@ -243,8 +243,7 @@ kubectl apply -k k8s/
 The real `k8s/secret.yaml` is gitignored. The GHCR pull secret is also created
 manually and is not managed by the workflow.
 
-The workflow currently deploys pushes to `0001-S10-deployment`. Change the
-branch filter after merging this work to the branch that should be deployed.
+The workflow deploys pushes to `main`, and only after the test suite passes.
 The PostgreSQL PVC is retained when workloads are redeployed; deleting the
 PVC deletes the stored database.
 
