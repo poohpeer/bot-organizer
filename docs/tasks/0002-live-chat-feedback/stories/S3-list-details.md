@@ -120,7 +120,11 @@ unchanged.
 - Create: `tests/test_list_render.py`
 
 **Interfaces:**
-- Produces: `bot.list_render.render(items: list[dict]) -> str`
+- Produces: `bot.list_render.render(items: list[dict]) -> str`, and
+  `bot.list_render.LIST_CATEGORIES` — the canonical vocabulary tuple. It lives
+  here rather than in `bot/tools/core.py` because `list_show` (in `core.py`)
+  calls `render`, so the dependency has to point this way or the imports
+  cycle.
 - `list_show` returns `{"items": [...], "rendered": "<text>"}` — the rows stay
   in the response so the model can reason about them, and `rendered` is what it
   should show.
@@ -141,10 +145,10 @@ somebody has taken it:
 
 ```
 Ещё не разобрали:
-Хлеб и выпечка
-— хлеб
 Молочка
 — молоко, 2 л
+Хлеб и выпечка
+— хлеб
 Посуда
 — бумажные тарелки
 
@@ -152,6 +156,11 @@ somebody has taken it:
 Напитки
 — вода, 6 бутылок — Alex
 ```
+
+Note the category order in that example: `Молочка` comes before `Хлеб и
+выпечка` because that is the vocabulary's order, not the alphabet's. An earlier
+version of this document showed them the other way round, contradicting its own
+rule two paragraphs above — the rule is what counts.
 
 A section that would be empty is omitted entirely, heading and all — a list
 where nobody has taken anything must not end with a bare "Уже взяли:".
