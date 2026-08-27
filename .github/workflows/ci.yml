@@ -86,6 +86,10 @@ jobs:
     if: github.event_name == 'push'
     runs-on: self-hosted
     steps:
+      # The manifests are applied from the workspace, so this job needs the
+      # repository. It did not before, when it only issued kubectl commands.
+      - uses: actions/checkout@v5
+
       # Windows PowerShell 5.1, not pwsh and not bash. pwsh (PowerShell 7) is
       # not installed on this runner, and `bash` on its PATH resolves to the
       # WSL stub in WindowsApps, which fails with execvpe(/bin/bash) because no
