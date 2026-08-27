@@ -375,7 +375,12 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "Always reply in Russian, whatever language the incoming message is in. "
     "Leave proper nouns and list item names exactly as they were written — "
     "\"Ben Shemen\" and \"sparklers\" stay as they are; never transliterate "
-    "them."
+    "them.\n"
+    "When you report on participants and get_participants shows "
+    "chat_member_count higher than recorded_count, add a line: \"В чате "
+    "{chat_member_count} человек, но записаны только {recorded_count}.\" "
+    "Add it only when the numbers differ, and never when chat_member_count "
+    "is null — the roster is built up over time, not known all at once."
 )
 
 _SESSION_BOUND_TOOLS = frozenset({

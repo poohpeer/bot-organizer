@@ -196,6 +196,39 @@ async def test_set_participant_without_user_id_matches_by_name(db_pool):
     assert participants["participants"][0]["status"] == "declined"
 
 
+async def test_get_participants_returns_both_counts(db_pool):
+    session_id = await _new_session(db_pool)
+    await db_pool.execute("UPDATE chats SET member_count = 9 WHERE chat_id = 1")
+    await core.set_participant(db_pool, session_id, "Sasha", "confirmed", user_id=111)
+    await core.set_participant(db_pool, session_id, "Masha", "unknown")
+
+    result = await core.get_participants(db_pool, session_id)
+
+    assert result["chat_member_count"] == 9
+    assert result["recorded_count"] == 2
+
+
+async def test_get_participants_with_no_stored_count_returns_none_not_zero(db_pool):
+    """R7's last criterion: an unfetched count must read as unknown, never as
+    an empty group — chats.member_count defaults to NULL until the worker's
+    group sync has run at least once for this chat."""
+    session_id = await _new_session(db_pool)
+
+    result = await core.get_participants(db_pool, session_id)
+
+    assert result["chat_member_count"] is None
+
+
+async def test_get_participants_recorded_count_matches_participant_rows(db_pool):
+    session_id = await _new_session(db_pool)
+    for i in range(3):
+        await core.set_participant(db_pool, session_id, f"Person{i}", "unknown", user_id=100 + i)
+
+    result = await core.get_participants(db_pool, session_id)
+
+    assert result["recorded_count"] == len(result["participants"]) == 3
+
+
 async def test_nudge_unconfirmed_dms_only_those_with_known_user_id(db_pool):
     from unittest.mock import AsyncMock
 

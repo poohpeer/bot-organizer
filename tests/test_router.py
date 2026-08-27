@@ -933,3 +933,17 @@ async def test_the_date_follows_the_chats_own_timezone(db_pool):
 
     local = dt.datetime.now(ZoneInfo("Pacific/Kiritimati"))
     assert local.strftime("%Y-%m-%d") in instruction
+
+
+def test_the_system_instruction_covers_the_roster_gap_remark():
+    """R7's last three criteria: the roster is partial by construction, so a
+    list of three names in a group of nine is misleading on its own and the
+    person asking cannot tell the difference. The instruction has to name the
+    exact fields and the exact condition — only when they differ, never when
+    the count is unknown, or a stray 0 would read as an empty group."""
+    instruction = router._ACTIVE_MODE_SYSTEM_INSTRUCTION
+
+    assert "chat_member_count" in instruction
+    assert "recorded_count" in instruction
+    assert "В чате" in instruction
+    assert "null" in instruction.lower()
