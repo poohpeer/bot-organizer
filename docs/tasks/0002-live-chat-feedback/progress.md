@@ -11,8 +11,8 @@
 | Unit | Branch | Status | Commits | Verification | PR | Notes |
 |------|--------|--------|---------|--------------|----|-------|
 | S1 | 0002-S1-reply-formatting | complete | 364e053..HEAD | 5 defects fixed; tester PASS | — | word-boundary rule for emphasis |
-| S2 | — | next | — | — | — | |
-| S3 | — | pending | — | — | — | |
+| S2 | 0002-S2-reminders | complete | 29b1fb6..HEAD | 1 defect fixed; tester PASS | — | overdue repeats delivered one copy per poll |
+| S3 | — | next | — | — | — | |
 | S4 | — | pending | — | — | — | |
 | S5 | — | pending | — | — | — | |
 
@@ -27,3 +27,11 @@
   and URLs were mangled, and 5*4 и 3*2 became 54 и 32. Added a word-boundary
   condition (CommonMark refuses intra-word _ emphasis for the same reason);
   corrected the story's table too. Suite: 275 passed.
+- 2026-08-27: S2 done. The story said to advance a repeat by exactly one
+  interval; the implementation matched it. Correct normally, wrong once
+  anything falls behind — an overdue series delivered one missed copy per
+  poll. Measured: worker down an hour with a 5-minute repeat = 12 stale
+  messages; the bugs file's own 2025-07-20 mis-dating with a 30-minute repeat
+  = 19352 messages over 13 days. Now skips missed occurrences while still
+  stepping exactly one interval when merely late. Story corrected.
+  Suite: 300 passed.

@@ -191,6 +191,13 @@ CREATE TABLE IF NOT EXISTS reminders (
     -- never succeed; without a count the worker would retry it every 60s
     -- forever and the queue would never drain.
     attempts        INT NOT NULL DEFAULT 0,
+    -- NULL means "not repeating" — this column is the flag, not a companion
+    -- boolean. A repeating reminder is one row that moves: remind_at advances
+    -- by this many minutes after each delivery instead of new rows piling up,
+    -- which is what makes cancelling it a single UPDATE rather than a race
+    -- against however many future occurrences already exist.
+    repeat_every_minutes INT,
+    repeat_until    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     sent_at         TIMESTAMPTZ
 );
@@ -286,6 +293,8 @@ ALTER TABLE reminders ADD COLUMN IF NOT EXISTS assumed_timezone TEXT;
 ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_status_check;
 ALTER TABLE reminders ADD CONSTRAINT reminders_status_check
     CHECK (status IN ('pending', 'sent', 'cancelled', 'failed'));
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeat_every_minutes INT;
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeat_until TIMESTAMPTZ;
 """
 
 

@@ -109,13 +109,23 @@ call still behaving exactly as before.
 After a successful send, in the same transaction as the claim:
 
 - `repeat_every_minutes IS NULL` → mark `sent`, as today.
-- otherwise compute `next = remind_at + repeat_every_minutes`; if
-  `next <= repeat_until`, set `remind_at = next`, keep `pending`, reset
-  `attempts` to 0; if not, mark `sent`.
+- otherwise advance to the **first occurrence after now**, counted from the
+  schedule; if that is `<= repeat_until`, set `remind_at` to it, keep
+  `pending`, reset `attempts` to 0; if not, mark `sent`.
 
-Advance from the **scheduled** `remind_at`, not from `now()`. A worker tick
-that runs late must not drift the whole series later — over a day of
-half-hourly reminders that is an hour of accumulated lag.
+Two rules pull in opposite directions here and both have to hold.
+
+Count from the **scheduled** `remind_at`, not from `now()`: a worker tick that
+runs late must not drag the series later — over a day of half-hourly reminders
+a few late ticks become real accumulated lag.
+
+But advance by **more than one interval when more than one has passed**. A
+single-interval step makes an overdue series deliver one missed copy per poll
+until it catches up. Measured: a worker down for an hour turns a five-minute
+repeat into twelve stale messages, and a reminder mis-dated into the past —
+which is exactly what the model did with `2025-07-20` for "через 5 минут" —
+posts once a minute for **thirteen days**. Missed occurrences are skipped, not
+queued.
 
 If a repeating send **fails**, the existing attempts/`failed` logic applies to
 that occurrence unchanged; do not advance the schedule on a failure.
@@ -129,9 +139,10 @@ delivering again on the next poll; stopping exactly at `repeat_until` (a poll
 after it delivers nothing and the row is no longer pending); a repeat every 30
 minutes for the same user delivering twice in a row with
 `min_interval_hours=6` set — the exemption, pinned; a cancelled repeating
-reminder delivering nothing further; lateness not causing drift (set
-`remind_at` well in the past and assert the next `remind_at` is the scheduled
-one, not `now()+interval`).
+reminder delivering nothing further; lateness not causing drift (a tick
+seconds or minutes late still steps exactly one interval); a badly overdue
+repeat delivering **once** across several polls rather than once per missed
+slot.
 
 - [ ] **Step 1–5.**
 

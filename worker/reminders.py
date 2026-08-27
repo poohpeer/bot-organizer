@@ -42,6 +42,27 @@ async def _claim(pool, reminder_id):
     )
 
 
+async def _advance(pool, reminder_id, next_at) -> None:
+    """Move a repeating reminder to its next occurrence after a successful
+    send.
+
+    Runs after the claim already flipped the row to 'sent', so no other
+    worker's claim query (`WHERE status = 'pending'`) can see it in between —
+    putting it back to 'pending' here is safe from the same race _claim
+    guards against. attempts resets to 0: a failure on an earlier occurrence
+    must not count against a later one, or a reminder that failed twice years
+    ago would need only one more failure to stop repeating forever.
+    """
+    await pool.execute(
+        """
+        UPDATE reminders
+        SET remind_at = $2, status = 'pending', attempts = 0, sent_at = NULL
+        WHERE id = $1
+        """,
+        reminder_id, next_at,
+    )
+
+
 async def _release(pool, reminder_id) -> str:
     """Hand a claimed reminder back after a failed send, or retire it.
 
@@ -61,10 +82,37 @@ async def _release(pool, reminder_id) -> str:
     return row["status"]
 
 
+def _next_occurrence(scheduled, every_minutes: int):
+    """The first occurrence strictly after now, counted from the schedule.
+
+    Two things have to hold at once, and they pull in opposite directions.
+
+    Counting from `scheduled` rather than from `now()` is what stops a late
+    tick from dragging the whole series later — over a day of half-hourly
+    reminders, a few late ticks become real accumulated lag.
+
+    But advancing by exactly one interval means an overdue series delivers one
+    missed occurrence per poll, forever, until it catches up. A worker down for
+    an hour turns a five-minute repeat into twelve stale messages; and a
+    reminder mis-dated into the past — which is exactly what happened when the
+    model guessed 2025-07-20 for "через 5 минут" — would post once a minute for
+    thirteen days. Missed occurrences are therefore skipped, not queued: the
+    reminder fires once and the schedule jumps to the next future slot.
+    """
+    interval = timedelta(minutes=every_minutes)
+    elapsed = datetime.now(timezone.utc) - scheduled
+    periods = max(1, -(-elapsed // interval))  # ceil, at least one
+    return scheduled + periods * interval
+
+
 async def deliver_due_reminders(pool, telegram_bot, *, min_interval_hours: float) -> dict:
     delivered, deferred, failed = [], [], []
     for r in await _due_reminders(pool):
-        if r["target_user_id"] is not None:
+        # A cadence someone explicitly asked for out loud is not the unbidden
+        # pestering REMINDER_MIN_INTERVAL_HOURS exists to stop — a half-hourly
+        # repeat would otherwise be deferred by it forever. See EPIC.md and
+        # S2-reminders.md.
+        if r["target_user_id"] is not None and r["repeat_every_minutes"] is None:
             last_sent = await _last_sent_at(pool, r["target_user_id"])
             if last_sent is not None and (datetime.now(timezone.utc) - last_sent) < timedelta(hours=min_interval_hours):
                 deferred.append(r["id"])
@@ -85,6 +133,11 @@ async def deliver_due_reminders(pool, telegram_bot, *, min_interval_hours: float
             if await _release(pool, r["id"]) == "failed":
                 failed.append(r["id"])
             continue
+
+        if r["repeat_every_minutes"] is not None:
+            next_at = _next_occurrence(r["remind_at"], r["repeat_every_minutes"])
+            if next_at <= r["repeat_until"]:
+                await _advance(pool, r["id"], next_at)
 
         delivered.append(r["id"])
 

@@ -1,10 +1,17 @@
 import functools
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 
 import bot.timezones as timezones
 
 log = logging.getLogger(__name__)
+
+# The floor beneath REMINDER_MIN_INTERVAL_HOURS's per-target rate limit, which
+# repeating reminders are exempt from (see worker/reminders.py). Someone asked
+# out loud for a cadence still shouldn't be able to spam the chat every few
+# seconds.
+REMINDER_MIN_REPEAT_MINUTES = int(os.environ.get("REMINDER_MIN_REPEAT_MINUTES", "5"))
 
 # Actions the model is never allowed to perform directly (R10). Each is
 # proposed as a pending_confirmation and only executed after an explicit human
@@ -13,6 +20,16 @@ _CONFIRMATION_PROMPTS = {
     "list_remove_item": "delete {name!r} from the list",
     "broadcast_message": "send this to the whole chat: {text!r}",
 }
+
+
+def _local_iso(when: datetime, tz) -> str:
+    """Render a stored UTC instant as a naive local ISO string.
+
+    Naive, not offset-suffixed: this is the same shape reminder_set already
+    accepts for remind_at/repeat_until, so a time this function renders can be
+    fed straight back into another tool call.
+    """
+    return when.astimezone(tz).replace(tzinfo=None).isoformat()
 
 
 async def _session_row(pool, session_id, columns="chat_id"):
@@ -303,12 +320,17 @@ async def nudge_unconfirmed_participants(pool, telegram_bot, session_id) -> dict
     return {"nudged": nudged, "skipped_no_user_id": skipped, "failed_to_reach": failed}
 
 
-async def reminder_set(pool, session_id, message, remind_at, target_user_id=None) -> dict:
+async def reminder_set(pool, session_id, message, remind_at, target_user_id=None,
+                        repeat_every_minutes=None, repeat_until=None) -> dict:
     """Queue a reminder for later delivery by the worker.
 
     chat_id is derived from the session rather than taken from the model: a
     hallucinated chat_id would post this chat's reminder into a different
     group.
+
+    A repeat with no stated end schedules nothing and asks for one instead of
+    guessing (R1's second criterion): relying on the system instruction alone
+    would make that a suggestion the model is free to skip.
     """
     session_row = await _session_row(pool, session_id)
     if session_row is None:
@@ -327,16 +349,36 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
     local_time = when.replace(tzinfo=None) if when.tzinfo is None else None
     when = timezones.to_utc(when, tz)
 
+    repeat_until_utc = None
+    if repeat_every_minutes is not None:
+        if repeat_until is None:
+            return {"status": "repeat_needs_an_end",
+                    "detail": "repeat_every_minutes was given without repeat_until — ask how long to keep reminding"}
+        if repeat_every_minutes < REMINDER_MIN_REPEAT_MINUTES:
+            return {"status": "repeat_too_frequent", "minimum_minutes": REMINDER_MIN_REPEAT_MINUTES}
+        try:
+            repeat_until_local = datetime.fromisoformat(repeat_until)
+        except (TypeError, ValueError):
+            return {"status": "bad_datetime", "detail": f"could not parse {repeat_until!r} as ISO-8601"}
+        # Same path as remind_at, so a repeat that crosses a DST boundary is
+        # anchored to the wall-clock hour that was asked for, not an offset.
+        repeat_until_utc = timezones.to_utc(repeat_until_local, tz)
+        if repeat_until_utc <= datetime.now(timezone.utc):
+            return {"status": "repeat_end_in_the_past"}
+
     row = await pool.fetchrow(
         """
         INSERT INTO reminders (session_id, chat_id, target_user_id, message, remind_at,
-                               local_time, assumed_timezone)
-        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
+                               local_time, assumed_timezone, repeat_every_minutes, repeat_until)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id
         """,
         session_id, chat_id, target_user_id, message, when, local_time,
-        None if known else str(tz),
+        None if known else str(tz), repeat_every_minutes, repeat_until_utc,
     )
     result = {"status": "ok", "reminder_id": row["id"]}
+    if repeat_every_minutes is not None:
+        result["repeats_every_minutes"] = repeat_every_minutes
+        result["repeats_until"] = _local_iso(repeat_until_utc, tz)
     if known is None and local_time is not None:
         # Nobody has said where this group is, so the time was interpreted in
         # the configured default. Say so instead of silently guessing: the
@@ -349,6 +391,53 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
             "the reminder will be corrected automatically."
         )
     return result
+
+
+async def reminder_list(pool, session_id) -> dict:
+    """List everything currently scheduled for this session (R2).
+
+    Only 'pending' rows: sent and cancelled ones already happened or won't.
+    Distinguishing "nothing scheduled" (empty list) from "cannot check" is
+    what lets the model say the former plainly instead of claiming the
+    latter, which is the complaint in `bugs` this story closes.
+
+    Mirrors list_show in not treating a hallucinated session_id as an error —
+    it just has nothing to show.
+    """
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"reminders": []}
+
+    tz = await timezones.chat_timezone(pool, session_row["chat_id"])
+    rows = await pool.fetch(
+        """
+        SELECT id, message, remind_at, target_user_id, repeat_every_minutes, repeat_until
+        FROM reminders WHERE session_id = $1 AND status = 'pending' ORDER BY remind_at
+        """,
+        session_id,
+    )
+
+    reminders = []
+    for r in rows:
+        if r["target_user_id"] is None:
+            target = "группа"
+        else:
+            # Fall back to the raw id rather than dropping the row: an
+            # unresolved target is still a real, scheduled reminder.
+            name = await pool.fetchval(
+                "SELECT display_name FROM participants WHERE session_id = $1 AND user_id = $2",
+                session_id, r["target_user_id"],
+            )
+            target = name if name is not None else str(r["target_user_id"])
+        reminders.append({
+            "reminder_id": r["id"],
+            "message": r["message"],
+            "next_at": _local_iso(r["remind_at"], tz),
+            "repeats_every_minutes": r["repeat_every_minutes"],
+            "repeats_until": _local_iso(r["repeat_until"], tz) if r["repeat_until"] is not None else None,
+            "target": target,
+        })
+    return {"reminders": reminders}
 
 
 async def reminder_cancel(pool, session_id, reminder_id) -> dict:
@@ -407,6 +496,7 @@ def build_core_registry(pool, telegram_bot) -> dict:
         "get_participants": functools.partial(get_participants, pool),
         "nudge_unconfirmed_participants": functools.partial(nudge_unconfirmed_participants, pool, telegram_bot),
         "reminder_set": functools.partial(reminder_set, pool),
+        "reminder_list": functools.partial(reminder_list, pool),
         "reminder_cancel": functools.partial(reminder_cancel, pool),
         "broadcast_message": functools.partial(broadcast_message, pool),
         "set_timezone": functools.partial(set_timezone, pool),
