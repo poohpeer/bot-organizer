@@ -264,7 +264,7 @@ def test_build_core_registry_covers_every_core_tool(db_pool):
         "list_claim", "list_unclaim",
         "list_remove_item", "set_participant", "get_participants",
         "nudge_unconfirmed_participants", "reminder_set", "reminder_list", "reminder_cancel",
-        "broadcast_message", "set_timezone",
+        "broadcast_message", "set_timezone", "send_private_message",
     }
 
 
@@ -304,6 +304,67 @@ async def test_nudge_isolates_per_recipient_failures(db_pool):
 
     assert result["nudged"] == ["Reachable"]
     assert result["failed_to_reach"] == ["Unreachable"]
+
+
+async def test_send_private_message_dms_the_asker_not_the_group(db_pool):
+    """R5: the recipient is whoever asked, never the group chat_id — proven
+    by asserting the DM lands on chat_id=<the asker's user id>, not on any
+    group id."""
+    from unittest.mock import AsyncMock
+
+    session_id = await _new_session(db_pool, chat_id=-100)
+    telegram_bot = AsyncMock()
+
+    result = await core.send_private_message(
+        db_pool, telegram_bot, session_id, current_user_id=555, text="Вот список: помидоры"
+    )
+
+    assert result == {"status": "ok"}
+    telegram_bot.send_message.assert_awaited_once_with(chat_id=555, text="Вот список: помидоры")
+
+
+async def test_send_private_message_forbidden_returns_cannot_reach(db_pool):
+    """Telegram refuses to DM anyone who never started a chat with the bot —
+    the normal state for most group members, not an edge case. Must not
+    raise: a failed DM must not take down the turn that produced it."""
+    from unittest.mock import AsyncMock
+
+    from telegram.error import Forbidden
+
+    session_id = await _new_session(db_pool)
+    telegram_bot = AsyncMock()
+    telegram_bot.send_message = AsyncMock(side_effect=Forbidden("bot can't initiate conversation with a user"))
+
+    result = await core.send_private_message(
+        db_pool, telegram_bot, session_id, current_user_id=555, text="Вот список"
+    )
+
+    assert result == {"status": "cannot_reach", "detail": "the user has never started a chat with the bot"}
+
+
+async def test_send_private_message_other_failure_returns_failed(db_pool):
+    from unittest.mock import AsyncMock
+
+    session_id = await _new_session(db_pool)
+    telegram_bot = AsyncMock()
+    telegram_bot.send_message = AsyncMock(side_effect=RuntimeError("network blip"))
+
+    result = await core.send_private_message(
+        db_pool, telegram_bot, session_id, current_user_id=555, text="Вот список"
+    )
+
+    assert result == {"status": "failed", "detail": "network blip"}
+
+
+async def test_send_private_message_declaration_exposes_only_text():
+    """The model must never be able to choose the recipient — session_id and
+    current_user_id are bound by the router, so the declaration the model
+    sees has to omit both, exactly as chat_id is omitted everywhere else."""
+    declared = next(
+        fn for fn in schema.ALL_TOOLS.function_declarations if fn.name == "send_private_message"
+    )
+
+    assert set(declared.parameters.properties) == {"text"}
 
 
 async def test_confirmed_action_cannot_be_executed_twice(db_pool):
@@ -452,7 +513,15 @@ async def test_confirmation_prompt_reads_as_a_sentence(db_pool):
 def test_declared_parameters_match_the_bound_signatures(db_pool):
     """Mirrors test_tools_composed.py's guard of the same name: the model can
     only pass what the declaration advertises, so a drifted declaration is
-    either a TypeError at call time or a chat_id the model gets to choose."""
+    either a TypeError at call time or a chat_id the model gets to choose.
+
+    send_private_message is the exception: session_id and current_user_id are
+    bound by the router from session/message context, never by the model (see
+    bot/router.py's _bind_session_context and _CURRENT_USER_BOUND_TOOLS) — the
+    same reasoning that keeps chat_id off every tool's declaration. The
+    registry here is the *unbound* one, so its real signature still carries
+    both; this map is what excuses that gap from the equality check below.
+    """
     from unittest.mock import AsyncMock
 
     registry = core.build_core_registry(db_pool, AsyncMock())
@@ -461,10 +530,14 @@ def test_declared_parameters_match_the_bound_signatures(db_pool):
         for fn in schema.ALL_TOOLS.function_declarations
         if fn.name in registry
     }
+    router_bound_extra = {
+        "send_private_message": {"session_id", "current_user_id"},
+    }
 
     for name, tool in registry.items():
         bound = set(inspect.signature(tool).parameters)
-        assert bound == declared[name], f"{name}: declared {declared[name]}, accepts {bound}"
+        expected = declared[name] | router_bound_extra.get(name, set())
+        assert bound == expected, f"{name}: declared {declared[name]}, accepts {bound}"
 
 
 async def test_reminder_set_with_a_repeat_stores_both_columns(db_pool):
