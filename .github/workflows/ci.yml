@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # 0001-S10-deployment is where the cluster is deployed from until it is
+    # merged; drop it from this list then.
+    branches: [main, 0001-S10-deployment]
   pull_request:
 
 env:
