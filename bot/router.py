@@ -25,6 +25,7 @@ from bot.addressing import addressed_to_bot, bot_was_added
 from bot.ai.classify import classify, extract
 from bot.ai.client import AllModelsUnavailable, fallback
 from bot.ai.tool_loop import run_tool_loop
+from bot.formatting import to_plain_text
 from bot.session import SessionAlreadyActiveError, start_session
 
 log = logging.getLogger(__name__)
@@ -306,7 +307,11 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "it again rather than adding anything.\n"
     "If a message only gives you something to record and needs no reply, "
     f"answer with exactly {_SILENT!r} and nothing else — do not narrate what "
-    "you just recorded. Never write the words \"empty string\"."
+    "you just recorded. Never write the words \"empty string\".\n"
+    "Always reply in Russian, whatever language the incoming message is in. "
+    "Leave proper nouns and list item names exactly as they were written — "
+    "\"Ben Shemen\" and \"sparklers\" stay as they are; never transliterate "
+    "them."
 )
 
 _SESSION_BOUND_TOOLS = frozenset({
@@ -555,6 +560,13 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     except Exception:
         log.exception("Tool loop failed for chat_id=%s session_id=%s", chat_id, session_id)
         reply_text = _FALLBACK_MESSAGE
+
+    # Converted before the silence check below: a model that answers with
+    # "**<silent>**" instead of the bare sentinel must still be silenced, and
+    # _has_visible_text compares against bare strings. The fixed fallback
+    # strings have no Markdown in them, so running them through this too is
+    # harmless and keeps one path instead of two.
+    reply_text = to_plain_text(reply_text)
 
     await decision_log.log_decision(
         pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="tool_call",
