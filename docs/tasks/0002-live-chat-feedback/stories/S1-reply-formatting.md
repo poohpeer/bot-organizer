@@ -48,12 +48,28 @@ Telegram renders it literally. Two ways out:
 | `### Основное` | `Основное` | heading markers removed |
 | `` `code` `` | `code` | backticks removed |
 | `2 * 3 = 6` | `2 * 3 = 6` | a lone asterisk with spaces is arithmetic |
+| `5*4 и 3*2` | `5*4 и 3*2` | so is one without spaces, and it *pairs* |
+| `list_check_off` | `list_check_off` | an identifier is not emphasis |
+| `my_file_name.txt` | `my_file_name.txt` | nor is a file name |
+| `https://ex.com/a_b_c` | `https://ex.com/a_b_c` | nor a URL |
 | `звёздочка*` | `звёздочка*` | R3: a real asterisk in content survives |
 | `` (empty) | `` | no crash on empty |
 
-Emphasis markers are only stripped when they **pair** on the same line. An
-unpaired `*` is content — that is the case R3's third criterion is about, and
-the reason this is a converter rather than a blanket `replace("*", "")`.
+Emphasis markers are stripped only when **all three** hold: they pair on the
+same line, no whitespace touches the inside of either marker, and neither
+marker sits inside a word — the opening one has no word character before it,
+the closing one none after it.
+
+That third condition is not a nicety. Written without it (as this story
+originally specified) the converter eats what the bot writes most:
+`list_check_off` became `listcheckoff`, `my_file_name.txt` became
+`myfilename.txt`, `.../a_b_c` in a URL became `.../abc`, and `5*4 и 3*2`
+became `54 и 32`. CommonMark refuses intra-word `_` emphasis for the same
+reason; here the rule covers `*` too, since a chat bot writes far more
+identifiers and arithmetic than emphasis.
+
+An unpaired `*` is content — R3's third criterion, and the reason this is a
+converter rather than a blanket `replace("*", "")`.
 
 **Tests must cover** every row of that table, plus: a multi-line reply mixing
 headings, bold and bullets (use the `bugs` file's own "Вот вся информация по

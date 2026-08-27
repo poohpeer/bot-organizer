@@ -16,17 +16,30 @@ _LIST_MARKER_RE = re.compile(r"^(\s*)[*\-+] (.*)$")
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
 
-# Emphasis markers are only ever removed in pairs found on the same line, and
-# only when neither side has whitespace touching the marker. That second
-# condition is what keeps "2 * 3 = 6" from being read as an opening/closing
-# pair: a real emphasis run never has a space right after "*" or right before
-# the closing "*". A single, unpaired marker (no partner at all on the line,
-# e.g. "звёздочка*") never matches these patterns and survives untouched —
-# that's the R3 case, and the reason this isn't `text.replace("*", "")`.
-_BOLD_STAR_RE = re.compile(r"\*\*(\S(?:.*?\S)?)\*\*")
-_BOLD_UNDERSCORE_RE = re.compile(r"__(\S(?:.*?\S)?)__")
-_EM_STAR_RE = re.compile(r"\*(\S(?:.*?\S)?)\*")
-_EM_UNDERSCORE_RE = re.compile(r"_(\S(?:.*?\S)?)_")
+# Emphasis markers are only removed in pairs on the same line, and only when
+# three things hold at once:
+#
+#   * no whitespace touches the inside of either marker — a real emphasis run
+#     never has a space right after the opening "*";
+#   * the opening marker is not preceded by a word character;
+#   * the closing marker is not followed by one.
+#
+# The last two are what keep markers that live *inside* a word from pairing up.
+# Without them the converter eats things the bot writes constantly:
+# "list_check_off" became "listcheckoff", "my_file_name.txt" became
+# "myfilename.txt", a URL like ".../a_b_c" became ".../abc", and "5*4 и 3*2"
+# became "54 и 32". CommonMark refuses intra-word "_" emphasis for the same
+# reason; this applies the rule to "*" as well, since a chat bot writes far
+# more identifiers and arithmetic than it writes emphasis.
+#
+# An unpaired marker ("звёздочка*") matches nothing here and survives — the R3
+# case, and the reason this isn't `text.replace("*", "")`.
+_OPEN = r"(?<![^\W_]|[*_])"
+_CLOSE = r"(?![^\W_]|[*_])"
+_BOLD_STAR_RE = re.compile(_OPEN + r"\*\*(\S(?:.*?\S)?)\*\*" + _CLOSE)
+_BOLD_UNDERSCORE_RE = re.compile(_OPEN + r"__(\S(?:.*?\S)?)__" + _CLOSE)
+_EM_STAR_RE = re.compile(_OPEN + r"\*(\S(?:.*?\S)?)\*" + _CLOSE)
+_EM_UNDERSCORE_RE = re.compile(_OPEN + r"_(\S(?:.*?\S)?)_" + _CLOSE)
 
 
 def _convert_line(line: str) -> str:
