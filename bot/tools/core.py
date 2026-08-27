@@ -3,6 +3,8 @@ import logging
 import os
 from datetime import datetime, timezone
 
+from telegram.error import Forbidden
+
 import bot.list_render as list_render
 import bot.timezones as timezones
 from bot.list_render import LIST_CATEGORIES
@@ -554,6 +556,34 @@ async def set_timezone(pool, session_id, timezone_name) -> dict:
     return {"status": "ok", "timezone": timezone_name, "reminders_corrected": moved}
 
 
+async def send_private_message(pool, telegram_bot, session_id, current_user_id, text) -> dict:
+    """DM the person who asked, never the group (R5).
+
+    current_user_id is bound by the router from message.from_user, never
+    supplied by the model — exactly the reasoning that keeps chat_id off
+    every other tool's declaration (see 0001's S4/S6): a model-chosen
+    recipient could DM anyone in any chat the bot has ever seen. A channel
+    post has no from_user, so the router binds None here; that is a routing
+    failure rather than a Telegram one, so it is reported as 'failed' without
+    attempting a send. pool and session_id are accepted, unused, purely to
+    keep this tool's signature the same shape as every other session-bound
+    one for build_core_registry/_bind_session_context to wire up uniformly.
+
+    Never raises: a failed DM must not take down the turn that produced it,
+    the same discipline nudge_unconfirmed_participants already follows.
+    """
+    if current_user_id is None:
+        return {"status": "failed", "detail": "no telegram user to message"}
+    try:
+        await telegram_bot.send_message(chat_id=current_user_id, text=text)
+        return {"status": "ok"}
+    except Forbidden:
+        return {"status": "cannot_reach", "detail": "the user has never started a chat with the bot"}
+    except Exception as e:
+        log.warning("Could not send private message to user %s: %s", current_user_id, e)
+        return {"status": "failed", "detail": str(e)}
+
+
 def build_core_registry(pool, telegram_bot) -> dict:
     return {
         "remember_fact": functools.partial(remember_fact, pool),
@@ -572,4 +602,5 @@ def build_core_registry(pool, telegram_bot) -> dict:
         "reminder_cancel": functools.partial(reminder_cancel, pool),
         "broadcast_message": functools.partial(broadcast_message, pool),
         "set_timezone": functools.partial(set_timezone, pool),
+        "send_private_message": functools.partial(send_private_message, pool, telegram_bot),
     }

@@ -79,6 +79,13 @@ ALL_TOOLS = types.Tool(function_declarations=[
         {"session_id": _S(Type.INTEGER),
          "timezone_name": _S(Type.STRING, "IANA zone name, e.g. 'Europe/Moscow' or 'Asia/Jerusalem'.")},
         ["session_id", "timezone_name"]),
+    # session_id and current_user_id are deliberately NOT parameters here: the
+    # router binds both from who actually sent the message, the same way
+    # chat_id is kept off every other tool's declaration. Exposing the
+    # recipient to the model would let it DM anyone in any chat it has seen.
+    _fn("send_private_message", "Send a direct message to the person who is currently talking to you in the group, in reply to their request to be answered privately.",
+        {"text": _S(Type.STRING)},
+        ["text"]),
     _fn("web_search", "Search the web for up-to-date information not already known as a fact.",
         {"query": _S(Type.STRING)}, ["query"]),
     _fn("maps_lookup", "Look up a place by name/description via maps: resolves address, coordinates, and available details/reviews.",

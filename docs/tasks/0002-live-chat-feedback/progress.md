@@ -13,8 +13,8 @@
 | S1 | 0002-S1-reply-formatting | complete | 364e053..HEAD | 5 defects fixed; tester PASS | — | word-boundary rule for emphasis |
 | S2 | 0002-S2-reminders | complete | 29b1fb6..HEAD | 1 defect fixed; tester PASS | — | overdue repeats delivered one copy per poll |
 | S3 | 0002-S3-list-details | complete | b625946..HEAD | tester PASS | — | table dropped at user's request; design example was self-contradictory |
-| S4 | — | next | — | — | — | |
-| S5 | — | pending | — | — | — | |
+| S4 | 0002-S4-private-replies | complete | 73d85fc..HEAD | tester PASS | — | recipient-override verified adversarially |
+| S5 | — | next | — | — | — | |
 
 ## Findings to address
 (none yet)
@@ -43,3 +43,10 @@
   it; example corrected. Known limitation accepted: an item name entirely
   wrapped in paired Markdown markers loses them (*звёздочка* -> звёздочка);
   everything else including 2*2, a_b_c and <тег> survives. Suite: 324 passed.
+- 2026-08-27: S4 done. Clean first pass. The security property was checked
+  adversarially rather than by reading the declaration: a call carrying
+  current_user_id=999999 was overwritten with the real asker's id. Third time
+  this class of hole has been closed in this project (chat_id twice in 0001).
+  Suite: 335 passed. Still unverified live: whether the model honours the
+  instruction not to repeat private content in the group after cannot_reach —
+  getting that wrong leaks exactly what the feature protects.
