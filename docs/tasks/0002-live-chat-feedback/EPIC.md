@@ -94,8 +94,9 @@ Acceptance criteria:
 - **Given** a list with claimed and unclaimed items, **when** it is shown,
   **then** unclaimed items come first, and within each group items are sorted
   by category and alphabetically inside a category.
-- **Given** the list is shown, **then** the columns line up — it reads as a
-  table, not as ragged text.
+- **Given** the list is shown, **then** it is grouped so the unclaimed items
+  and the claimed ones are visibly separate, and it stays plain text — no
+  Markdown, no HTML, nothing that depends on a font to line up.
 
 **R5 — Answer me privately**
 > As a group member, I want to ask in the group and be answered in my DMs, so
@@ -215,7 +216,7 @@ greeting must say the count and not imply it knows who everyone is.
 |----|-------|------|-----------|-----------|----------------|
 | S1 | Plain-text Russian replies | stories/S1-reply-formatting.md | R3, R6 | — | — |
 | S2 | Repeating reminders and a schedule view | stories/S2-reminders.md | R1, R2 | — | — |
-| S3 | The shopping list as a table | stories/S3-list-table.md | R4 | — | — |
+| S3 | Quantity, ownership and order on the list | stories/S3-list-details.md | R4 | — | — |
 | S4 | Answering privately | stories/S4-private-replies.md | R5 | — | — |
 | S5 | Group title and description sync | stories/S5-group-sync.md | R7 | — | — |
 

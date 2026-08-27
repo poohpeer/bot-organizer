@@ -3,7 +3,9 @@ import logging
 import os
 from datetime import datetime, timezone
 
+import bot.list_render as list_render
 import bot.timezones as timezones
+from bot.list_render import LIST_CATEGORIES
 
 log = logging.getLogger(__name__)
 
@@ -147,39 +149,71 @@ async def execute_confirmed_action(pool, bot, confirmation) -> dict:
     return {"status": "unknown_action_type"}
 
 
-async def list_add(pool, session_id, name) -> dict:
+def _normalize_category(category) -> str:
+    """An unrecognized category — including one the model invents — falls
+    back to прочее rather than being rejected: refusing here would cost a
+    whole turn to fix a cosmetic detail. The vocabulary itself lives in
+    bot.list_render, which also needs it for the shown order."""
+    return category if category in LIST_CATEGORIES else list_render.DEFAULT_CATEGORY
+
+
+async def list_add(pool, session_id, name, quantity=None, category=None) -> dict:
     """Add an item, or report that it is already on the list.
 
     Idempotent on purpose: two people asking for milk, or a model re-adding an
     item it added a moment ago, must not produce two rows. Telling the caller
     which happened lets it answer honestly instead of confirming an addition
     that did not occur.
+
+    A quantity given for an item that already exists without one is filling
+    in information ("возьмите картошки" then "картошки, килограмма два"), so
+    it is applied and reported as an update. A quantity given for an item that
+    already has one is never applied — overwriting would lose whatever was
+    said first — and the existing value comes back so the caller can mention it.
     """
     row = await pool.fetchrow(
         """
-        INSERT INTO list_items (session_id, name) VALUES ($1, $2)
+        INSERT INTO list_items (session_id, name, quantity, category)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (session_id, lower(name)) DO NOTHING
         RETURNING id
         """,
-        session_id, name,
+        session_id, name, quantity, _normalize_category(category),
     )
     if row is not None:
         return {"status": "ok", "item_id": row["id"]}
 
     existing = await pool.fetchrow(
-        "SELECT id, status FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
+        "SELECT id, status, quantity FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
         session_id, name,
     )
+    if quantity is not None and existing["quantity"] is None:
+        await pool.execute("UPDATE list_items SET quantity = $2 WHERE id = $1", existing["id"], quantity)
+        return {"status": "updated", "item_id": existing["id"], "quantity": quantity}
+
     return {"status": "already_present", "item_id": existing["id"],
-            "item_status": existing["status"]}
+            "item_status": existing["status"], "quantity": existing["quantity"]}
 
 
 async def list_show(pool, session_id) -> dict:
+    """Return the raw rows (so the model can reason about them) and the
+    rendered plain text (what it should actually show — R4)."""
     rows = await pool.fetch(
-        "SELECT name, status FROM list_items WHERE session_id = $1 ORDER BY created_at",
+        """
+        SELECT name, status, quantity, category, claimed_by, claimed_by_user_id
+        FROM list_items WHERE session_id = $1 ORDER BY created_at
+        """,
         session_id,
     )
-    return {"items": [{"name": r["name"], "status": r["status"]} for r in rows]}
+    items = [
+        {
+            "name": r["name"], "status": r["status"], "quantity": r["quantity"],
+            "category": r["category"], "claimed_by": r["claimed_by"],
+            "claimed_by_user_id": r["claimed_by_user_id"],
+        }
+        for r in rows
+    ]
+    return {"items": items, "rendered": list_render.render(items)}
 
 
 async def list_check_off(pool, session_id, name) -> dict:
@@ -209,6 +243,42 @@ async def list_check_off(pool, session_id, name) -> dict:
     rows = await pool.fetch(
         "SELECT name FROM list_items WHERE session_id = $1 AND status = 'pending'", session_id
     )
+    return {"status": "not_found", "items_on_the_list": [r["name"] for r in rows]}
+
+
+async def list_claim(pool, session_id, name, claimed_by, claimed_by_user_id=None) -> dict:
+    """Record who is bringing an item, matched by name the same way
+    list_check_off is — case-insensitively, with the real names handed back on
+    a miss so a model that mismatches a name has something to retry with."""
+    row = await pool.fetchrow(
+        """
+        UPDATE list_items SET claimed_by = $3, claimed_by_user_id = $4
+        WHERE session_id = $1 AND lower(name) = lower($2)
+        RETURNING id
+        """,
+        session_id, name, claimed_by, claimed_by_user_id,
+    )
+    if row:
+        return {"status": "ok"}
+    rows = await pool.fetch("SELECT name FROM list_items WHERE session_id = $1", session_id)
+    return {"status": "not_found", "items_on_the_list": [r["name"] for r in rows]}
+
+
+async def list_unclaim(pool, session_id, name) -> dict:
+    """Clear a claim: the item goes back among the unclaimed (R4's third
+    criterion), which the sort in bot.list_render turns into moving it back to
+    the top of the table."""
+    row = await pool.fetchrow(
+        """
+        UPDATE list_items SET claimed_by = NULL, claimed_by_user_id = NULL
+        WHERE session_id = $1 AND lower(name) = lower($2)
+        RETURNING id
+        """,
+        session_id, name,
+    )
+    if row:
+        return {"status": "ok"}
+    rows = await pool.fetch("SELECT name FROM list_items WHERE session_id = $1", session_id)
     return {"status": "not_found", "items_on_the_list": [r["name"] for r in rows]}
 
 
@@ -491,6 +561,8 @@ def build_core_registry(pool, telegram_bot) -> dict:
         "list_add": functools.partial(list_add, pool),
         "list_show": functools.partial(list_show, pool),
         "list_check_off": functools.partial(list_check_off, pool),
+        "list_claim": functools.partial(list_claim, pool),
+        "list_unclaim": functools.partial(list_unclaim, pool),
         "list_remove_item": functools.partial(list_remove_item, pool),
         "set_participant": functools.partial(set_participant, pool),
         "get_participants": functools.partial(get_participants, pool),

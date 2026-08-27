@@ -1,8 +1,8 @@
-# Story S3: The shopping list as a table
+# Story S3: Quantity, ownership and order on the shopping list
 
 **Part of:** Live-chat feedback (`../EPIC.md`)
-**Goal:** The list shows quantity and who is bringing each item, sorted so it
-reads at a glance.
+**Goal:** The list shows quantity and who is bringing each item, grouped so it
+reads at a glance — as plain text.
 **Satisfies:** R4
 **Depends on:** none
 **Parallel-safe with:** none
@@ -10,13 +10,13 @@ reads at a glance.
 
 ## Two decisions worth reading before starting
 
-**The table is sent as monospace, via `parse_mode="HTML"` and `<pre>`, for
-that one message only.** Telegram renders plain text in a proportional font, so
-space-padded columns do not line up and R4's last criterion fails. `<pre>`
-fixes it. The cost is that `<`, `>` and `&` in item names must be escaped with
-`html.escape` — miss it and Telegram rejects the whole message. Everything else
-the bot sends stays plain text; this is the single exception and S1's converter
-still applies to the model's prose around it.
+**No table, and no `parse_mode`.** An aligned table needs a monospace block,
+which needs HTML, which means every `<` in an item name has to be escaped or
+Telegram drops the whole message — a worse failure than ragged columns, since
+the group would see nothing at all. The list is therefore rendered as grouped
+plain text, which reads correctly in any font and cannot fail to send. This
+also keeps the bot to exactly one outgoing format, which S1 already
+guarantees.
 
 **The category vocabulary is fixed and lives in code, not in the model's
 head.** Sorting has to be stable across calls, and a model asked to invent
@@ -110,90 +110,81 @@ unchanged.
 
 ---
 
-### Task 3: Rendering the table
+### Task 3: Rendering the list
 
 **Satisfies:** R4
 
 **Files:**
-- Create: `bot/list_table.py`
+- Create: `bot/list_render.py`
 - Modify: `bot/tools/core.py` (`list_show`)
-- Create: `tests/test_list_table.py`
+- Create: `tests/test_list_render.py`
 
 **Interfaces:**
-- Produces: `bot.list_table.render(items: list[dict]) -> str`
-- `list_show` returns `{"items": [...], "table": "<rendered>"}` — the rows stay
-  in the response so the model can reason about them, and the table is what
-  gets shown.
+- Produces: `bot.list_render.render(items: list[dict]) -> str`, and
+  `bot.list_render.LIST_CATEGORIES` — the canonical vocabulary tuple. It lives
+  here rather than in `bot/tools/core.py` because `list_show` (in `core.py`)
+  calls `render`, so the dependency has to point this way or the imports
+  cycle.
+- `list_show` returns `{"items": [...], "rendered": "<text>"}` — the rows stay
+  in the response so the model can reason about them, and `rendered` is what it
+  should show.
 
-**Sort order**, in this precedence — R4's fourth criterion:
+**Order**, in this precedence — R4's fourth criterion:
 
 1. unclaimed before claimed
 2. then by category, in the fixed vocabulary's order (not alphabetically —
-   `мясо` before `молочка` because that is the list's order, and the list is
-   ordered by how people shop)
+   `мясо` before `молочка` because that is the order people shop in)
 3. then by item name, alphabetically, case-insensitively
 
 Cyrillic and Latin names sort together under `str.lower()`; do not reach for a
-locale-aware collator, which would drag in a dependency for a cosmetic gain.
+locale-aware collator, which drags in a dependency for a cosmetic gain.
 
-**Layout**, from the `bugs` file's own sketch — a leading mark column for
-claimed items, then name, quantity, who:
+**Shape.** Two sections, category headings inside each, one line per item.
+Quantity after a comma when there is one; the person after an em dash when
+somebody has taken it:
 
 ```
- v | paper plates    | 2 упак | Alex
-   | хлеб            |        |
+Ещё не разобрали:
+Молочка
+— молоко, 2 л
+Хлеб и выпечка
+— хлеб
+Посуда
+— бумажные тарелки
+
+Уже взяли:
+Напитки
+— вода, 6 бутылок — Alex
 ```
 
-Columns are padded to the widest cell in each. A `checked` item (someone
-already bought it) shows `v` too — from the group's point of view it is
-handled either way.
+Note the category order in that example: `Молочка` comes before `Хлеб и
+выпечка` because that is the vocabulary's order, not the alphabet's. An earlier
+version of this document showed them the other way round, contradicting its own
+rule two paragraphs above — the rule is what counts.
 
-**Tests must cover:** the sort across all three keys at once (build a list that
-would come out differently if any key were dropped or reordered); an empty list
-rendering something a human can read rather than an empty string or a bare
-header; a missing quantity rendering as blank, never `None`; a very long item
-name not breaking the columns; a name containing `<` surviving (this is the
-`html.escape` boundary — assert the escaping happens where the message is
-built, in Task 4, and that `render` itself returns the raw name).
+A section that would be empty is omitted entirely, heading and all — a list
+where nobody has taken anything must not end with a bare "Уже взяли:".
+
+Item lines start with an em dash, which S1's converter leaves alone (it only
+rewrites `*`, `-` and `+` at a line start). Do not switch to `-`, or the
+converter will rewrite lines this module already formatted.
+
+**Tests must cover:** the three sort keys exercised at once (build a list that
+comes out differently if any one is dropped or reordered); an empty list
+rendering something a human can read rather than an empty string; a missing
+quantity rendering with no trailing comma and never the word `None`; a claimed
+item showing the name; the claimed section omitted when nothing is claimed and
+the unclaimed section omitted when everything is; an item name containing `<`,
+`*` or `_` surviving verbatim — there is no markup here to escape, and
+mangling it would be a bug; the rendered output passing through
+`bot.formatting.to_plain_text` unchanged, which is the guard that S1 and S3
+cannot fight each other.
 
 - [ ] **Step 1–5.**
 
 ---
 
-### Task 4: Sending it as a table
-
-**Satisfies:** R4
-
-**Files:**
-- Modify: `bot/router.py`
-- Modify: `tests/test_router.py`
-
-The table needs `parse_mode="HTML"` with the rendered table inside `<pre>` and
-`html.escape` applied to its contents. Everything else keeps going out as plain
-text.
-
-The model receives the table in the tool result and will normally include it in
-its reply. The router must recognise that the reply contains the table and send
-that message with the HTML parse mode. Concretely: have `list_show` mark the
-table with a sentinel the router can find and replace — the mechanism is the
-implementer's to choose, but it must survive the model reflowing the prose
-around it, and it must degrade to plain text rather than dropping the message
-if the mark is absent.
-
-**A failure here is worse than ragged columns**: Telegram rejects a message
-with malformed HTML entirely, so the group would see nothing at all. Wrap the
-HTML send and fall back to a plain-text send on `BadRequest`.
-
-**Tests must cover:** a reply containing the table going out with
-`parse_mode="HTML"`; an ordinary reply going out with no parse mode; an item
-name containing `<` arriving escaped; Telegram rejecting the HTML message
-falling back to a plain send rather than losing it.
-
-- [ ] **Step 1–5.**
-
----
-
-### Task 5: Tell the model about quantity and ownership
+### Task 4: Tell the model about quantity and ownership
 
 **Satisfies:** R4
 

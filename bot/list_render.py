@@ -1,0 +1,80 @@
+"""Renders the shared list as grouped plain text (R4).
+
+No table, and no `parse_mode`: an aligned table needs a monospace block,
+which needs HTML, which means every `<` in an item name has to be escaped or
+Telegram drops the whole message — a worse failure than ragged columns, since
+the group would see nothing at all. Grouped plain text reads correctly in any
+font and cannot fail to send, and keeps the bot to the one outgoing format S1
+already guarantees.
+"""
+
+import itertools
+
+# Fixed and closed: sorting has to be stable across calls, and a model asked
+# to invent categories will say "молочка" once and "молочные продукты" the
+# next time, which sorts differently and looks broken. Order matters and is
+# not alphabetical — this is the order people actually shop in.
+LIST_CATEGORIES = (
+    "мясо", "молочка", "овощи и фрукты", "напитки", "хлеб и выпечка",
+    "бакалея", "посуда", "прочее",
+)
+DEFAULT_CATEGORY = "прочее"
+
+_CATEGORY_RANK = {name: i for i, name in enumerate(LIST_CATEGORIES)}
+_DEFAULT_RANK = _CATEGORY_RANK[DEFAULT_CATEGORY]
+
+_UNCLAIMED_HEADING = "Ещё не разобрали:"
+_CLAIMED_HEADING = "Уже взяли:"
+
+# Nobody has added anything yet — an empty string would look like a bug to a
+# human reading the chat, and the silence guard in router.py only swallows a
+# reply that is *entirely* invisible, so "" would still get posted as nothing.
+_EMPTY_LIST = "Список пока пуст."
+
+
+def _category_rank(item: dict) -> int:
+    # Anything not in the fixed vocabulary — an invented category, or a NULL
+    # from a row added before this column existed — sorts as прочее.
+    return _CATEGORY_RANK.get(item.get("category"), _DEFAULT_RANK)
+
+
+def _sort_key(item: dict):
+    return (_category_rank(item), item["name"].lower())
+
+
+def _item_line(item: dict) -> str:
+    # Em dash on purpose, not "-": bot.formatting.to_plain_text only rewrites
+    # a line-leading *, - or + into "—", so a line already written with "—"
+    # passes through untouched instead of being rewritten a second time.
+    line = f"— {item['name']}"
+    if item.get("quantity"):
+        line += f", {item['quantity']}"
+    if item.get("claimed_by"):
+        line += f" — {item['claimed_by']}"
+    return line
+
+
+def _section(heading: str, items: list[dict]) -> str:
+    lines = [heading]
+    for rank, group in itertools.groupby(sorted(items, key=_sort_key), key=_category_rank):
+        lines.append(LIST_CATEGORIES[rank].capitalize())
+        lines.extend(_item_line(item) for item in group)
+    return "\n".join(lines)
+
+
+def render(items: list[dict]) -> str:
+    if not items:
+        return _EMPTY_LIST
+
+    unclaimed = [i for i in items if not i.get("claimed_by")]
+    claimed = [i for i in items if i.get("claimed_by")]
+
+    # A section that would be empty is omitted entirely, heading and all — a
+    # list where nobody has taken anything must not end with a bare
+    # "Уже взяли:".
+    sections = []
+    if unclaimed:
+        sections.append(_section(_UNCLAIMED_HEADING, unclaimed))
+    if claimed:
+        sections.append(_section(_CLAIMED_HEADING, claimed))
+    return "\n\n".join(sections)

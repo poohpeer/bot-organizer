@@ -163,7 +163,18 @@ CREATE TABLE IF NOT EXISTS list_items (
                      CHECK (status IN ('pending', 'checked')),
     added_by    BIGINT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    checked_at  TIMESTAMPTZ
+    checked_at  TIMESTAMPTZ,
+    -- TEXT, not a number: people say "пару бутылок", "кг", "штук 5", and
+    -- parsing that into a number+unit would invent precision nobody gave
+    -- (R4). NULL means nobody said how much.
+    quantity    TEXT,
+    -- One of the fixed vocabulary in bot/tools/core.py, or NULL until set.
+    category    TEXT,
+    -- Both kept for the same reason participants keeps user_id and
+    -- display_name separately: someone can be named before they are
+    -- identified. NULL claimed_by means nobody has taken it.
+    claimed_by  TEXT,
+    claimed_by_user_id BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_list_items_session ON list_items (session_id);
 -- One row per item name per session. A shopping list with "огурцы" twice is
@@ -295,6 +306,14 @@ ALTER TABLE reminders ADD CONSTRAINT reminders_status_check
     CHECK (status IN ('pending', 'sent', 'cancelled', 'failed'));
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeat_every_minutes INT;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeat_until TIMESTAMPTZ;
+-- TEXT, not a number: people say "пару бутылок", "кг", "штук 5", and parsing
+-- that into a number+unit would invent precision nobody gave (R4). NULL means
+-- nobody said how much. claimed_by/claimed_by_user_id split the same way
+-- participants does: someone can be named before they are identified.
+ALTER TABLE list_items ADD COLUMN IF NOT EXISTS quantity TEXT;
+ALTER TABLE list_items ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE list_items ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+ALTER TABLE list_items ADD COLUMN IF NOT EXISTS claimed_by_user_id BIGINT;
 """
 
 

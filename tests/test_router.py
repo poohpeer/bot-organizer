@@ -654,6 +654,36 @@ def test_the_system_instruction_covers_repeating_reminders_and_the_schedule_view
     assert "repeat_until" in instruction
 
 
+def test_the_system_instruction_covers_quantity_ownership_and_categories():
+    """R4. list_claim/list_unclaim have to be named directly, not just left
+    for the model to discover in the tool schema, and the category vocabulary
+    has to be spelled out: a model asked to invent one will say "молочка"
+    once and "молочные продукты" the next, which sorts differently in
+    bot.list_render and looks broken."""
+    from bot.list_render import LIST_CATEGORIES
+
+    instruction = router._ACTIVE_MODE_SYSTEM_INSTRUCTION.lower()
+
+    assert "list_claim" in instruction
+    assert "list_unclaim" in instruction
+    for category in LIST_CATEGORIES:
+        assert category in instruction
+
+
+def test_the_system_instruction_forbids_inventing_an_amount():
+    instruction = router._ACTIVE_MODE_SYSTEM_INSTRUCTION.lower()
+
+    assert "never invent an amount" in instruction
+
+
+def test_list_claim_and_unclaim_are_session_bound():
+    """Session-bound tools have their session_id enforced by the router
+    rather than trusted from the model (see _bind_session_context) — the same
+    reason every other session-scoped tool is in this set."""
+    assert "list_claim" in router._SESSION_BOUND_TOOLS
+    assert "list_unclaim" in router._SESSION_BOUND_TOOLS
+
+
 async def test_the_model_is_told_what_day_it_is(db_pool):
     """Observed in a real chat: asked to remind "через 5 минут", the model
     stored 2025-07-20 — over a year in the past — because nothing told it the

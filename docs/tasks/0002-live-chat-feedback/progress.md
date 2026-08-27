@@ -12,8 +12,8 @@
 |------|--------|--------|---------|--------------|----|-------|
 | S1 | 0002-S1-reply-formatting | complete | 364e053..HEAD | 5 defects fixed; tester PASS | — | word-boundary rule for emphasis |
 | S2 | 0002-S2-reminders | complete | 29b1fb6..HEAD | 1 defect fixed; tester PASS | — | overdue repeats delivered one copy per poll |
-| S3 | — | next | — | — | — | |
-| S4 | — | pending | — | — | — | |
+| S3 | 0002-S3-list-details | complete | b625946..HEAD | tester PASS | — | table dropped at user's request; design example was self-contradictory |
+| S4 | — | next | — | — | — | |
 | S5 | — | pending | — | — | — | |
 
 ## Findings to address
@@ -35,3 +35,11 @@
   = 19352 messages over 13 days. Now skips missed occurrences while still
   stepping exactly one interval when merely late. Story corrected.
   Suite: 300 passed.
+- 2026-08-27: S3 done. User asked to drop the table, so the HTML-sending task
+  went with it — and with it the risk that one unescaped < in an item name
+  makes Telegram drop the whole message. The implementer found a real
+  contradiction in this design: the category rule was stated twice and the
+  worked example showed the reverse order. It followed the rule and flagged
+  it; example corrected. Known limitation accepted: an item name entirely
+  wrapped in paired Markdown markers loses them (*звёздочка* -> звёздочка);
+  everything else including 2*2, a_b_c and <тег> survives. Suite: 324 passed.
