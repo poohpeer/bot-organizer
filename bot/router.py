@@ -16,6 +16,7 @@ from datetime import date, datetime
 from google.genai import types
 
 import bot.decision_log as decision_log
+import bot.group_info as group_info
 import bot.list_render as list_render
 import bot.session as session
 import bot.timezones as timezones
@@ -135,16 +136,60 @@ def _parse_event_date(value) -> date | None:
         return None
 
 
+def _format_event_date(iso_date: str) -> str:
+    parsed = _parse_event_date(iso_date)
+    # A malformed date from the classifier is shown as-is rather than dropped:
+    # unlike session start (where a bad date just means no date was recorded),
+    # here it already passed the "something was found" check, so silently
+    # dropping it would make the greeting mention a place/activity but go
+    # mute about the date the model just said it saw.
+    return f"{parsed:%d.%m.%Y}" if parsed is not None else iso_date
+
+
+def _greeting_with_info(event: dict, member_count, bot_username: str) -> str:
+    parts = [event.get("activity_type") or "мероприятие"]
+    if event.get("event_date"):
+        parts.append(f"дата — {_format_event_date(event['event_date'])}")
+    if event.get("place"):
+        parts.append(f"место — {event['place']}")
+    # A number from get_chat_member_count, never a roster (R7): the group's
+    # members are not being listed, so the sentence must not read as if they
+    # were known by name.
+    count_clause = f" В группе {member_count} человек." if member_count is not None else ""
+    return (
+        f"Привет! Вижу: {', '.join(parts)}.{count_clause} Чтобы начать отслеживать, "
+        f"упомяните @{bot_username} или ответьте на моё сообщение."
+    )
+
+
 async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_username) -> None:
     """Greet a chat the bot was just added to. Being added is not consent
     (R5): this never starts a session, and a promotion/permission change
-    (bot_was_added returning False) must stay silent."""
+    (bot_was_added returning False) must stay silent.
+
+    Reports what the group's own title/description already say (R7) — the
+    activity, date and place if stated, plus the member count — without
+    starting anything: the greeting describes what can be seen, and asking
+    the bot to actually track it is still a separate, explicit step.
+    """
     if not bot_was_added(chat_member_updated, bot_id):
         return
-    await telegram_bot.send_message(
-        chat_id=chat_member_updated.chat.id,
-        text=_GREETING_TEMPLATE.format(mention=f"@{bot_username}"),
+    chat = chat_member_updated.chat
+    info = await group_info.fetch(telegram_bot, chat.id)
+    tz = await timezones.chat_timezone(pool, chat.id)
+    event = await group_info.extract_event(
+        info.get("title"), info.get("description"), timezones.local_date(tz)
     )
+
+    if any(event.get(k) for k in ("activity_type", "event_date", "place")):
+        text = _greeting_with_info(event, info.get("member_count"), bot_username)
+    else:
+        # Nothing was actually found — the plain greeting as it was before
+        # this story, not an empty "Поездка: не указано" scaffold (R7's last
+        # criterion: nothing invented).
+        text = _GREETING_TEMPLATE.format(mention=f"@{bot_username}")
+
+    await telegram_bot.send_message(chat_id=chat.id, text=text)
 
 
 async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_username) -> None:
