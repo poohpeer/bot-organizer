@@ -885,3 +885,56 @@ async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):
 
     assert result["status"] == "not_found"
     assert set(result["items_on_the_list"]) == {"огурцы", "мясо"}
+
+
+async def test_list_add_refuses_a_name_that_matches_a_participant(db_pool):
+    """Reproduced live: an unaddressed message naming who is coming ("Андрюха
+    и Витька тоже придут") let the silent-capture classifier confuse the
+    people with things to bring, and list_add happily stored both names as
+    bare shopping-list items — no quantity, no owner, just a person's name
+    sitting in the middle of the list. A name already tracked as a
+    participant in this session is refused rather than trusted, regardless
+    of which caller passed it in."""
+    session_id = await _new_session(db_pool)
+    await core.set_participant(db_pool, session_id, "Андрюха", "confirmed", user_id=1)
+    await core.set_participant(db_pool, session_id, "Витька", "unknown", user_id=2)
+
+    r1 = await core.list_add(db_pool, session_id, "Андрюха")
+    r2 = await core.list_add(db_pool, session_id, "Витька")
+
+    assert r1 == {"status": "looks_like_a_participant", "detail": "Андрюха"}
+    assert r2 == {"status": "looks_like_a_participant", "detail": "Витька"}
+    assert (await core.list_show(db_pool, session_id))["items"] == []
+
+
+async def test_list_add_participant_name_check_is_case_insensitive(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.set_participant(db_pool, session_id, "андрюха", "confirmed", user_id=1)
+
+    result = await core.list_add(db_pool, session_id, "АНДРЮХА")
+
+    assert result["status"] == "looks_like_a_participant"
+
+
+async def test_list_add_still_works_for_ordinary_items(db_pool):
+    """The guard must not catch anything but an actual name match."""
+    session_id = await _new_session(db_pool)
+    await core.set_participant(db_pool, session_id, "Alex", "confirmed", user_id=1)
+
+    result = await core.list_add(db_pool, session_id, "арбуз")
+
+    assert result["status"] == "ok"
+
+
+async def test_an_item_added_before_the_name_becomes_a_participant_is_not_removed(db_pool):
+    """The guard only stops a NEW add from being mistaken for a person; it
+    must never retroactively delete an item someone already legitimately
+    added, even if a later participant happens to share its name."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "Персик")
+
+    await core.set_participant(db_pool, session_id, "Персик", "unknown", user_id=9)
+
+    items = [i["name"] for i in (await core.list_show(db_pool, session_id))["items"]]
+    assert items == ["Персик"]
+

@@ -947,3 +947,28 @@ def test_the_system_instruction_covers_the_roster_gap_remark():
     assert "recorded_count" in instruction
     assert "В чате" in instruction
     assert "null" in instruction.lower()
+
+
+async def test_silent_capture_skips_a_name_that_looks_like_a_participant(db_pool, monkeypatch):
+    """Reproduced live: an unaddressed message naming who is coming let the
+    silent-capture classifier confuse a person with something to bring, and
+    list_add stored the participant's own name as a bare shopping-list item.
+    This path never reacts to a tool result — it just applies whatever came
+    back — so the guard inside list_add itself is what keeps the list clean
+    here; nothing else on this path inspects the return value."""
+    import bot.tools.core as core_tools
+
+    active = await _new_active_session(db_pool)
+    await core_tools.set_participant(db_pool, active["id"], "Андрюха", "confirmed", user_id=1)
+    monkeypatch.setattr(
+        router, "extract",
+        AsyncMock(return_value={"list_items": ["Андрюха"], "checked_off_items": [], "facts": []}),
+    )
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("андрюха тоже придёт", addressed=False), BOT_ID, BOT_USERNAME
+    )
+
+    assert (await core_tools.list_show(db_pool, active["id"]))["items"] == []
+    telegram_bot.send_message.assert_not_awaited()

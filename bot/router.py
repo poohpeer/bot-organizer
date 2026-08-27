@@ -330,7 +330,10 @@ _SILENT_CAPTURE_INSTRUCTION = (
     "Extract only what is worth remembering for later: items to get/buy/"
     "bring (list_items), items already obtained (checked_off_items), and "
     "any other durable fact (facts). Leave a field empty if this message "
-    "has nothing for it — never guess or invent."
+    "has nothing for it — never guess or invent. A person's name is never a "
+    "list item, even in a sentence about who is coming and what they might "
+    "bring — \"Андрюха и Витька тоже придут\" names no items at all; only an "
+    "actual thing named to get/buy/bring belongs in list_items."
 )
 
 _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
@@ -344,7 +347,12 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "record it with remember_fact instead: the list is what the group reads, "
     "and a fact nobody looks at leaves the item showing as still needed.\n"
     "Add each item only once. If list_add reports already_present, the item "
-    "is on the list — say so rather than adding it again.\n"
+    "is on the list — say so rather than adding it again. If it reports "
+    "looks_like_a_participant, the name matches someone already tracked as "
+    "a participant in this session — a person is not a shopping list item, "
+    "even if a message about who is coming also mentions what they might "
+    "bring; use set_participant for the person and, only if something "
+    "concrete was actually named to buy or bring, list_add for that.\n"
     "Keep item names exactly as the group wrote them, in their language. "
     "Never translate or transliterate a name: \"cucumbers\" and \"огурцы\" are "
     "two different items to the list, so translating one turns checking it "

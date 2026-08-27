@@ -173,6 +173,20 @@ async def list_add(pool, session_id, name, quantity=None, category=None) -> dict
     already has one is never applied — overwriting would lose whatever was
     said first — and the existing value comes back so the caller can mention it.
     """
+    # Reproduced live: an unaddressed message naming who is coming ("Андрюха
+    # и Витька тоже придут") can have the cheap silent-capture classifier
+    # confuse the people with things to bring, calling this with a person's
+    # own name as the item. A person is tracked via set_participant, which
+    # this same message likely also (correctly) triggered — so a name that
+    # already matches a participant in this session is refused here rather
+    # than trusted, regardless of which caller passed it.
+    person = await pool.fetchval(
+        "SELECT display_name FROM participants WHERE session_id = $1 AND lower(display_name) = lower($2)",
+        session_id, name,
+    )
+    if person is not None:
+        return {"status": "looks_like_a_participant", "detail": person}
+
     row = await pool.fetchrow(
         """
         INSERT INTO list_items (session_id, name, quantity, category)
