@@ -81,3 +81,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "bot rollout did not complete" }
           kubectl rollout status deployment/bot-organizer-worker --timeout=180s
           if ($LASTEXITCODE -ne 0) { throw "worker rollout did not complete" }
+
+      # A completed rollout is weaker evidence than it looks: these pods have
+      # no readiness probe, so one counts as available the moment it starts,
+      # and a crash thirty seconds later would not fail the step above. The
+      # startup lines are the real proof — the bot only logs its identity
+      # after a successful getMe against Telegram.
+      - name: Verify the bot is actually running
+        shell: powershell
+        run: |
+          Start-Sleep -Seconds 20
+          kubectl get pods -l app=bot-organizer-bot
+          kubectl get pods -l app=bot-organizer-worker
+
+          $restarts = kubectl get pods -l app=bot-organizer-bot -o "jsonpath={.items[*].status.containerStatuses[*].restartCount}"
+          Write-Host "bot restarts: $restarts"
+
+          $botLog = kubectl logs deployment/bot-organizer-bot --tail=100 2>&1 | Out-String
+          $workerLog = kubectl logs deployment/bot-organizer-worker --tail=50 2>&1 | Out-String
+          Write-Host "--- bot ---"
+          Write-Host $botLog
+          Write-Host "--- worker ---"
+          Write-Host $workerLog
+
+          if ($botLog -notmatch 'Resolved bot identity') {
+            throw "The bot never reached Telegram: no 'Resolved bot identity' line."
+          }
+          if ($workerLog -notmatch 'Worker started') {
+            throw "The worker never started its poll loop."
+          }
+          if ($botLog -match 'GROQ_API_KEY is not set') {
+            Write-Host "::warning::GROQ_API_KEY is missing from the cluster Secret - the bot is running on Gemini alone."
+          }
+          Write-Host "both processes are up"
