@@ -300,3 +300,67 @@ async def test_a_late_tick_does_not_drift_the_series(db_pool):
 
     row = await db_pool.fetchrow("SELECT remind_at FROM reminders WHERE id = $1", reminder_id)
     assert row["remind_at"] == remind_at + timedelta(minutes=30)
+
+
+def test_a_late_tick_does_not_drift_the_series():
+    """Counting from now() instead of the schedule turns every late tick into
+    permanent lag — over a day of half-hourly reminders, real accumulated
+    drift."""
+    import datetime as dt
+
+    from worker.reminders import _next_occurrence
+
+    now = dt.datetime.now(dt.timezone.utc)
+    for lateness in (dt.timedelta(0), dt.timedelta(seconds=20), dt.timedelta(minutes=3)):
+        step = _next_occurrence(now - lateness, 30) - (now - lateness)
+        assert step == dt.timedelta(minutes=30), f"drifted when {lateness} late"
+
+
+def test_missed_occurrences_are_skipped_not_queued():
+    """Advancing by exactly one interval makes an overdue series deliver one
+    missed copy per poll until it catches up. A worker down for an hour turns
+    a five-minute repeat into twelve stale messages."""
+    import datetime as dt
+
+    from worker.reminders import _next_occurrence
+
+    now = dt.datetime.now(dt.timezone.utc)
+    next_at = _next_occurrence(now - dt.timedelta(hours=1), 5)
+
+    assert next_at > now, "the next occurrence must be in the future"
+    assert next_at - now <= dt.timedelta(minutes=5), "and no more than one interval away"
+
+
+def test_a_reminder_mis_dated_into_the_past_does_not_spam_forever():
+    """The model once stored 2025-07-20 for "напомни через 5 минут" (see the
+    bugs file). With a repeat attached, one-interval advances would have posted
+    once a minute for thirteen days."""
+    import datetime as dt
+
+    from worker.reminders import _next_occurrence
+
+    now = dt.datetime.now(dt.timezone.utc)
+    next_at = _next_occurrence(dt.datetime(2025, 7, 20, 12, tzinfo=dt.timezone.utc), 30)
+
+    assert next_at > now
+    assert next_at - now <= dt.timedelta(minutes=30)
+
+
+async def test_an_overdue_repeat_delivers_once_per_poll_not_once_per_missed_slot(db_pool):
+    """The whole point, end to end: a badly overdue repeating reminder fires
+    once and then goes quiet until its next real slot."""
+    session_id = await _session(db_pool)
+    await db_pool.execute(
+        """
+        INSERT INTO reminders (session_id, chat_id, target_user_id, message, remind_at,
+                               repeat_every_minutes, repeat_until)
+        VALUES ($1, 1, 77, 'тук', now() - interval '1 hour', 5, now() + interval '30 days')
+        """,
+        session_id,
+    )
+    telegram_bot = AsyncMock()
+
+    for _ in range(5):
+        await worker_reminders.deliver_due_reminders(db_pool, telegram_bot, min_interval_hours=0)
+
+    assert telegram_bot.send_message.await_count == 1

@@ -82,6 +82,29 @@ async def _release(pool, reminder_id) -> str:
     return row["status"]
 
 
+def _next_occurrence(scheduled, every_minutes: int):
+    """The first occurrence strictly after now, counted from the schedule.
+
+    Two things have to hold at once, and they pull in opposite directions.
+
+    Counting from `scheduled` rather than from `now()` is what stops a late
+    tick from dragging the whole series later — over a day of half-hourly
+    reminders, a few late ticks become real accumulated lag.
+
+    But advancing by exactly one interval means an overdue series delivers one
+    missed occurrence per poll, forever, until it catches up. A worker down for
+    an hour turns a five-minute repeat into twelve stale messages; and a
+    reminder mis-dated into the past — which is exactly what happened when the
+    model guessed 2025-07-20 for "через 5 минут" — would post once a minute for
+    thirteen days. Missed occurrences are therefore skipped, not queued: the
+    reminder fires once and the schedule jumps to the next future slot.
+    """
+    interval = timedelta(minutes=every_minutes)
+    elapsed = datetime.now(timezone.utc) - scheduled
+    periods = max(1, -(-elapsed // interval))  # ceil, at least one
+    return scheduled + periods * interval
+
+
 async def deliver_due_reminders(pool, telegram_bot, *, min_interval_hours: float) -> dict:
     delivered, deferred, failed = [], [], []
     for r in await _due_reminders(pool):
@@ -112,11 +135,7 @@ async def deliver_due_reminders(pool, telegram_bot, *, min_interval_hours: float
             continue
 
         if r["repeat_every_minutes"] is not None:
-            # Advance from the *scheduled* remind_at (the row as fetched at
-            # the top of this poll), not from now(): a late tick must not
-            # drift the whole series later, and over a day of half-hourly
-            # reminders a few late ticks add up to real accumulated lag.
-            next_at = r["remind_at"] + timedelta(minutes=r["repeat_every_minutes"])
+            next_at = _next_occurrence(r["remind_at"], r["repeat_every_minutes"])
             if next_at <= r["repeat_until"]:
                 await _advance(pool, r["id"], next_at)
 
