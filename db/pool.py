@@ -314,6 +314,17 @@ ALTER TABLE list_items ADD COLUMN IF NOT EXISTS quantity TEXT;
 ALTER TABLE list_items ADD COLUMN IF NOT EXISTS category TEXT;
 ALTER TABLE list_items ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE list_items ADD COLUMN IF NOT EXISTS claimed_by_user_id BIGINT;
+-- bot.group_info's last-seen bookkeeping (R7): NULL title_seen/description_seen
+-- means "never checked", not "checked and found nothing" — that distinction is
+-- what lets a first sighting store the values without announcing them as a
+-- change. member_count lands here too, even though it is Task 6's column in
+-- the story doc: Task 4's worker.group_sync writes it on every pass, which
+-- runs before Task 6 in build order, so the column has to exist by then or
+-- worker.group_sync's own tests fail against the real schema.
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS title_seen TEXT;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS description_seen TEXT;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS info_checked_at TIMESTAMPTZ;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS member_count INT;
 """
 
 
