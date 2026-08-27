@@ -12,7 +12,7 @@
 |------|--------|--------|---------|--------------|----|-------|
 | S1 | 0002-S1-reply-formatting | complete | 364e053..HEAD | 5 defects fixed; tester PASS | — | word-boundary rule for emphasis |
 | S2 | 0002-S2-reminders | complete | 29b1fb6..HEAD | 1 defect fixed; tester PASS | — | overdue repeats delivered one copy per poll |
-| S3 | — | next | — | — | — | |
+| S3 | 0002-S3-list-details | in_progress | — | — | — | |
 | S4 | — | pending | — | — | — | |
 | S5 | — | pending | — | — | — | |
 
