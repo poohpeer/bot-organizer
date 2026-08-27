@@ -1,7 +1,8 @@
 # Deploying to Kubernetes
 
 Images are built and pushed to `ghcr.io/poohpeer/bot-organizer` by
-`.github/workflows/deploy-k8s.yml` on pushes to `0001-S10-deployment` — no
+`.github/workflows/ci.yml` on pushes to `main` (and to `0001-S10-deployment`
+until that branch is merged), after the test suite passes — no
 manual `docker build`/`docker push` is needed.
 
 All resources use the current Kubernetes namespace, the same way as the
@@ -75,7 +76,7 @@ namespace.
 
 ### Automatic rollout restart (self-hosted runner)
 
-The `deploy` job in `deploy-k8s.yml` (`runs-on: self-hosted`) needs a Runner
+The `deploy` job in `ci.yml` (`runs-on: self-hosted`) needs a Runner
 on the same machine that has `kubectl` configured for the target cluster. The
 Runner account must already be able to run:
 

@@ -222,7 +222,7 @@ worker pod, and a single-replica PostgreSQL StatefulSet with a 10Gi PVC. The
 resources use the current Kubernetes namespace and have `bot-organizer-`
 prefixed names so multiple bots can share one namespace without collisions.
 
-The GitHub Actions workflow `.github/workflows/deploy-k8s.yml` builds and
+The GitHub Actions workflow `.github/workflows/ci.yml` tests, builds and
 publishes the image, then restarts the deployments from a self-hosted runner.
 The runner must have `kubectl` installed and a kubeconfig that can access the
 target cluster. Application secrets are not stored in GitHub: copy
