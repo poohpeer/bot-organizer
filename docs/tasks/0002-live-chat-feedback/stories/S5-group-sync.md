@@ -132,7 +132,8 @@ producing today's plain greeting; no session row created in either case
 
 **Interfaces:**
 - `async worker.group_sync.sync_group_info(pool, telegram_bot) -> dict` —
-  `{"announced": [chat_id, ...]}`, added to `poll_once`'s `steps` tuple.
+  `{"announced": [chat_id, ...]}`, added to `poll_once`'s `steps` tuple. It also
+  stores `chats.member_count` on each pass — see Task 6.
 
 For every chat with an **active session** — a dormant chat is not being
 tracked, and announcing changes there would be the bot speaking unbidden,
@@ -184,5 +185,52 @@ bots, and the same reasoning applies to adding them as participants.
 **Tests must cover:** a join in an active-session chat adding a participant and
 announcing once; a join in a dormant chat doing nothing; a bot joining being
 ignored; a rejoin of someone already listed not duplicating them.
+
+- [ ] **Step 1–5.**
+
+---
+
+### Task 6: Say how much of the roster is missing
+
+**Satisfies:** R7
+
+**Files:**
+- Modify: `db/pool.py`, `bot/tools/core.py`, `bot/router.py`
+- Modify: `tests/test_tools_core.py`, `tests/test_router.py`
+
+The roster is partial by construction — the API section in `../EPIC.md`
+explains why. A list of three names in a group of nine is misleading on its
+own, and the person asking cannot tell the difference. So every answer about
+participants has to state the gap.
+
+```sql
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS member_count INT;
+```
+
+Task 4's sync already calls `get_chat_member_count`; store it here on the same
+pass. Reading the stored value rather than calling Telegram on every
+`get_participants` keeps a chat question off the network path, and a value at
+most `GROUP_SYNC_INTERVAL_SECONDS` old is accurate enough for a caveat.
+
+**Interfaces:**
+- `get_participants(pool, session_id) -> dict` gains two keys:
+  `{"participants": [...], "chat_member_count": int | None, "recorded_count": int}`
+
+`chat_member_count` is None when it has never been fetched — a chat where the
+worker has not yet run, or where `get_chat_member_count` failed. R7's last
+criterion: the participants are still listed and the remark is simply omitted.
+Do not substitute 0, which would read as an empty group.
+
+Add to the instruction:
+
+> When you report on participants and `get_participants` shows
+> `chat_member_count` higher than `recorded_count`, add a line: "В чате
+> {chat_member_count} человек, но записаны только {recorded_count}." Add it
+> only when the numbers differ, and never when `chat_member_count` is null.
+
+**Tests must cover:** `get_participants` returning both counts; a chat with no
+stored count returning None for it rather than 0; `recorded_count` matching the
+number of participant rows; the instruction carrying the remark's wording and
+the condition under which it applies.
 
 - [ ] **Step 1–5.**

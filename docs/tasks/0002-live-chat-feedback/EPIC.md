@@ -141,6 +141,14 @@ Acceptance criteria:
   polls repeatedly, **then** the bot says nothing.
 - **Given** a title or description with no date or place in it, **when** it is
   read, **then** nothing is invented and no announcement is made.
+- **Given** the bot knows fewer participants than the group has members,
+  **when** someone asks how the organizing is going, **then** the answer lists
+  who is recorded and adds "В чате X человек, но записаны только Y" — the gap
+  is stated rather than left for the reader to notice.
+- **Given** every group member is recorded, **when** the same question is
+  asked, **then** no such remark appears — it is a caveat, not decoration.
+- **Given** the member count cannot be fetched, **when** the question is asked,
+  **then** the participants are still listed and the remark is simply omitted.
 
 ---
 
@@ -162,6 +170,11 @@ R7 therefore promises the roster the bot **can** actually build:
 | Names of members | nothing | admins via `get_chat_administrators` |
 | New members | `new_chat_members` in updates | added to participants as they join |
 | Everyone else | — | added the first time they say something |
+
+Because the roster is partial by construction, every answer about participants
+has to say so — see R7's last three criteria. A list of three names in a group
+of nine is misleading on its own, and the person asking has no way to know the
+difference.
 
 The roster is therefore built up over time rather than known at once. The
 greeting must say the count and not imply it knows who everyone is.
