@@ -36,17 +36,36 @@ jobs:
     needs: build
     runs-on: self-hosted
     steps:
-      - name: Check kubectl access
-        shell: pwsh
-        run: kubectl version --client && kubectl cluster-info
+      # One preflight that reports everything at once. Each run of this
+      # workflow rebuilds the image first, so discovering the next missing
+      # piece one failure at a time is expensive.
+      - name: Preflight
+        shell: bash
+        run: |
+          set +e
+          echo "--- kubectl ---"
+          command -v kubectl || { echo "MISSING: kubectl is not on the runner service PATH"; exit 1; }
+          kubectl version --client
+          echo "--- cluster ---"
+          kubectl cluster-info || { echo "MISSING: no reachable cluster / kubeconfig for the runner user"; exit 1; }
+          echo "--- namespace ---"
+          kubectl config view --minify -o "jsonpath={..namespace}"; echo
+          echo "--- our resources ---"
+          kubectl get deployment bot-organizer-bot bot-organizer-worker 2>&1
+          kubectl get statefulset bot-organizer-postgres 2>&1
+          kubectl get secret bot-organizer-secrets bot-organizer-ghcr-pull-secret 2>&1
+          echo "--- verdict ---"
+          kubectl get deployment bot-organizer-bot >/dev/null 2>&1 \
+            || { echo "MISSING: deployments do not exist yet. Run 'kubectl apply -k k8s/' once, per k8s/README.md."; exit 1; }
+          echo "ok"
       - name: Restart bot
-        shell: pwsh
+        shell: bash
         run: kubectl rollout restart deployment/bot-organizer-bot
       - name: Restart worker
-        shell: pwsh
+        shell: bash
         run: kubectl rollout restart deployment/bot-organizer-worker
       - name: Wait for rollout
-        shell: pwsh
+        shell: bash
         run: |
           kubectl rollout status deployment/bot-organizer-bot --timeout=180s
           kubectl rollout status deployment/bot-organizer-worker --timeout=180s
