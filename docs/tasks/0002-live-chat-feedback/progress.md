@@ -14,7 +14,7 @@
 | S2 | 0002-S2-reminders | complete | 29b1fb6..HEAD | 1 defect fixed; tester PASS | — | overdue repeats delivered one copy per poll |
 | S3 | 0002-S3-list-details | complete | b625946..HEAD | tester PASS | — | table dropped at user's request; design example was self-contradictory |
 | S4 | 0002-S4-private-replies | complete | 73d85fc..HEAD | tester PASS | — | recipient-override verified adversarially |
-| S5 | — | next | — | — | — | |
+| S5 | 0002-S5-group-sync | in_progress | — | — | — | |
 
 ## Findings to address
 (none yet)
