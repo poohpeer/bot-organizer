@@ -758,7 +758,7 @@ async def test_private_reply_request_dms_the_asker_and_acks_in_group(db_pool, mo
     monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
     private_text = "Вот список: помидоры, хлеб"
 
-    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction):
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None):
         result = await registry["send_private_message"](text=private_text)
         assert result == {"status": "ok"}
         return "Отправил в личку."
@@ -783,7 +783,7 @@ async def test_private_reply_cannot_reach_tells_group_to_start_a_chat_without_le
     monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
     private_text = "Вот список: помидоры, хлеб, секретный ингредиент"
 
-    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction):
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None):
         result = await registry["send_private_message"](text=private_text)
         assert result["status"] == "cannot_reach"
         return "Не получилось отправить в личку — откройте чат со мной и нажмите Start."
@@ -807,7 +807,7 @@ async def test_private_reply_with_no_from_user_does_not_crash(db_pool, monkeypat
     telegram_bot = AsyncMock()
     monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
 
-    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction):
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None):
         result = await registry["send_private_message"](text="что угодно")
         assert result == {"status": "failed", "detail": "no telegram user to message"}
         return "Не получилось понять, кому писать в личку."
@@ -972,3 +972,31 @@ async def test_silent_capture_skips_a_name_that_looks_like_a_participant(db_pool
 
     assert (await core_tools.list_show(db_pool, active["id"]))["items"] == []
     telegram_bot.send_message.assert_not_awaited()
+
+
+async def test_the_tool_loop_is_given_the_recent_conversation(db_pool):
+    """The router is where history reaches the model. Live, it passed none:
+    the bot asked for the whole new amount, the person replied "1 литр", and
+    it answered "Что именно 1 литр?" — with no memory of having asked."""
+    from unittest.mock import AsyncMock, patch
+
+    import bot.decision_log as decision_log
+
+    chat_id = -9001
+    active = await _new_active_session(db_pool, chat_id=chat_id)
+    await decision_log.log_decision(
+        db_pool, chat_id=chat_id, user_id=1, raw_text="Добавь ещё 0.5 воды",
+        stage="tool_call", decision={"session_id": active["id"], "reply": "Сколько всего?"},
+    )
+    telegram_bot = AsyncMock()
+
+    with patch("bot.router.run_tool_loop", AsyncMock(return_value="ок")) as loop, \
+            patch("bot.router.classify", AsyncMock(return_value=False)):
+        await router.handle_active_message(
+            db_pool, telegram_bot, active,
+            _message("@bot 1 литр", chat_id=chat_id), BOT_ID, BOT_USERNAME,
+        )
+
+    passed = loop.await_args.kwargs["history"]
+    assert {"role": "user", "content": "Добавь ещё 0.5 воды"} in passed
+    assert {"role": "assistant", "content": "Сколько всего?"} in passed
