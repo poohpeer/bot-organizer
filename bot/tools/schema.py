@@ -102,4 +102,7 @@ ALL_TOOLS = types.Tool(function_declarations=[
     _fn("archive_lookup", "Look up where this chat has gone before for a given activity type, ranked by recency-weighted frequency, across closed sessions.",
         {"session_id": _S(Type.INTEGER), "activity_type": _S(Type.STRING)},
         ["session_id", "activity_type"]),
+    _fn("event_status", "Get the full organizing status report (place, date, participants, shopping list, reminders) as one pre-formatted block of text. Call this whenever someone asks how the organizing is going, what the current status is, or wants a summary — reply with its report field character-for-character, never compose your own version.",
+        {"session_id": _S(Type.INTEGER)},
+        ["session_id"]),
 ])
