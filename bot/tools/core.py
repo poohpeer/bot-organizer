@@ -346,11 +346,15 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
             )
             await pool.execute("DELETE FROM list_items WHERE id = $1", other["id"])
 
-        if twin["name"] != name:
-            # The surviving row still carries the older spelling — one live
-            # list had "одна бутылка чай", which matches "чай" by key but
-            # reads as nonsense. The key matched, so this is the same item,
-            # and the new name is derived from what someone just said.
+        if twin["name"] != name and twin["name"] != item_names.canonical(twin["name"]):
+            # The surviving row carries a name that is not its own canonical
+            # form — one live list had "одна бутылка чай", which matches
+            # "чай" by key but reads as nonsense. A name that is already
+            # canonical is left alone: matching is by lemma, so "банан"
+            # matches a stored "бананы", and renaming on that basis rewrote
+            # a group's plural into the model's singular. Repair is for
+            # spellings nothing would ever produce today, not for a
+            # different but perfectly good way of saying the same thing.
             await pool.execute(
                 "UPDATE list_items SET name = $2 WHERE id = $1", twin["id"], name
             )
