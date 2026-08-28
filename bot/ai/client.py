@@ -10,7 +10,6 @@ groq_client = None
 gemini = None
 
 CODEX_MODELS = ["codex:gpt-5.3-codex", "codex:gpt-5.2-codex", "codex:gpt-5.1-codex-mini"]
-OLLAMA_MODELS = ["ollama:" + m.strip() for m in os.environ.get("AI_PROXY_OLLAMA_MODELS", "llama3.2").split(",") if m.strip()]
 CLAUDE_MODELS = ["claude:opus", "claude:sonnet", "claude:haiku"]
 GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
@@ -41,7 +40,7 @@ def build_chain(groq_provider, gemini_provider) -> list[tuple]:
 
 
 DEFAULT_PROXY_MODELS = ",".join(
-    CODEX_MODELS + OLLAMA_MODELS + CLAUDE_MODELS + GROQ_MODELS + [
+    CODEX_MODELS + CLAUDE_MODELS + GROQ_MODELS + [
         "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.6-flash",
         "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
     ]
