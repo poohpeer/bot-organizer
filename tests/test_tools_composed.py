@@ -1,5 +1,6 @@
 import datetime as dt
 import inspect
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import bot.tools.composed as composed
@@ -299,7 +300,9 @@ async def test_archive_lookup_unknown_session(db_pool):
 def test_build_composed_registry_covers_every_composed_tool(db_pool):
     registry = composed.build_composed_registry(db_pool, AsyncMock())
 
-    assert set(registry) == {"resolve_and_save_place", "send_location", "archive_lookup", "event_status"}
+    assert set(registry) == {
+        "resolve_and_save_place", "send_location", "archive_lookup", "event_status", "get_chat_info",
+    }
 
 
 def test_declared_parameters_match_the_bound_signatures(db_pool):
@@ -370,3 +373,63 @@ async def test_event_status_with_nothing_recorded_yet(db_pool):
     assert "Пока никого не записал." in result["report"]
     assert "Список пока пуст." in result["report"]
     assert "Нет запланированных напоминаний" in result["report"]
+
+
+async def test_get_chat_info_returns_the_live_title_and_description(db_pool):
+    """Reproduces the live bug: chats.title is written once while a chat is
+    still dormant and never refreshed once a session goes active, so a
+    question asked mid-conversation must go straight to Telegram rather than
+    read the (possibly stale) stored column."""
+    session_id = await _new_session(db_pool, chat_id=42)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.return_value = SimpleNamespace(
+        title="Пикник в субботу", description="15 сентября, поляна Ханания"
+    )
+    telegram_bot.get_chat_member_count.return_value = 9
+
+    result = await composed.get_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result == {
+        "status": "ok", "title": "Пикник в субботу", "description": "15 сентября, поляна Ханания",
+    }
+    telegram_bot.get_chat.assert_awaited_once_with(42)
+
+
+async def test_get_chat_info_reflects_a_title_changed_after_the_session_started(db_pool):
+    """The stale-column bug this tool exists to fix: chats.title is set once
+    from the dormant-chat greeting path and never touched again, so a rename
+    after that point must still be visible on demand."""
+    session_id = await _new_session(db_pool, chat_id=1)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.return_value = SimpleNamespace(title="Новое название", description=None)
+    telegram_bot.get_chat_member_count.return_value = 3
+
+    result = await composed.get_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result["status"] == "ok"
+    assert result["title"] == "Новое название"
+    # The stored chats.title from _new_session's insert ('Chat') is untouched
+    # — proof this reads live rather than from the stale column.
+    stored = await db_pool.fetchval("SELECT title FROM chats WHERE chat_id = 1")
+    assert stored == "Chat"
+
+
+async def test_get_chat_info_unknown_session(db_pool):
+    telegram_bot = AsyncMock()
+
+    result = await composed.get_chat_info(db_pool, telegram_bot, 999999)
+
+    assert result == {"status": "unknown_session"}
+    telegram_bot.get_chat.assert_not_awaited()
+
+
+async def test_get_chat_info_unavailable_when_telegram_call_fails(db_pool):
+    """Mirrors group_info.fetch's own contract: never raise, and never invent
+    an answer when the chat is unreachable (kicked, banned, network blip)."""
+    session_id = await _new_session(db_pool, chat_id=7)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.side_effect = RuntimeError("Forbidden: bot was kicked")
+
+    result = await composed.get_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result == {"status": "unavailable"}

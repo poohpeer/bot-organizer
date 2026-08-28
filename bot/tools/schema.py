@@ -105,4 +105,7 @@ ALL_TOOLS = types.Tool(function_declarations=[
     _fn("event_status", "Get the full organizing status report (place, date, participants, shopping list, reminders) as one pre-formatted block of text. Call this whenever someone asks how the organizing is going, what the current status is, or wants a summary — reply with its report field character-for-character, never compose your own version.",
         {"session_id": _S(Type.INTEGER)},
         ["session_id"]),
+    _fn("get_chat_info", "Get this group chat's own current title and description, fetched live from Telegram. Call this whenever someone asks what the group/chat is called, or what its title or description says — never say you cannot see it.",
+        {"session_id": _S(Type.INTEGER)},
+        ["session_id"]),
 ])

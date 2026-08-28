@@ -400,7 +400,12 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "is, or wants a summary of the event, call event_status and reply with "
     "its report field character-for-character — do not assemble your own "
     "version from get_facts/get_participants/list_show/reminder_list "
-    "separately, and do not add, remove or reorder its sections."
+    "separately, and do not add, remove or reorder its sections.\n"
+    "If someone asks what this group/chat is called, or what its title or "
+    "description says, call get_chat_info and answer from its title/"
+    "description fields — never say you cannot see it. If it returns "
+    "unavailable, say you could not read the chat info just now rather than "
+    "guessing."
 )
 
 _SESSION_BOUND_TOOLS = frozenset({
@@ -410,6 +415,7 @@ _SESSION_BOUND_TOOLS = frozenset({
     "nudge_unconfirmed_participants", "reminder_set", "reminder_list", "reminder_cancel",
     "broadcast_message", "set_timezone", "resolve_and_save_place",
     "send_location", "archive_lookup", "send_private_message", "event_status",
+    "get_chat_info",
 })
 
 # Tools whose recipient must be whoever is actually talking, never a

@@ -1,6 +1,7 @@
 import functools
 from datetime import date
 
+import bot.group_info as group_info
 import bot.timezones as timezones
 import bot.tools.core as core_tools
 import bot.status_render as status_render
@@ -172,10 +173,32 @@ async def event_status(pool, session_id) -> dict:
     return {"status": "ok", "report": report}
 
 
+async def get_chat_info(pool, telegram_bot, session_id) -> dict:
+    """The group's own current title and description, fetched live.
+
+    chats.title is written once, only while the chat is still dormant
+    (bot.router.handle_dormant_message), and never refreshed once a session
+    goes active — so it goes stale exactly when a real answer is needed most.
+    chats.title_seen is fresher (worker.group_sync keeps it current for any
+    chat with an active session) but exists only for change-detection, not
+    for a question asked on demand right now. A live get_chat is cheap and
+    guarantees the answer is never older than this call.
+    """
+    session_row = await _session_row(pool, session_id)
+    if session_row is None:
+        return {"status": "unknown_session"}
+
+    info = await group_info.fetch(telegram_bot, session_row["chat_id"])
+    if not info:
+        return {"status": "unavailable"}
+    return {"status": "ok", "title": info.get("title"), "description": info.get("description")}
+
+
 def build_composed_registry(pool, telegram_bot) -> dict:
     return {
         "resolve_and_save_place": functools.partial(resolve_and_save_place, pool),
         "send_location": functools.partial(send_location, pool, telegram_bot),
         "archive_lookup": functools.partial(archive_lookup, pool),
         "event_status": functools.partial(event_status, pool),
+        "get_chat_info": functools.partial(get_chat_info, pool, telegram_bot),
     }
