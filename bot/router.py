@@ -405,7 +405,14 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "description says, call get_chat_info and answer from its title/"
     "description fields — never say you cannot see it. If it returns "
     "unavailable, say you could not read the chat info just now rather than "
-    "guessing."
+    "guessing.\n"
+    "If someone asks you to look at the group's title or description and "
+    "record, save or remember the place or date stated there, call "
+    "sync_chat_info — do not call get_chat_info and then only claim you "
+    "saved it. Confirm using exactly what sync_chat_info reports it saved "
+    "(its place/event_date fields); if it returns found_nothing, say the "
+    "title/description do not state one rather than claiming to have saved "
+    "anything."
 )
 
 _SESSION_BOUND_TOOLS = frozenset({
@@ -415,7 +422,7 @@ _SESSION_BOUND_TOOLS = frozenset({
     "nudge_unconfirmed_participants", "reminder_set", "reminder_list", "reminder_cancel",
     "broadcast_message", "set_timezone", "resolve_and_save_place",
     "send_location", "archive_lookup", "send_private_message", "event_status",
-    "get_chat_info",
+    "get_chat_info", "sync_chat_info",
 })
 
 # Tools whose recipient must be whoever is actually talking, never a

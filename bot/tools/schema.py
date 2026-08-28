@@ -108,4 +108,7 @@ ALL_TOOLS = types.Tool(function_declarations=[
     _fn("get_chat_info", "Get this group chat's own current title and description, fetched live from Telegram. Call this whenever someone asks what the group/chat is called, or what its title or description says — never say you cannot see it.",
         {"session_id": _S(Type.INTEGER)},
         ["session_id"]),
+    _fn("sync_chat_info", "Read the group's title/description live and actually record the place and/or date they state, in one call. Call this when someone asks you to look at the group's title or description and record/save/remember what it says — never claim you saved something without calling this. Returns found_nothing true if the title/description state nothing.",
+        {"session_id": _S(Type.INTEGER)},
+        ["session_id"]),
 ])

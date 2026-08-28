@@ -183,6 +183,10 @@ async def get_chat_info(pool, telegram_bot, session_id) -> dict:
     chat with an active session) but exists only for change-detection, not
     for a question asked on demand right now. A live get_chat is cheap and
     guarantees the answer is never older than this call.
+
+    Read-only, deliberately: this has no side effects, so it is safe to call
+    for any question about the chat's name or description without risking a
+    write. Recording what is found is sync_chat_info's job, not this one.
     """
     session_row = await _session_row(pool, session_id)
     if session_row is None:
@@ -194,6 +198,72 @@ async def get_chat_info(pool, telegram_bot, session_id) -> dict:
     return {"status": "ok", "title": info.get("title"), "description": info.get("description")}
 
 
+def _parse_iso_date(value) -> date | None:
+    # Mirrors bot.router._parse_event_date / worker.group_sync._parse_iso_date:
+    # the classifier is asked for ISO-8601 but isn't guaranteed to comply, and
+    # a malformed date here must not raise out of a tool call.
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+async def sync_chat_info(pool, telegram_bot, session_id) -> dict:
+    """Read the group's title/description live and actually record whatever
+    event info they state — place and/or date — in one atomic call.
+
+    Requested live after the model replied "Записал место встречи: Море" to
+    a "посмотри в названии группы место встречи и запиши" request without any
+    remember_fact call actually happening: a follow-up "покажи статус" showed
+    no place at all. Chaining "read via get_chat_info, then decide to also
+    call remember_fact" left the write dependent on the primary model
+    reliably making a second tool call in the same turn, which it did not.
+    Doing both in one call removes that dependency the same way event_status
+    replaced free-form composition of several tools with one fixed result.
+
+    Only called for an explicit "record/save what the title says" request —
+    unlike worker.group_sync, which only overwrites on a detected title
+    change, this runs whenever asked and would otherwise silently clobber a
+    place the group already confirmed by conversation with stale text from
+    an unchanged title. That trade-off is fine here: the caller explicitly
+    asked to sync from the title just now.
+    """
+    session_row = await _session_row(pool, session_id, columns="chat_id, event_date")
+    if session_row is None:
+        return {"status": "unknown_session"}
+
+    info = await group_info.fetch(telegram_bot, session_row["chat_id"])
+    if not info:
+        return {"status": "unavailable"}
+
+    tz = await timezones.chat_timezone(pool, session_row["chat_id"])
+    event = await group_info.extract_event(
+        info.get("title"), info.get("description"), timezones.local_date(tz)
+    )
+
+    saved = {}
+    if event.get("place"):
+        await core_tools.remember_fact(pool, session_id, "place", event["place"])
+        saved["place"] = event["place"]
+
+    parsed_date = _parse_iso_date(event.get("event_date"))
+    if parsed_date is not None:
+        await pool.execute(
+            "UPDATE sessions SET event_date = $2 WHERE id = $1", session_id, parsed_date
+        )
+        saved["event_date"] = parsed_date.isoformat()
+
+    return {
+        "status": "ok",
+        "title": info.get("title"),
+        "description": info.get("description"),
+        "found_nothing": not saved,
+        **saved,
+    }
+
+
 def build_composed_registry(pool, telegram_bot) -> dict:
     return {
         "resolve_and_save_place": functools.partial(resolve_and_save_place, pool),
@@ -201,4 +271,5 @@ def build_composed_registry(pool, telegram_bot) -> dict:
         "archive_lookup": functools.partial(archive_lookup, pool),
         "event_status": functools.partial(event_status, pool),
         "get_chat_info": functools.partial(get_chat_info, pool, telegram_bot),
+        "sync_chat_info": functools.partial(sync_chat_info, pool, telegram_bot),
     }

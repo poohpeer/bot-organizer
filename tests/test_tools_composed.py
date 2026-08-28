@@ -301,7 +301,8 @@ def test_build_composed_registry_covers_every_composed_tool(db_pool):
     registry = composed.build_composed_registry(db_pool, AsyncMock())
 
     assert set(registry) == {
-        "resolve_and_save_place", "send_location", "archive_lookup", "event_status", "get_chat_info",
+        "resolve_and_save_place", "send_location", "archive_lookup", "event_status",
+        "get_chat_info", "sync_chat_info",
     }
 
 
@@ -431,5 +432,77 @@ async def test_get_chat_info_unavailable_when_telegram_call_fails(db_pool):
     telegram_bot.get_chat.side_effect = RuntimeError("Forbidden: bot was kicked")
 
     result = await composed.get_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result == {"status": "unavailable"}
+
+
+async def test_sync_chat_info_saves_place_and_date_from_the_title(db_pool, monkeypatch):
+    """Reproduces the live bug: the model replied "Записал место встречи:
+    Море" after get_chat_info, but nothing was actually recorded — a later
+    "покажи статус" showed no place at all. sync_chat_info must save the
+    place/date in the same call that reads them, not depend on the primary
+    model chaining a second tool call correctly."""
+    import bot.tools.core as core_tools
+
+    session_id = await _new_session(db_pool, chat_id=42)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.return_value = SimpleNamespace(
+        title="Поездка на море", description="20 ноября"
+    )
+    telegram_bot.get_chat_member_count.return_value = 4
+    monkeypatch.setattr(
+        composed.group_info, "extract",
+        AsyncMock(return_value={"activity_type": "поездка", "event_date": "2026-11-20", "place": "Море"}),
+    )
+
+    result = await composed.sync_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result["status"] == "ok"
+    assert result["found_nothing"] is False
+    assert result["place"] == "Море"
+    assert result["event_date"] == "2026-11-20"
+
+    facts = (await core_tools.get_facts(db_pool, session_id, key="place"))["facts"]
+    assert facts["place"] == "Море"
+    stored_date = await db_pool.fetchval("SELECT event_date FROM sessions WHERE id = $1", session_id)
+    assert stored_date.isoformat() == "2026-11-20"
+
+
+async def test_sync_chat_info_found_nothing_saves_nothing(db_pool, monkeypatch):
+    session_id = await _new_session(db_pool, chat_id=1)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.return_value = SimpleNamespace(title="Общий чат", description=None)
+    telegram_bot.get_chat_member_count.return_value = 4
+    monkeypatch.setattr(
+        composed.group_info, "extract",
+        AsyncMock(return_value={"activity_type": None, "event_date": None, "place": None}),
+    )
+
+    result = await composed.sync_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result["status"] == "ok"
+    assert result["found_nothing"] is True
+    assert "place" not in result
+    assert "event_date" not in result
+
+    stored_date = await db_pool.fetchval("SELECT event_date FROM sessions WHERE id = $1", session_id)
+    assert stored_date is None
+
+
+async def test_sync_chat_info_unknown_session(db_pool):
+    telegram_bot = AsyncMock()
+
+    result = await composed.sync_chat_info(db_pool, telegram_bot, 999999)
+
+    assert result == {"status": "unknown_session"}
+    telegram_bot.get_chat.assert_not_awaited()
+
+
+async def test_sync_chat_info_unavailable_when_telegram_call_fails(db_pool):
+    session_id = await _new_session(db_pool, chat_id=8)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.side_effect = RuntimeError("Forbidden: bot was kicked")
+
+    result = await composed.sync_chat_info(db_pool, telegram_bot, session_id)
 
     assert result == {"status": "unavailable"}
