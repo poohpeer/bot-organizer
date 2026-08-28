@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from telegram.error import Forbidden
 
 import bot.item_names as item_names
+import bot.quantity as quantity
 import bot.list_render as list_render
 import bot.participant_render as participant_render
 import bot.timezones as timezones
@@ -190,6 +191,18 @@ def _normalize_category(category) -> str:
     return category if category in LIST_CATEGORIES else list_render.DEFAULT_CATEGORY
 
 
+def _as_amount(amount):
+    """A number, or None. The model is asked for one and does not always send
+    one — a bare "штук" or an empty string must leave the item without an
+    amount rather than crash the insert or record a zero nobody said."""
+    if amount is None or amount == "":
+        return None
+    try:
+        return float(amount)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _rendered_list(pool, session_id) -> str:
     """The list as the group should see it, after a change.
 
@@ -204,7 +217,7 @@ async def _rendered_list(pool, session_id) -> str:
     return (await list_show(pool, session_id))["rendered"]
 
 
-async def list_add(pool, session_id, name, quantity=None, category=None) -> dict:
+async def list_add(pool, session_id, name, amount=None, unit=None, category=None) -> dict:
     """Add an item, or report that it is already on the list.
 
     Idempotent on purpose: two people asking for milk, or a model re-adding an
@@ -240,37 +253,50 @@ async def list_add(pool, session_id, name, quantity=None, category=None) -> dict
     # The unique index still keys on lower(name), which only catches an exact
     # repeat. Word-order and leftover-quantity variants have to be found
     # first, or they insert cleanly as a second row for the same thing.
+    value = _as_amount(amount)
     key = item_names.match_key(name)
     rows = await pool.fetch(
-        "SELECT id, name, status, quantity FROM list_items WHERE session_id = $1", session_id
+        "SELECT id, name, status, amount, unit FROM list_items WHERE session_id = $1",
+        session_id,
     )
     twin = next((r for r in rows if item_names.match_key(r["name"]) == key), None)
 
     if twin is None:
         row = await pool.fetchrow(
             """
-            INSERT INTO list_items (session_id, name, quantity, category)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO list_items (session_id, name, amount, unit, category)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (session_id, lower(name)) DO NOTHING
             RETURNING id
             """,
-            session_id, name, quantity, _normalize_category(category),
+            # Keyed off the parsed value, not the raw argument: amount="" is
+            # not None but is not a number either, and storing a unit beside a
+            # NULL amount leaves a row claiming "килограмм" of nothing.
+            session_id, name, value,
+            quantity.normalize_unit(unit) if value is not None else None,
+            _normalize_category(category),
         )
         if row is not None:
             return {"status": "ok", "item_id": row["id"],
                     "rendered": await _rendered_list(pool, session_id)}
 
     existing = twin or await pool.fetchrow(
-        "SELECT id, status, quantity FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
+        "SELECT id, status, amount, unit FROM list_items "
+        "WHERE session_id = $1 AND lower(name) = lower($2)",
         session_id, name,
     )
-    if quantity is not None and existing["quantity"] is None:
-        await pool.execute("UPDATE list_items SET quantity = $2 WHERE id = $1", existing["id"], quantity)
-        return {"status": "updated", "item_id": existing["id"], "quantity": quantity,
+    if value is not None and existing["amount"] is None:
+        await pool.execute(
+            "UPDATE list_items SET amount = $2, unit = $3 WHERE id = $1",
+            existing["id"], value, quantity.normalize_unit(unit),
+        )
+        return {"status": "updated", "item_id": existing["id"],
+                "quantity": quantity.render(value, unit),
                 "rendered": await _rendered_list(pool, session_id)}
 
     return {"status": "already_present", "item_id": existing["id"],
-            "item_status": existing["status"], "quantity": existing["quantity"],
+            "item_status": existing["status"],
+            "quantity": quantity.render(existing["amount"], existing["unit"]),
             "rendered": await _rendered_list(pool, session_id)}
 
 
@@ -279,14 +305,21 @@ async def list_show(pool, session_id) -> dict:
     rendered plain text (what it should actually show — R4)."""
     rows = await pool.fetch(
         """
-        SELECT name, status, quantity, category, claimed_by, claimed_by_user_id
+        SELECT name, status, amount, unit, quantity, category,
+               claimed_by, claimed_by_user_id
         FROM list_items WHERE session_id = $1 ORDER BY created_at
         """,
         session_id,
     )
     items = [
         {
-            "name": r["name"], "status": r["status"], "quantity": r["quantity"],
+            "name": r["name"], "status": r["status"],
+            # One rendered string for both storage shapes. quantity is the
+            # free text rows written before amount/unit still carry; it is
+            # the fallback, never the preference.
+            "quantity": quantity.render(r["amount"], r["unit"]) or r["quantity"],
+            "amount": float(r["amount"]) if r["amount"] is not None else None,
+            "unit": r["unit"],
             "category": r["category"], "claimed_by": r["claimed_by"],
             "claimed_by_user_id": r["claimed_by_user_id"],
         }

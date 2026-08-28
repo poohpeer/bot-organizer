@@ -2,6 +2,8 @@ from typing import Callable
 
 from google.genai import types
 
+from bot.quantity import UNITS as _QUANTITY_UNITS
+
 Type = types.Type
 
 ToolRegistry = dict[str, Callable]
@@ -26,9 +28,11 @@ ALL_TOOLS = types.Tool(function_declarations=[
     _fn("get_facts", "Retrieve previously remembered facts for the session, optionally filtered by key.",
         {"session_id": _S(Type.INTEGER), "key": _S(Type.STRING, "Optional exact key to filter by.")},
         ["session_id"]),
-    _fn("list_add", "Add an item to the session's shared list.",
-        {"session_id": _S(Type.INTEGER), "name": _S(Type.STRING),
-         "quantity": _S(Type.STRING, "How much, in the words used to say it (e.g. 'пару бутылок', 'кг'). Omit if no amount was stated — never invent one."),
+    _fn("list_add", "Add an item to the session's shared list. Split what was said into the thing itself and how much of it: 'два килограмма мяса' is name='мясо', amount=2, unit='килограмм'; 'полкило мяса' is name='мясо', amount=0.5, unit='килограмм'; 'бутылка водки' is name='водка', amount=1, unit='бутылка'; 'бутылка чая' is name='чай', amount=1, unit='бутылка'. A container is always the unit, never part of the name.",
+        {"session_id": _S(Type.INTEGER),
+         "name": _S(Type.STRING, "The thing itself, without the amount, in the nominative case: 'мясо', not 'мяса' or '2 кг мяса'. Keep the group's own wording and language otherwise."),
+         "amount": _S(Type.NUMBER, "How many or how much, as a number. Omit if nobody said — never invent one. Use 1 when a single container was named ('бутылка водки' is amount=1)."),
+         "unit": _S(Type.STRING, "One of: " + ", ".join(_QUANTITY_UNITS) + ". Use 'штука' for a plain count. Required whenever amount is given."),
          "category": _S(Type.STRING, "One of: мясо, молочка, овощи и фрукты, напитки, хлеб и выпечка, бакалея, посуда, прочее.")},
         ["session_id", "name"]),
     _fn("list_show", "Show the current state of the session's shared list.",

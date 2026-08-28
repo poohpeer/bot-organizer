@@ -751,11 +751,13 @@ async def test_reminder_list_non_repeating_has_none_repeat_fields(db_pool):
 async def test_list_add_with_quantity_and_category(db_pool):
     session_id = await _new_session(db_pool)
 
-    result = await core.list_add(db_pool, session_id, "молоко", quantity="2 л", category="молочка")
+    result = await core.list_add(db_pool, session_id, "молоко", amount=2, unit="литр", category="молочка")
 
     assert result["status"] == "ok"
-    row = await db_pool.fetchrow("SELECT quantity, category FROM list_items WHERE id = $1", result["item_id"])
-    assert row["quantity"] == "2 л"
+    row = await db_pool.fetchrow(
+        "SELECT amount, unit, category FROM list_items WHERE id = $1", result["item_id"]
+    )
+    assert (float(row["amount"]), row["unit"]) == (2.0, "литр")
     assert row["category"] == "молочка"
 
 
@@ -776,28 +778,31 @@ async def test_list_add_fills_in_a_blank_quantity(db_pool):
     session_id = await _new_session(db_pool)
     first = await core.list_add(db_pool, session_id, "картошка")
 
-    result = await core.list_add(db_pool, session_id, "картошка", quantity="килограмма два")
+    result = await core.list_add(db_pool, session_id, "картошка", amount=2, unit="килограмм")
 
     assert result["status"] == "updated"
     assert result["item_id"] == first["item_id"]
-    row = await db_pool.fetchrow("SELECT quantity FROM list_items WHERE id = $1", first["item_id"])
-    assert row["quantity"] == "килограмма два"
+    row = await db_pool.fetchrow(
+        "SELECT amount, unit FROM list_items WHERE id = $1", first["item_id"]
+    )
+    assert (float(row["amount"]), row["unit"]) == (2.0, "килограмм")
 
 
 async def test_list_add_never_overwrites_an_existing_quantity(db_pool):
     """Filling in a blank is adding information; overwriting a set value would
     be losing it, so a second stated amount is reported, not silently applied."""
     session_id = await _new_session(db_pool)
-    await core.list_add(db_pool, session_id, "молоко", quantity="2 л")
+    await core.list_add(db_pool, session_id, "молоко", amount=2, unit="литр")
 
-    result = await core.list_add(db_pool, session_id, "молоко", quantity="3 л")
+    result = await core.list_add(db_pool, session_id, "молоко", amount=3, unit="литр")
 
     assert result["status"] == "already_present"
     assert result["quantity"] == "2 л"
     row = await db_pool.fetchrow(
-        "SELECT quantity FROM list_items WHERE session_id = $1 AND lower(name) = 'молоко'", session_id
+        "SELECT amount, unit FROM list_items WHERE session_id = $1 AND lower(name) = 'молоко'",
+        session_id,
     )
-    assert row["quantity"] == "2 л"
+    assert (float(row["amount"]), row["unit"]) == (2.0, "литр"), "the first amount must survive"
 
 
 async def test_list_claim_sets_claimant(db_pool):
@@ -868,11 +873,12 @@ async def test_list_show_includes_the_rendered_text(db_pool):
     """R4: list_show hands back both the raw rows, for the model to reason
     about, and the rendered plain text it should actually show."""
     session_id = await _new_session(db_pool)
-    await core.list_add(db_pool, session_id, "молоко", quantity="2 л", category="молочка")
+    await core.list_add(db_pool, session_id, "молоко", amount=2, unit="литр", category="молочка")
 
     shown = await core.list_show(db_pool, session_id)
 
     assert shown["items"][0]["quantity"] == "2 л"
+    assert (shown["items"][0]["amount"], shown["items"][0]["unit"]) == (2.0, "литр")
     assert shown["items"][0]["category"] == "молочка"
     assert shown["rendered"] == "Ещё не разобрали:\n◻️ молоко, 2 л"
 
@@ -1021,7 +1027,7 @@ async def test_adding_an_item_returns_the_updated_list_as_confirmation(db_pool):
     so it gets relayed rather than paraphrased."""
     session_id = await _new_session(db_pool)
 
-    added = await core.list_add(db_pool, session_id, "мясо", quantity="2 кг")
+    added = await core.list_add(db_pool, session_id, "мясо", amount=2, unit="килограмм")
 
     assert added["status"] == "ok"
     assert "◻️ мясо, 2 кг" in added["rendered"]
@@ -1034,12 +1040,12 @@ async def test_every_list_add_outcome_carries_the_list(db_pool):
     await core.list_add(db_pool, session_id, "пиво")
 
     again = await core.list_add(db_pool, session_id, "пиво")
-    updated = await core.list_add(db_pool, session_id, "пиво", quantity="6 бутылок")
+    updated = await core.list_add(db_pool, session_id, "пиво", amount=6, unit="бутылка")
 
     assert again["status"] == "already_present"
     assert "◻️ пиво" in again["rendered"]
     assert updated["status"] == "updated"
-    assert "◻️ пиво, 6 бутылок" in updated["rendered"]
+    assert "◻️ пиво, 6 бут." in updated["rendered"]
 
 
 async def test_a_refused_participant_name_returns_no_list(db_pool):
@@ -1061,8 +1067,8 @@ async def test_quantity_in_the_name_does_not_create_a_second_row(db_pool):
     "2 кг мяса" ended up as two rows for the same meat."""
     session_id = await _new_session(db_pool)
 
-    first = await core.list_add(db_pool, session_id, "мяса", quantity="2 кг")
-    second = await core.list_add(db_pool, session_id, "2 кг мяса", quantity="2 кг")
+    first = await core.list_add(db_pool, session_id, "мяса", amount=2, unit="килограмм")
+    second = await core.list_add(db_pool, session_id, "2 кг мяса", amount=2, unit="килограмм")
 
     assert first["status"] == "ok"
     assert second["status"] == "already_present"
@@ -1077,8 +1083,8 @@ async def test_the_stored_name_has_no_amount_and_is_nominative(db_pool):
     speak in is not part of the item's identity."""
     session_id = await _new_session(db_pool)
 
-    await core.list_add(db_pool, session_id, "килограмм помидоров", quantity="1 кг")
-    await core.list_add(db_pool, session_id, "2 пачки макарон", quantity="2 пачки")
+    await core.list_add(db_pool, session_id, "килограмм помидоров", amount=1, unit="килограмм")
+    await core.list_add(db_pool, session_id, "2 пачки макарон", amount=2, unit="пачка")
 
     stored = [r["name"] for r in await db_pool.fetch(
         "SELECT name FROM list_items WHERE session_id = $1 ORDER BY id", session_id
@@ -1090,7 +1096,7 @@ async def test_the_same_item_in_another_case_is_not_added_twice(db_pool):
     """"Добавь мяса" then "добавь мясо" is one item, not two."""
     session_id = await _new_session(db_pool)
 
-    await core.list_add(db_pool, session_id, "мяса", quantity="2 кг")
+    await core.list_add(db_pool, session_id, "мяса", amount=2, unit="килограмм")
     again = await core.list_add(db_pool, session_id, "мясо")
 
     assert again["status"] == "already_present"
@@ -1138,7 +1144,7 @@ async def test_checking_off_finds_the_item_despite_the_amount(db_pool):
     """list_add stores "мяса"; someone then says they got "2 кг мяса". An
     exact-name lookup would call that item absent and invite a duplicate."""
     session_id = await _new_session(db_pool)
-    await core.list_add(db_pool, session_id, "мяса", quantity="2 кг")
+    await core.list_add(db_pool, session_id, "мяса", amount=2, unit="килограмм")
 
     result = await core.list_check_off(db_pool, session_id, "2 кг мяса")
 
@@ -1152,3 +1158,47 @@ async def test_claiming_finds_the_item_despite_word_order(db_pool):
     result = await core.list_claim(db_pool, session_id, "вино красное", claimed_by="Alex")
 
     assert result["status"] == "ok"
+
+
+async def test_the_same_amount_said_three_ways_reads_the_same(db_pool):
+    """The point of the split. The free-text quantity column stored "2 кг",
+    "одну бутылку" and "полкило" exactly as spoken, so one list showed three
+    different shapes for the same kind of information."""
+    session_id = await _new_session(db_pool)
+
+    await core.list_add(db_pool, session_id, "мясо", amount=0.5, unit="килограмм")
+    await core.list_add(db_pool, session_id, "чай", amount=1, unit="бутылка")
+    await core.list_add(db_pool, session_id, "помидоры", amount=2, unit="килограмм")
+
+    rendered = (await core.list_show(db_pool, session_id))["rendered"]
+
+    assert rendered == (
+        "Ещё не разобрали:\n"
+        "◻️ мясо, 0.5 кг\n"
+        "◻️ помидоры, 2 кг\n"
+        "◻️ чай, 1 бут."
+    )
+
+
+async def test_an_item_with_no_amount_stays_bare(db_pool):
+    """Nobody said how much, so nothing is shown — not a "1 штука" the list
+    invented."""
+    session_id = await _new_session(db_pool)
+
+    await core.list_add(db_pool, session_id, "пиво")
+
+    assert (await core.list_show(db_pool, session_id))["rendered"] == "Ещё не разобрали:\n◻️ пиво"
+
+
+async def test_an_unparseable_amount_leaves_the_item_bare(db_pool):
+    """The model is asked for a number and does not always send one. A bare
+    unit or an empty string must not crash the insert or record a zero."""
+    session_id = await _new_session(db_pool)
+
+    added = await core.list_add(db_pool, session_id, "хлеб", amount="", unit="штука")
+
+    assert added["status"] == "ok"
+    row = await db_pool.fetchrow(
+        "SELECT amount, unit FROM list_items WHERE id = $1", added["item_id"]
+    )
+    assert (row["amount"], row["unit"]) == (None, None)
