@@ -95,6 +95,7 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
     # reflects the freshest state, and it is the last thing the model itself
     # chose to go and fetch.
     verbatim = None
+    previous_request = None
 
     for turn in range(1, MAX_TOOL_ITERATIONS + 1):
         if not reply.tool_calls:
@@ -104,6 +105,18 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
 
         log.debug("tool loop turn %d: model requested %s",
                   turn, ", ".join(c.name for c in reply.tool_calls))
+
+        # A model that asks for the same thing it just asked for is not making
+        # progress. Live, after adding three items it called event_status four
+        # times in a row with identical arguments, burned the turn limit and
+        # spent ~15s doing it, while every call returned the same report. Stop
+        # at the repeat and answer with what came back.
+        requested = [(call.name, call.args or {}) for call in reply.tool_calls]
+        if requested == previous_request and verbatim:
+            log.warning("Model repeated %s with the same arguments; answering with the result",
+                        ", ".join(name for name, _ in requested))
+            return verbatim
+        previous_request = requested
         results = [(call, await _call_tool(registry, call)) for call in reply.tool_calls]
         for _call, result in results:
             verbatim = _verbatim_block(result) or verbatim

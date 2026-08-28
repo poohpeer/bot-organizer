@@ -75,3 +75,37 @@ def test_different_items_keep_different_keys():
 def test_a_name_that_is_not_a_string_is_returned_unchanged():
     assert item_names.canonical(None) is None
     assert item_names.canonical("") == ""
+
+
+def test_an_amount_spoken_in_any_case_still_leaves_the_name():
+    """Live: "одну бутылку чая" kept every word and the list gained an item
+    called "одна бутылка чай". The word lists are written in the nominative,
+    so an amount spoken in the accusative slipped straight past them —
+    canonical() normalises before stripping for exactly this reason."""
+    assert item_names.canonical("одну бутылку чая") == "чай"
+    assert item_names.canonical("две пачки чипсов") == "чипсы"
+    assert item_names.canonical("пару бутылок вина") == "вино"
+    assert item_names.canonical("пиццу") == "пицца"
+
+
+def test_an_amount_in_the_plural_still_leaves_the_name():
+    """Normalising first turns "килограмм" into the plural "килограммы",
+    a form nobody thought to list. The lemma of both is "килограмм", which is
+    why membership is tested against that."""
+    assert item_names.canonical("килограмм помидоров") == "помидоры"
+    assert item_names.canonical("пол-литра молока") == "молоко"
+    assert item_names.canonical("полтора кг мяса") == "мясо"
+
+
+def test_the_two_steps_commute():
+    """The lemma check, not the ordering, is what makes case forms work. Worth
+    pinning: a future reader who swaps these to save an analyzer call should
+    find out here that it is safe, rather than guessing from a comment."""
+    cases = [
+        "одну бутылку чая", "2 кг мяса", "килограмм помидоров",
+        "2 пачки макарон", "пару бутылок вина", "пол-литра молока",
+        "бутылка", "огурцы", "красного вина",
+    ]
+    for name in cases:
+        assert (item_names.strip_quantity(item_names.to_nominative(name))
+                == item_names.to_nominative(item_names.strip_quantity(name))), name

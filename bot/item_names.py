@@ -32,6 +32,9 @@ _QUANTITY_WORDS = frozenset({
 _NUMERAL_WORDS = frozenset({
     "один", "одна", "одно", "два", "две", "три", "четыре", "пять", "шесть",
     "семь", "восемь", "девять", "десять", "несколько", "пол", "полкило",
+    # Hyphenated half-measures the analyzer does not reduce to anything in
+    # the list above.
+    "пол-литра", "поллитра", "пол-кило", "полкило", "полтора", "полторы",
 })
 
 _CYRILLIC = re.compile(r"[а-яё]", re.IGNORECASE)
@@ -54,6 +57,32 @@ def _bare(token: str) -> str:
     return token.strip(".,;:!?()\"'")
 
 
+def _is_amount(word: str) -> bool:
+    """Whether a word is about how much, rather than about what.
+
+    Checks the lemma as well as the word itself. canonical() normalises
+    before stripping, which turns "бутылку" into "бутылка" and catches it —
+    but it also turns "килограмм" into the plural "килограммы", which is a
+    form nobody thought to list. The lemma of both is "килограмм", so asking
+    for that instead of enumerating every number and case is what makes the
+    list finite.
+    """
+    if not word:
+        return False
+    lowered = word.lower()
+    if lowered in _QUANTITY_WORDS or lowered in _NUMERAL_WORDS:
+        return True
+    if lowered.replace(",", ".").replace(".", "").isdigit():
+        return True
+    if not _CYRILLIC.search(lowered):
+        return False
+    parsed = _analyzer().parse(lowered)
+    if not parsed:
+        return False
+    lemma = parsed[0].normal_form
+    return lemma in _QUANTITY_WORDS or lemma in _NUMERAL_WORDS
+
+
 def strip_quantity(name: str) -> str:
     """Drop quantity words from an item name.
 
@@ -65,12 +94,7 @@ def strip_quantity(name: str) -> str:
     """
     if not isinstance(name, str):
         return name
-    kept = [
-        token for token in name.split()
-        if _bare(token).lower() not in _QUANTITY_WORDS
-        and _bare(token).lower() not in _NUMERAL_WORDS
-        and not _bare(token).replace(",", ".").replace(".", "").isdigit()
-    ]
+    kept = [token for token in name.split() if not _is_amount(_bare(token))]
     # Never leave nothing behind: a group asking for "бутылка" gets a bottle,
     # not a row called "".
     return " ".join(kept).strip() if kept else name.strip()
@@ -117,8 +141,17 @@ def to_nominative(name: str) -> str:
 
 
 def canonical(name: str) -> str:
-    """The name an item is stored under: no quantity, nominative case."""
-    return to_nominative(strip_quantity(name))
+    """The name an item is stored under: nominative case, no quantity.
+
+    Live, "одну бутылку чая" kept every word and the list gained an item
+    called "одна бутылка чай": the word lists are written in the nominative,
+    so "одну" and "бутылку" walked straight past them. What fixes that is
+    _is_amount checking each word's lemma, not the order of the two steps —
+    verified by running both orders over every case in tests/test_item_names.py
+    and getting identical output. Normalising first is kept because it leaves
+    _is_amount on its fast path for most words.
+    """
+    return strip_quantity(to_nominative(name))
 
 
 def match_key(name: str) -> str:
