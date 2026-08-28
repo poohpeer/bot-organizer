@@ -299,7 +299,7 @@ async def test_archive_lookup_unknown_session(db_pool):
 def test_build_composed_registry_covers_every_composed_tool(db_pool):
     registry = composed.build_composed_registry(db_pool, AsyncMock())
 
-    assert set(registry) == {"resolve_and_save_place", "send_location", "archive_lookup"}
+    assert set(registry) == {"resolve_and_save_place", "send_location", "archive_lookup", "event_status"}
 
 
 def test_declared_parameters_match_the_bound_signatures(db_pool):
@@ -316,3 +316,57 @@ def test_declared_parameters_match_the_bound_signatures(db_pool):
     for name, tool in registry.items():
         bound = set(inspect.signature(tool).parameters)
         assert bound == declared[name], f"{name}: declared {declared[name]}, accepts {bound}"
+
+
+async def test_event_status_matches_the_exact_reported_scenario(db_pool):
+    """End to end against a real database, reproducing the live scenario that
+    prompted this tool: the model's own free-composed report had missing
+    emoji, no reminders section, and place/date folded into one line."""
+    import bot.tools.core as core_tools
+
+    session_id = await db_pool.fetchval(
+        "INSERT INTO chats (chat_id, title) VALUES (1, 'Chat') RETURNING chat_id"
+    ) and await db_pool.fetchval(
+        "INSERT INTO sessions (chat_id, activity_type, event_date) VALUES (1, 'picnic', '2026-11-20') RETURNING id"
+    )
+    await core_tools.remember_fact(db_pool, session_id, "place", "Tel Aviv, sea")
+    await core_tools.set_participant(db_pool, session_id, "Витька", "unknown", user_id=2)
+    await core_tools.set_participant(db_pool, session_id, "Андрюха", "confirmed", user_id=1)
+    await core_tools.set_participant(db_pool, session_id, "Alex", "unknown", user_id=3)
+    await core_tools.list_add(db_pool, session_id, "пиво")
+    await core_tools.list_add(db_pool, session_id, "арбуз")
+    await core_tools.list_claim(db_pool, session_id, "арбуз", claimed_by="Alex")
+
+    result = await composed.event_status(db_pool, session_id)
+
+    assert result["status"] == "ok"
+    assert result["report"] == (
+        "Вот текущая информация по организации встречи:\n\n"
+        "📍 Место: Tel Aviv, sea\n"
+        "📅 Дата: 20/11\n\n"
+        "👥 Участники:\n"
+        "◻️ Витька\n✅ Андрюха\n◻️ Alex\n\n"
+        "🛒 Список покупок / вещей:\n\n"
+        "Ещё не разобрали:\n◻️ пиво\n\n"
+        "Уже взяли:\n✅ арбуз — Alex\n\n"
+        "⏰ Напоминания:\n"
+        "Нет запланированных напоминаний"
+    )
+
+
+async def test_event_status_unknown_session(db_pool):
+    result = await composed.event_status(db_pool, 999999)
+
+    assert result == {"status": "unknown_session"}
+
+
+async def test_event_status_with_nothing_recorded_yet(db_pool):
+    session_id = await _new_session(db_pool)
+
+    result = await composed.event_status(db_pool, session_id)
+
+    assert result["status"] == "ok"
+    assert "📍" not in result["report"]
+    assert "Пока никого не записал." in result["report"]
+    assert "Список пока пуст." in result["report"]
+    assert "Нет запланированных напоминаний" in result["report"]

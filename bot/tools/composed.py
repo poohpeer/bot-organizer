@@ -2,6 +2,8 @@ import functools
 from datetime import date
 
 import bot.timezones as timezones
+import bot.tools.core as core_tools
+import bot.status_render as status_render
 from bot.tools.external import maps_lookup
 
 _HALF_LIFE_DAYS = 180
@@ -143,9 +145,37 @@ async def archive_lookup(pool, session_id, activity_type) -> dict:
     return {"pattern": "tied", "places": tied}
 
 
+async def event_status(pool, session_id) -> dict:
+    """The whole "как дела с организацией" report, as one fixed block of
+    text (report), built once here rather than reassembled by the model on
+    every reply. Requested live after the model's own free-composed version
+    drifted from the desired format across several replies — headers
+    missing, place and date folded together, no reminders section at all.
+    """
+    session_row = await _session_row(pool, session_id, columns="event_date")
+    if session_row is None:
+        return {"status": "unknown_session"}
+
+    facts = (await core_tools.get_facts(pool, session_id, key="place"))["facts"]
+    participants = await core_tools.get_participants(pool, session_id)
+    listing = await core_tools.list_show(pool, session_id)
+    reminders = await core_tools.reminder_list(pool, session_id)
+
+    event_date = session_row["event_date"].strftime("%d/%m") if session_row["event_date"] else None
+    report = status_render.render_status(
+        place=facts.get("place"),
+        event_date=event_date,
+        participants_rendered=participants["rendered"],
+        list_rendered=listing["rendered"],
+        reminders_rendered=status_render.render_reminders(reminders["reminders"]),
+    )
+    return {"status": "ok", "report": report}
+
+
 def build_composed_registry(pool, telegram_bot) -> dict:
     return {
         "resolve_and_save_place": functools.partial(resolve_and_save_place, pool),
         "send_location": functools.partial(send_location, pool, telegram_bot),
         "archive_lookup": functools.partial(archive_lookup, pool),
+        "event_status": functools.partial(event_status, pool),
     }
