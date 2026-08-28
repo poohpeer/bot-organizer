@@ -1053,3 +1053,76 @@ async def test_a_refused_participant_name_returns_no_list(db_pool):
 
     assert refused["status"] == "looks_like_a_participant"
     assert "rendered" not in refused
+
+
+async def test_quantity_in_the_name_does_not_create_a_second_row(db_pool):
+    """The live duplicate. One message reached both the silent-capture and the
+    addressed path; each extracted the amount differently, so "мяса, 2 кг" and
+    "2 кг мяса" ended up as two rows for the same meat."""
+    session_id = await _new_session(db_pool)
+
+    first = await core.list_add(db_pool, session_id, "мяса", quantity="2 кг")
+    second = await core.list_add(db_pool, session_id, "2 кг мяса", quantity="2 кг")
+
+    assert first["status"] == "ok"
+    assert second["status"] == "already_present"
+    rows = await db_pool.fetchval(
+        "SELECT count(*) FROM list_items WHERE session_id = $1", session_id
+    )
+    assert rows == 1
+
+
+async def test_the_amount_is_stripped_from_the_stored_name(db_pool):
+    """The amount already has its own column; repeating it in the name is what
+    made the two spellings differ in the first place."""
+    session_id = await _new_session(db_pool)
+
+    await core.list_add(db_pool, session_id, "килограмм помидоров", quantity="1 кг")
+
+    stored = await db_pool.fetchval(
+        "SELECT name FROM list_items WHERE session_id = $1", session_id
+    )
+    assert stored == "помидоров"
+
+
+async def test_word_order_alone_does_not_create_a_second_row(db_pool):
+    session_id = await _new_session(db_pool)
+
+    await core.list_add(db_pool, session_id, "красное вино")
+    again = await core.list_add(db_pool, session_id, "вино красное")
+
+    assert again["status"] == "already_present"
+
+
+async def test_an_item_actually_called_a_quantity_word_survives(db_pool):
+    """Stripping must never empty a name: a group asking for "бутылка" gets a
+    bottle, not a row called ""."""
+    session_id = await _new_session(db_pool)
+
+    added = await core.list_add(db_pool, session_id, "бутылка")
+
+    assert added["status"] == "ok"
+    stored = await db_pool.fetchval(
+        "SELECT name FROM list_items WHERE session_id = $1", session_id
+    )
+    assert stored == "бутылка"
+
+
+async def test_checking_off_finds_the_item_despite_the_amount(db_pool):
+    """list_add stores "мяса"; someone then says they got "2 кг мяса". An
+    exact-name lookup would call that item absent and invite a duplicate."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "мяса", quantity="2 кг")
+
+    result = await core.list_check_off(db_pool, session_id, "2 кг мяса")
+
+    assert result["status"] == "ok"
+
+
+async def test_claiming_finds_the_item_despite_word_order(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "красное вино")
+
+    result = await core.list_claim(db_pool, session_id, "вино красное", claimed_by="Alex")
+
+    assert result["status"] == "ok"

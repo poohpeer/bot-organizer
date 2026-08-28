@@ -189,6 +189,66 @@ def _normalize_category(category) -> str:
     return category if category in LIST_CATEGORIES else list_render.DEFAULT_CATEGORY
 
 
+# Quantity words the model routinely leaves glued to the item name. Only
+# units and bare numerals — never a word that could be the item itself, which
+# is why "бутылка" is here but "вода" is not: "бутылка воды" is water, while
+# a lone "бутылка" the group actually wants is not something this list needs
+# to distinguish.
+_QUANTITY_WORDS = frozenset({
+    "кг", "килограмм", "килограмма", "килограммов", "г", "гр", "грамм",
+    "грамма", "граммов", "л", "литр", "литра", "литров", "мл",
+    "шт", "штук", "штуки", "штука", "пачка", "пачки", "пачек",
+    "бутылка", "бутылки", "бутылок", "банка", "банки", "банок",
+    "упаковка", "упаковки", "пара", "пары", "пару", "коробка", "коробки",
+})
+
+_NUMERAL_WORDS = frozenset({
+    "один", "одна", "одно", "два", "две", "три", "четыре", "пять", "шесть",
+    "семь", "восемь", "девять", "десять", "несколько", "пол", "полкило",
+})
+
+
+def _strip_quantity(name: str) -> str:
+    """Drop quantity words from an item name.
+
+    The model puts the amount in both places: list_add(name="2 кг мяса",
+    quantity="2 кг"). Left alone that is a different string from the same
+    item added as "мяса", so the two sit in the list as separate rows —
+    exactly what happened live when one message reached both the
+    silent-capture and the addressed path.
+
+    Deliberately not morphology. This project's rule is to keep item names
+    as the group wrote them (see the instruction in bot/router.py): a
+    normalizer that rewrites "огурцы" would break check-off matching, which
+    is a worse bug than an awkward genitive. This only removes tokens that
+    are unambiguously about *how much*, and never the last remaining word,
+    so an item genuinely called "бутылка" survives.
+    """
+    if not isinstance(name, str):
+        return name
+    tokens = name.split()
+    kept = [
+        t for t in tokens
+        if t.strip(".,").lower() not in _QUANTITY_WORDS
+        and t.strip(".,").lower() not in _NUMERAL_WORDS
+        and not t.strip(".,").replace(",", ".").replace(".", "").isdigit()
+    ]
+    if not kept:
+        return name.strip()
+    return " ".join(kept).strip()
+
+
+def _match_key(name: str) -> str:
+    """What makes two item names the same item.
+
+    Case- and order-insensitive over the words that are left once quantity is
+    gone, so "2 кг мяса" and "мяса, 2 кг" collide instead of becoming two
+    rows.
+    """
+    stripped = _strip_quantity(name or "")
+    return " ".join(sorted(w.strip(".,").lower() for w in stripped.split() if w.strip(".,")))
+
+
 async def _rendered_list(pool, session_id) -> str:
     """The list as the group should see it, after a change.
 
@@ -231,19 +291,34 @@ async def list_add(pool, session_id, name, quantity=None, category=None) -> dict
     if person is not None:
         return {"status": "looks_like_a_participant", "detail": person}
 
-    row = await pool.fetchrow(
-        """
-        INSERT INTO list_items (session_id, name, quantity, category)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (session_id, lower(name)) DO NOTHING
-        RETURNING id
-        """,
-        session_id, name, quantity, _normalize_category(category),
-    )
-    if row is not None:
-        return {"status": "ok", "item_id": row["id"], "rendered": await _rendered_list(pool, session_id)}
+    # The amount is already its own column, so carrying it in the name too
+    # makes "2 кг мяса" a different item from "мяса" — see _strip_quantity.
+    name = _strip_quantity(name)
 
-    existing = await pool.fetchrow(
+    # The unique index still keys on lower(name), which only catches an exact
+    # repeat. Word-order and leftover-quantity variants have to be found
+    # first, or they insert cleanly as a second row for the same thing.
+    key = _match_key(name)
+    rows = await pool.fetch(
+        "SELECT id, name, status, quantity FROM list_items WHERE session_id = $1", session_id
+    )
+    twin = next((r for r in rows if _match_key(r["name"]) == key), None)
+
+    if twin is None:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO list_items (session_id, name, quantity, category)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (session_id, lower(name)) DO NOTHING
+            RETURNING id
+            """,
+            session_id, name, quantity, _normalize_category(category),
+        )
+        if row is not None:
+            return {"status": "ok", "item_id": row["id"],
+                    "rendered": await _rendered_list(pool, session_id)}
+
+    existing = twin or await pool.fetchrow(
         "SELECT id, status, quantity FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
         session_id, name,
     )
@@ -278,7 +353,29 @@ async def list_show(pool, session_id) -> dict:
     return {"items": items, "rendered": list_render.render(items)}
 
 
+async def _resolve_item_name(pool, session_id, name) -> str:
+    """The stored name for what the caller means, or the name as given.
+
+    list_add strips quantity words from what it stores, so a later "взял 2 кг
+    мяса" would not match the row it created as "мяса" — an exact-name lookup
+    would report the item as absent and invite a duplicate. Falls back to the
+    same word-set comparison list_add dedupes on, and returns the input
+    unchanged when nothing matches so the caller's own not_found handling
+    still runs.
+    """
+    rows = await pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1", session_id
+    )
+    for row in rows:
+        if row["name"].lower() == (name or "").lower():
+            return row["name"]
+    key = _match_key(name)
+    twin = next((r for r in rows if _match_key(r["name"]) == key), None)
+    return twin["name"] if twin else name
+
+
 async def list_check_off(pool, session_id, name) -> dict:
+    name = await _resolve_item_name(pool, session_id, name)
     row = await pool.fetchrow(
         """
         UPDATE list_items SET status = 'checked', checked_at = now()
@@ -312,6 +409,7 @@ async def list_claim(pool, session_id, name, claimed_by, claimed_by_user_id=None
     """Record who is bringing an item, matched by name the same way
     list_check_off is — case-insensitively, with the real names handed back on
     a miss so a model that mismatches a name has something to retry with."""
+    name = await _resolve_item_name(pool, session_id, name)
     row = await pool.fetchrow(
         """
         UPDATE list_items SET claimed_by = $3, claimed_by_user_id = $4
@@ -330,6 +428,7 @@ async def list_unclaim(pool, session_id, name) -> dict:
     """Clear a claim: the item goes back among the unclaimed (R4's third
     criterion), which the sort in bot.list_render turns into moving it back to
     the top of the table."""
+    name = await _resolve_item_name(pool, session_id, name)
     row = await pool.fetchrow(
         """
         UPDATE list_items SET claimed_by = NULL, claimed_by_user_id = NULL
@@ -345,6 +444,7 @@ async def list_unclaim(pool, session_id, name) -> dict:
 
 
 async def list_remove_item(pool, session_id, name) -> dict:
+    name = await _resolve_item_name(pool, session_id, name)
     session_row = await _session_row(pool, session_id)
     if session_row is None:
         return {"status": "unknown_session"}
