@@ -1248,3 +1248,48 @@ async def test_a_crate_becomes_an_amount(db_pool):
 
     assert added["status"] == "ok"
     assert "◻️ вино, 1 ящ." in added["rendered"]
+
+
+async def test_two_older_spellings_are_merged_not_collided(db_pool):
+    """Reproduced live and it crashed. A list held "банан" and "бананы" from
+    before matching was by lemma; mentioning bananas found the first, tried to
+    rename it to "бананы", and hit
+    UniqueViolationError: duplicate key value violates constraint
+    "one_item_name_per_session".
+    """
+    session_id = await _new_session(db_pool)
+    await db_pool.execute(
+        "INSERT INTO list_items (session_id, name, amount, unit) "
+        "VALUES ($1, 'банан', 1, 'килограмм'), ($1, 'бананы', NULL, NULL)",
+        session_id,
+    )
+
+    result = await core.list_add(db_pool, session_id, "бананы")
+
+    assert result["status"] in {"ok", "updated", "already_present"}
+    names = [r["name"] for r in await db_pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1", session_id
+    )]
+    assert names == ["бананы"]
+
+
+async def test_merging_keeps_what_the_other_row_knew(db_pool):
+    """The surviving row is whichever already had the canonical name, which
+    is not necessarily the one carrying the amount or the claim. Dropping
+    those would lose something a person actually said."""
+    session_id = await _new_session(db_pool)
+    await db_pool.execute(
+        "INSERT INTO list_items (session_id, name, amount, unit, claimed_by) "
+        "VALUES ($1, 'банан', 2, 'килограмм', 'Alex'), ($1, 'бананы', NULL, NULL, NULL)",
+        session_id,
+    )
+
+    result = await core.list_add(db_pool, session_id, "бананы")
+
+    assert "◻️" not in result["rendered"], "a claimed item should render as taken"
+    row = await db_pool.fetchrow(
+        "SELECT name, amount, unit, claimed_by FROM list_items WHERE session_id = $1", session_id
+    )
+    assert (row["name"], float(row["amount"]), row["unit"], row["claimed_by"]) == (
+        "бананы", 2.0, "килограмм", "Alex",
+    )

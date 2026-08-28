@@ -259,7 +259,15 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
         "SELECT id, name, status, amount, unit FROM list_items WHERE session_id = $1",
         session_id,
     )
-    twin = next((r for r in rows if item_names.match_key(r["name"]) == key), None)
+    matching = [r for r in rows if item_names.match_key(r["name"]) == key]
+    # Prefer a row already under the canonical name. Without this the first
+    # match wins, and renaming it below collides with the row that already
+    # holds that name — a UniqueViolationError out of list_add, reproduced
+    # live on a list holding both "банан" and "бананы" from before matching
+    # was by lemma.
+    twin = next((r for r in matching if r["name"] == name), None) or (
+        matching[0] if matching else None
+    )
 
     if twin is None:
         row = await pool.fetchrow(
@@ -280,15 +288,42 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
             return {"status": "ok", "item_id": row["id"],
                     "rendered": await _rendered_list(pool, session_id)}
 
-    if twin is not None and twin["name"] != name:
-        # The same item under an older spelling. Rows written before names
-        # were canonicalised keep whatever reached them — one live list had
-        # "одна бутылка чай", which matches "чай" by key but reads as
-        # nonsense — and nothing else would ever repair them. Renaming on
-        # the next mention is safe: the key matched, so this is the same
-        # item, and the new name is derived from what someone just said.
-        await pool.execute(
-            "UPDATE list_items SET name = $2 WHERE id = $1", twin["id"], name
+    if twin is not None:
+        # Everything else that matched is the same item under another
+        # spelling — rows written before names were canonicalised, or before
+        # matching was by lemma. Fold them into the twin rather than leaving
+        # the list showing one thing twice, carrying over an amount or a
+        # claim the surviving row does not have so merging never loses what
+        # someone said.
+        for other in matching:
+            if other["id"] == twin["id"]:
+                continue
+            await pool.execute(
+                """
+                UPDATE list_items AS keep SET
+                    amount = COALESCE(keep.amount, drop_row.amount),
+                    unit = COALESCE(keep.unit, drop_row.unit),
+                    quantity = COALESCE(keep.quantity, drop_row.quantity),
+                    claimed_by = COALESCE(keep.claimed_by, drop_row.claimed_by),
+                    claimed_by_user_id = COALESCE(keep.claimed_by_user_id,
+                                                  drop_row.claimed_by_user_id)
+                FROM list_items AS drop_row
+                WHERE keep.id = $1 AND drop_row.id = $2
+                """,
+                twin["id"], other["id"],
+            )
+            await pool.execute("DELETE FROM list_items WHERE id = $1", other["id"])
+
+        if twin["name"] != name:
+            # The surviving row still carries the older spelling — one live
+            # list had "одна бутылка чай", which matches "чай" by key but
+            # reads as nonsense. The key matched, so this is the same item,
+            # and the new name is derived from what someone just said.
+            await pool.execute(
+                "UPDATE list_items SET name = $2 WHERE id = $1", twin["id"], name
+            )
+        twin = await pool.fetchrow(
+            "SELECT id, name, status, amount, unit FROM list_items WHERE id = $1", twin["id"]
         )
 
     existing = twin or await pool.fetchrow(
