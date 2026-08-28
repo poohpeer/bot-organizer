@@ -146,6 +146,31 @@ async def archive_lookup(pool, session_id, activity_type) -> dict:
     return {"pattern": "tied", "places": tied}
 
 
+async def _current_place(pool, session_id) -> str | None:
+    """Where the event is, from whichever store actually knows.
+
+    Two stores hold this and they disagree in practice. `places` is the
+    canonical one — resolve_and_save_place writes a maps-resolved name and
+    address there — while the facts table holds whatever the model chose to
+    write. event_status used to read only the fact, under the exact key
+    "place", and in one real session nothing ever wrote that key: the model
+    picked "destination", then "event_name", so the 📍 line stayed blank for
+    the session's whole life while `places` held two resolved addresses.
+
+    The fact wins when present, because someone stating a place in
+    conversation is more current than an older lookup; `places` is the
+    fallback, most recently resolved first.
+    """
+    fact = (await core_tools.get_facts(pool, session_id, key="place"))["facts"].get("place")
+    if fact:
+        return fact
+    row = await pool.fetchrow(
+        "SELECT name FROM places WHERE session_id = $1 ORDER BY resolved_at DESC LIMIT 1",
+        session_id,
+    )
+    return row["name"] if row else None
+
+
 async def event_status(pool, session_id) -> dict:
     """The whole "как дела с организацией" report, as one fixed block of
     text (report), built once here rather than reassembled by the model on
@@ -157,14 +182,14 @@ async def event_status(pool, session_id) -> dict:
     if session_row is None:
         return {"status": "unknown_session"}
 
-    facts = (await core_tools.get_facts(pool, session_id, key="place"))["facts"]
+    place = await _current_place(pool, session_id)
     participants = await core_tools.get_participants(pool, session_id)
     listing = await core_tools.list_show(pool, session_id)
     reminders = await core_tools.reminder_list(pool, session_id)
 
     event_date = session_row["event_date"].strftime("%d/%m") if session_row["event_date"] else None
     report = status_render.render_status(
-        place=facts.get("place"),
+        place=place,
         event_date=event_date,
         participants_rendered=participants["rendered"],
         list_rendered=listing["rendered"],

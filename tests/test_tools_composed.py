@@ -506,3 +506,47 @@ async def test_sync_chat_info_unavailable_when_telegram_call_fails(db_pool):
     result = await composed.sync_chat_info(db_pool, telegram_bot, session_id)
 
     assert result == {"status": "unavailable"}
+
+
+async def test_event_status_falls_back_to_the_resolved_place(db_pool):
+    """The live gap: event_status read only facts['place'], and in one real
+    session nothing ever wrote that key — the model chose "destination", then
+    "event_name" — so the 📍 line was blank for the session's whole life while
+    the places table held two maps-resolved addresses."""
+    session_id = await _new_session(db_pool, chat_id=55)
+    await db_pool.execute(
+        "INSERT INTO places (session_id, name, address, lat, lon, query) "
+        "VALUES ($1, 'Tel Aviv Beach', 'Promenade', 32.0, 34.7, 'Tel Aviv, sea')",
+        session_id,
+    )
+
+    result = await composed.event_status(db_pool, session_id)
+
+    assert "📍 Место: Tel Aviv Beach" in result["report"]
+
+
+async def test_a_stated_place_beats_an_older_lookup(db_pool):
+    """Someone naming a place in conversation is more current than a lookup
+    done earlier in the session."""
+    import bot.tools.core as core_tools
+
+    session_id = await _new_session(db_pool, chat_id=56)
+    await db_pool.execute(
+        "INSERT INTO places (session_id, name, address, lat, lon, query) "
+        "VALUES ($1, 'Old Spot', 'somewhere', 32.0, 34.7, 'old')",
+        session_id,
+    )
+    await core_tools.remember_fact(db_pool, session_id, "destination", "Море")
+
+    result = await composed.event_status(db_pool, session_id)
+
+    assert "📍 Место: Море" in result["report"]
+    assert "Old Spot" not in result["report"]
+
+
+async def test_no_place_anywhere_omits_the_line(db_pool):
+    session_id = await _new_session(db_pool, chat_id=57)
+
+    result = await composed.event_status(db_pool, session_id)
+
+    assert "📍" not in result["report"]

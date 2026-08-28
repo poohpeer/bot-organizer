@@ -15,33 +15,37 @@ async def _new_session(db_pool, chat_id=1, tz=None):
     return row["id"]
 
 
+# "destination" would be the natural example here, but it is a place synonym
+# and remember_fact folds those onto "place" — see
+# test_place_synonyms_are_stored_under_the_canonical_key. These three test
+# generic fact storage, so they use a key with no such reader.
 async def test_remember_and_get_fact(db_pool):
     session_id = await _new_session(db_pool)
 
-    await core.remember_fact(db_pool, session_id, "destination", "Hanania meadow")
-    facts = await core.get_facts(db_pool, session_id, key="destination")
+    await core.remember_fact(db_pool, session_id, "activity", "Hanania meadow")
+    facts = await core.get_facts(db_pool, session_id, key="activity")
 
-    assert facts["facts"]["destination"] == "Hanania meadow"
+    assert facts["facts"]["activity"] == "Hanania meadow"
 
 
 async def test_get_facts_returns_latest_value_when_updated(db_pool):
     session_id = await _new_session(db_pool)
 
-    await core.remember_fact(db_pool, session_id, "destination", "First place")
-    await core.remember_fact(db_pool, session_id, "destination", "Second place")
-    facts = await core.get_facts(db_pool, session_id, key="destination")
+    await core.remember_fact(db_pool, session_id, "activity", "First place")
+    await core.remember_fact(db_pool, session_id, "activity", "Second place")
+    facts = await core.get_facts(db_pool, session_id, key="activity")
 
-    assert facts["facts"]["destination"] == "Second place"
+    assert facts["facts"]["activity"] == "Second place"
 
 
 async def test_get_facts_without_key_returns_all_latest(db_pool):
     session_id = await _new_session(db_pool)
 
-    await core.remember_fact(db_pool, session_id, "destination", "Hanania meadow")
+    await core.remember_fact(db_pool, session_id, "activity", "Hanania meadow")
     await core.remember_fact(db_pool, session_id, "headcount", "12")
     facts = await core.get_facts(db_pool, session_id)
 
-    assert facts["facts"] == {"destination": "Hanania meadow", "headcount": "12"}
+    assert facts["facts"] == {"activity": "Hanania meadow", "headcount": "12"}
 
 
 async def test_get_facts_missing_key_returns_empty(db_pool):
@@ -977,3 +981,33 @@ async def test_participant_icon_updates_live_when_status_changes(db_pool):
 
     assert before == "◻️ Витька"
     assert after == "✅ Витька"
+
+
+async def test_place_synonyms_are_stored_under_the_canonical_key(db_pool):
+    """The live failure: event_status reads facts under the exact key "place",
+    but remember_fact takes any key the model invents. In one real session it
+    chose "destination", then "event_name" — so nothing ever wrote "place" and
+    the 📍 line stayed blank for the session's whole life while the answer sat
+    in the table under another name.
+    """
+    session_id = await _new_session(db_pool)
+
+    for key in ("destination", "event_name", "location", "Место", "МЕСТО_ВСТРЕЧИ"):
+        result = await core.remember_fact(db_pool, session_id, key, f"via {key}")
+        assert result["key"] == "place", f"{key} was not folded onto place"
+
+    facts = (await core.get_facts(db_pool, session_id, key="place"))["facts"]
+    assert facts["place"] == "via МЕСТО_ВСТРЕЧИ", "the latest write should win"
+
+
+async def test_an_ordinary_fact_key_is_left_exactly_as_written(db_pool):
+    """Only place has a reader that depends on an exact name. Folding anything
+    else would silently merge unrelated facts under one key."""
+    session_id = await _new_session(db_pool)
+
+    await core.remember_fact(db_pool, session_id, "пиво", "каждый приносит на себя")
+    await core.remember_fact(db_pool, session_id, "allergies", "орехи")
+
+    facts = (await core.get_facts(db_pool, session_id))["facts"]
+    assert facts["пиво"] == "каждый приносит на себя"
+    assert facts["allergies"] == "орехи"
