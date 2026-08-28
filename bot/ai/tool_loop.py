@@ -45,6 +45,17 @@ _VERBATIM_FIELDS = ("report", "rendered")
 
 
 def _verbatim_block(result: dict) -> str | None:
+    """The finished block a result carries, if relaying it is the answer.
+
+    A result that also carries ask_user is asking the model to say something
+    the block cannot say. Live: told an amount was already set, the model
+    answered "На списке уже есть 1 кг бананов; добавить нельзя. Скажите,
+    какое общее количество нужно" — correct, and the guard below threw it
+    away and sent the bare list instead, because the list was in the result.
+    Refusals come with an explanation or they are not refusals.
+    """
+    if result.get("ask_user"):
+        return None
     for field in _VERBATIM_FIELDS:
         value = result.get(field)
         if isinstance(value, str) and value.strip():

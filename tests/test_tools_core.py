@@ -1390,3 +1390,36 @@ async def test_the_refusal_names_what_is_already_there(db_pool):
     assert again["status"] == "already_present"
     assert again["quantity"] == "1 ящ."
     assert "as 1 ящ." in again["ask_user"]
+
+
+async def test_a_perfectly_good_name_is_not_rewritten(db_pool):
+    """Live: the list said "бананы", the model sent "банан" for the same
+    fruit, and the repair renamed the row — rewriting a group's plural into
+    the model's singular. Matching is by lemma precisely so the two can be
+    the same item without either having to win."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "бананы", amount=1, unit="килограмм")
+
+    await core.list_add(db_pool, session_id, "банан", amount=1, unit="килограмм")
+
+    names = [r["name"] for r in await db_pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1", session_id
+    )]
+    assert names == ["бананы"]
+
+
+async def test_a_name_nothing_would_produce_today_is_still_repaired(db_pool):
+    """The repair's actual job. "одна бутылка чай" is not a name anybody
+    would write now — it predates quantity being split out."""
+    session_id = await _new_session(db_pool)
+    await db_pool.execute(
+        "INSERT INTO list_items (session_id, name) VALUES ($1, 'одна бутылка чай')",
+        session_id,
+    )
+
+    await core.list_add(db_pool, session_id, "чай")
+
+    names = [r["name"] for r in await db_pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1", session_id
+    )]
+    assert names == ["чай"]

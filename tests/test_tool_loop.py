@@ -316,3 +316,47 @@ async def test_a_different_call_is_not_treated_as_a_repeat():
 
     assert tool.await_count == 2
     assert answer == "◻️ мясо" or answer == "Добавил."
+
+
+async def test_an_explanation_is_not_treated_as_a_dropped_block():
+    """The guard threw away a correct answer. Told an amount was already set,
+    the model replied "На списке уже есть 1 кг бананов; добавить нельзя.
+    Скажите, какое общее количество нужно" — and the guard saw a rendered
+    list in the same result and sent the bare list instead. A refusal comes
+    with an explanation or it is not a refusal."""
+    explanation = "Уже есть 1 кг бананов; добавить нельзя. Скажите, сколько всего."
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="list_add", args={}, id="c1")]),
+        Reply(text=explanation),
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+    tool = AsyncMock(return_value={
+        "status": "already_present",
+        "quantity": "1 кг",
+        "ask_user": "Ask for the whole new amount.",
+        "rendered": "Ещё не разобрали:\n◻️ бананы, 1 кг",
+    })
+
+    answer = await run_tool_loop(
+        _fallback((provider, "openai/gpt-oss-120b")), "добавь ещё кг бананов", {"list_add": tool},
+    )
+
+    assert answer == explanation
+
+
+async def test_a_result_without_an_explanation_still_relays_the_block():
+    """The guard's original job is untouched: nothing was asked, so the block
+    is the answer."""
+    rendered = "Ещё не разобрали:\n◻️ бананы, 1 кг"
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="list_show", args={}, id="c1")]),
+        Reply(text="Вот список."),
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+
+    answer = await run_tool_loop(
+        _fallback((provider, "openai/gpt-oss-120b")), "покажи список",
+        {"list_show": AsyncMock(return_value={"items": [], "rendered": rendered})},
+    )
+
+    assert answer == rendered
