@@ -870,7 +870,7 @@ async def test_list_show_includes_the_rendered_text(db_pool):
 
     assert shown["items"][0]["quantity"] == "2 л"
     assert shown["items"][0]["category"] == "молочка"
-    assert shown["rendered"] == "Ещё не разобрали:\nМолочка\n◻️ молоко, 2 л"
+    assert shown["rendered"] == "Ещё не разобрали:\n◻️ молоко, 2 л"
 
 
 async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):

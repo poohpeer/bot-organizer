@@ -13,7 +13,6 @@ call that produced it, and "update the icons when a status changes" is not a
 separate mechanism to get right, just a consequence of calling render() again.
 """
 
-import itertools
 
 # Fixed and closed: sorting has to be stable across calls, and a model asked
 # to invent categories will say "молочка" once and "молочные продукты" the
@@ -66,10 +65,12 @@ def _item_line(item: dict) -> str:
 
 
 def _section(heading: str, items: list[dict]) -> str:
+    # Sorted by category rank, but the category name itself is never printed
+    # — the fixed vocabulary decides the *order* items appear in, not a label
+    # on the page. groupby is gone with it: there is nothing left to group by
+    # for, just one line per item in sort order.
     lines = [heading]
-    for rank, group in itertools.groupby(sorted(items, key=_sort_key), key=_category_rank):
-        lines.append(LIST_CATEGORIES[rank].capitalize())
-        lines.extend(_item_line(item) for item in group)
+    lines.extend(_item_line(item) for item in sorted(items, key=_sort_key))
     return "\n".join(lines)
 
 
