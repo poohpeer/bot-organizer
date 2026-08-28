@@ -16,9 +16,10 @@ class ProxyProvider:
         self.backend_provider = backend_provider
 
     async def _request(self, model, prompt, *, tools=None, system_instruction=None, history=None, output_format="text", schema=None):
+        provider, upstream_model = self._route_model(model)
         body = {
-            "provider": "groq" if model.startswith("openai/") else "gemini",
-            "model": model,
+            "provider": provider,
+            "model": upstream_model,
             "prompt": prompt,
             "system": system_instruction,
             "history": history or [],
@@ -31,8 +32,33 @@ class ProxyProvider:
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                raise ProxyError(exc.response.status_code, str(exc)) from exc
+                error_type = None
+                try:
+                    error_type = exc.response.json().get("error", {}).get("type")
+                except (ValueError, AttributeError):
+                    pass
+                # A shared proxy can legitimately have optional backends
+                # absent (for example no Claude binary in this deployment).
+                # Make those typed configuration errors retryable so the
+                # model chain can continue to the next backend.
+                retryable_status = exc.response.status_code
+                if error_type in {"unavailable_provider", "missing_api_key"}:
+                    retryable_status = 503
+                raise ProxyError(retryable_status, str(exc)) from exc
             return response.json()
+
+    def _route_model(self, model):
+        """Map a chain model name to the proxy provider and its model name."""
+        for prefix, provider in (
+            ("codex:", "codex"),
+            ("ollama:", "ollama"),
+            ("claude:", "claude_code"),
+        ):
+            if model.startswith(prefix):
+                return provider, model[len(prefix):]
+        if model.startswith("openai/"):
+            return "groq", model
+        return self.backend_provider if self.backend_provider != "groq" else "gemini", model
 
     async def start(self, model, prompt, *, tools=None, system_instruction=None, history=None):
         chat = _ProxyChat(self, model, list(history or []), tools, system_instruction)
