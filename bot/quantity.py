@@ -56,6 +56,52 @@ def _number(amount: float) -> str:
     return f"{amount:g}"
 
 
+# How several amounts of one item are joined. Asked for a bottle of wine when
+# a crate is listed, the list says "1 ящ. + 1 бут." — keeping both rather than
+# picking one, because neither is wrong and dropping either loses something
+# somebody said.
+_JOIN = " + "
+
+
+def combine(amounts) -> str | None:
+    """Several (amount, unit) pairs as one string, in the order they were
+    added. Same-unit amounts are summed before they get here, so a unit never
+    appears twice."""
+    if not amounts:
+        return None
+    parts = [
+        rendered for rendered in
+        (render(entry.get("amount"), entry.get("unit")) for entry in amounts)
+        if rendered
+    ]
+    return _JOIN.join(parts) if parts else None
+
+
+def add_to(amounts, amount, unit) -> list[dict]:
+    """Fold a new amount into what an item already holds.
+
+    A different unit is kept alongside: a crate and a bottle are both real,
+    and converting between them would be inventing a rate nobody gave.
+
+    The same unit replaces rather than sums, which is the one part of this
+    nobody has specified. Summing reads better for "добавь ещё два литра",
+    but one message has already been seen reaching both the silent-capture
+    and the addressed path, and under summing that duplicate delivery would
+    quietly double the amount — a wrong number nobody can see is wrong.
+    Replacing is the recoverable failure: say it again and it is right.
+    """
+    if amount is None:
+        return list(amounts or [])
+    unit = normalize_unit(unit)
+    out = [dict(entry) for entry in (amounts or [])]
+    for entry in out:
+        if normalize_unit(entry.get("unit")) == unit:
+            entry["amount"] = float(amount)
+            return out
+    out.append({"amount": float(amount), "unit": unit})
+    return out
+
+
 def render(amount, unit) -> str | None:
     """"2 кг", "0.5 кг", "1 шт.", "1 бут.".
 

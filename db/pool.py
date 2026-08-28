@@ -333,6 +333,12 @@ ALTER TABLE list_items ADD COLUMN IF NOT EXISTS claimed_by_user_id BIGINT;
 -- text, and bot/list_render.py falls back to it when amount is NULL.
 ALTER TABLE list_items ADD COLUMN IF NOT EXISTS amount NUMERIC;
 ALTER TABLE list_items ADD COLUMN IF NOT EXISTS unit TEXT;
+-- One item can hold several amounts in different units: asked to add a
+-- bottle of wine when a crate is already listed, the answer is "1 ящ. +
+-- 1 бут.", not one of the two. A single amount/unit pair cannot say that, so
+-- those two columns become the legacy read path and this is where new
+-- amounts go: [{"amount": 1, "unit": "ящик"}, {"amount": 1, "unit": "бутылка"}].
+ALTER TABLE list_items ADD COLUMN IF NOT EXISTS amounts JSONB;
 -- bot.group_info's last-seen bookkeeping (R7): NULL title_seen/description_seen
 -- means "never checked", not "checked and found nothing" — that distinction is
 -- what lets a first sighting store the values without announcing them as a

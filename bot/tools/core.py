@@ -1,4 +1,5 @@
 import functools
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -203,6 +204,22 @@ def _as_amount(amount):
         return None
 
 
+def _amounts_of(row) -> list[dict]:
+    """What an item holds, from whichever column knows.
+
+    amounts is where new writes go; amount/unit is the single-pair shape rows
+    written before it still carry. Reading both here keeps the older rows
+    working and folds them into the new shape the first time anything touches
+    them.
+    """
+    stored = row["amounts"] if "amounts" in row.keys() else None
+    if stored:
+        return json.loads(stored) if isinstance(stored, str) else list(stored)
+    if row["amount"] is not None:
+        return [{"amount": float(row["amount"]), "unit": row["unit"]}]
+    return []
+
+
 async def _rendered_list(pool, session_id) -> str:
     """The list as the group should see it, after a change.
 
@@ -256,7 +273,7 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
     value = _as_amount(amount)
     key = item_names.match_key(name)
     rows = await pool.fetch(
-        "SELECT id, name, status, amount, unit FROM list_items WHERE session_id = $1",
+        "SELECT id, name, status, amount, unit, amounts FROM list_items WHERE session_id = $1",
         session_id,
     )
     matching = [r for r in rows if item_names.match_key(r["name"]) == key]
@@ -272,8 +289,8 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
     if twin is None:
         row = await pool.fetchrow(
             """
-            INSERT INTO list_items (session_id, name, amount, unit, category)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO list_items (session_id, name, amount, unit, amounts, category)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (session_id, lower(name)) DO NOTHING
             RETURNING id
             """,
@@ -282,6 +299,7 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
             # NULL amount leaves a row claiming "килограмм" of nothing.
             session_id, name, value,
             quantity.normalize_unit(unit) if value is not None else None,
+            json.dumps(quantity.add_to([], value, unit)) if value is not None else None,
             _normalize_category(category),
         )
         if row is not None:
@@ -323,41 +341,39 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
                 "UPDATE list_items SET name = $2 WHERE id = $1", twin["id"], name
             )
         twin = await pool.fetchrow(
-            "SELECT id, name, status, amount, unit FROM list_items WHERE id = $1", twin["id"]
+            "SELECT id, name, status, amount, unit, amounts FROM list_items WHERE id = $1", twin["id"]
         )
 
     existing = twin or await pool.fetchrow(
-        "SELECT id, status, amount, unit FROM list_items "
+        "SELECT id, status, amount, unit, amounts FROM list_items "
         "WHERE session_id = $1 AND lower(name) = lower($2)",
         session_id, name,
     )
     if value is not None:
-        # An amount stated now wins, whether it fills a blank or replaces
-        # what was there. Refusing to overwrite protected a parsed-from-text
-        # amount from being clobbered by a re-parse of the same phrase; with
-        # the model sending a number and a unit, a different value is
-        # somebody correcting the list. Live: "вино, 1 ящ." was on the list,
-        # "Добавь вино 1 бут" came back already_present, and nothing changed
-        # — the person was ignored.
-        was = quantity.render(existing["amount"], existing["unit"])
-        now = quantity.render(value, unit)
+        # "Добавь" adds. A same-unit amount sums, and a different unit is kept
+        # alongside — asked for a bottle of wine with a crate already listed,
+        # the answer is "1 ящ. + 1 бут.", because both are real and converting
+        # between them would invent a rate nobody gave.
+        before = _amounts_of(existing)
+        after = quantity.add_to(before, value, unit)
+        was, now = quantity.combine(before), quantity.combine(after)
         if was != now:
             await pool.execute(
-                "UPDATE list_items SET amount = $2, unit = $3 WHERE id = $1",
-                existing["id"], value, quantity.normalize_unit(unit),
+                "UPDATE list_items SET amounts = $2, amount = NULL, unit = NULL WHERE id = $1",
+                existing["id"], json.dumps(after),
             )
             result = {"status": "updated", "item_id": existing["id"], "quantity": now,
                       "rendered": await _rendered_list(pool, session_id)}
-            # Named so the reply can say what it replaced rather than just
-            # confirming: silently swapping a crate for a bottle is the kind
-            # of change someone wants to see acknowledged.
+            # Named so the reply can say what changed rather than only
+            # confirming: going from a crate to a crate and a bottle is worth
+            # acknowledging.
             if was is not None:
                 result["previous_quantity"] = was
             return result
 
     return {"status": "already_present", "item_id": existing["id"],
             "item_status": existing["status"],
-            "quantity": quantity.render(existing["amount"], existing["unit"]),
+            "quantity": quantity.combine(_amounts_of(existing)),
             "rendered": await _rendered_list(pool, session_id)}
 
 
@@ -366,7 +382,7 @@ async def list_show(pool, session_id) -> dict:
     rendered plain text (what it should actually show — R4)."""
     rows = await pool.fetch(
         """
-        SELECT name, status, amount, unit, quantity, category,
+        SELECT name, status, amount, unit, amounts, quantity, category,
                claimed_by, claimed_by_user_id
         FROM list_items WHERE session_id = $1 ORDER BY created_at
         """,
@@ -378,9 +394,8 @@ async def list_show(pool, session_id) -> dict:
             # One rendered string for both storage shapes. quantity is the
             # free text rows written before amount/unit still carry; it is
             # the fallback, never the preference.
-            "quantity": quantity.render(r["amount"], r["unit"]) or r["quantity"],
-            "amount": float(r["amount"]) if r["amount"] is not None else None,
-            "unit": r["unit"],
+            "quantity": quantity.combine(_amounts_of(r)) or r["quantity"],
+            "amounts": _amounts_of(r),
             "category": r["category"], "claimed_by": r["claimed_by"],
             "claimed_by_user_id": r["claimed_by_user_id"],
         }
