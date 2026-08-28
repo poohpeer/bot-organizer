@@ -50,3 +50,10 @@ def test_no_amount_renders_as_nothing():
     "1 шт." nobody said."""
     assert quantity.render(None, "килограмм") is None
     assert quantity.render("не число", "килограмм") is None
+
+
+def test_a_crate_has_an_abbreviation():
+    """Live: "ящик вина" had nowhere to put the crate, so it stayed in the
+    name and the list showed "ящик вино"."""
+    assert quantity.render(1, "ящик") == "1 ящ."
+    assert quantity.render(2, "мешок") == "2 меш."

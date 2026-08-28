@@ -27,6 +27,7 @@ _QUANTITY_WORDS = frozenset({
     "шт", "штук", "штуки", "штука", "пачка", "пачки", "пачек",
     "бутылка", "бутылки", "бутылок", "банка", "банки", "банок",
     "упаковка", "упаковки", "пара", "пары", "пару", "коробка", "коробки",
+    "ящик", "ящика", "ящиков", "мешок", "мешка", "мешков",
 })
 
 _NUMERAL_WORDS = frozenset({
@@ -154,14 +155,27 @@ def canonical(name: str) -> str:
     return strip_quantity(to_nominative(name))
 
 
+def _lemma(word: str) -> str:
+    if not _CYRILLIC.search(word):
+        return word
+    parsed = _analyzer().parse(word)
+    return parsed[0].normal_form if parsed else word
+
+
 def match_key(name: str) -> str:
     """What makes two item names the same item.
 
-    Case- and order-insensitive over the canonical words, so "2 кг мяса",
-    "мяса, 2 кг" and "мясо" all collide instead of becoming three rows. Order
-    insensitivity is what catches the two spellings the silent-capture and
-    addressed paths produced from one message.
+    Compared by lemma, so number stops mattering: someone asking for "банан"
+    when the list already says "бананы" is asking about the same fruit, and
+    the two used to sit as separate rows. Order- and case-insensitive too, so
+    "2 кг мяса", "мяса, 2 кг" and "мясо" all collide.
+
+    The lemma belongs here and nowhere else. Using it for the *stored* name
+    would rewrite a group's "огурцы" into "огурец" — a plural they never
+    wrote — which is why canonical() inflects to the nominative and keeps
+    number instead. Matching is machinery nobody reads; the name is not.
     """
     return " ".join(sorted(
-        _bare(word).lower() for word in canonical(name or "").split() if _bare(word)
+        _lemma(_bare(word).lower())
+        for word in strip_quantity(name or "").split() if _bare(word)
     ))

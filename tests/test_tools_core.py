@@ -1223,3 +1223,28 @@ async def test_an_older_spelling_is_repaired_when_the_item_comes_up_again(db_poo
     )]
     assert names == ["чай"], "the older spelling should have been repaired, not duplicated"
     assert "◻️ чай, 1 бут." in result["rendered"]
+
+
+async def test_the_same_fruit_in_the_singular_is_not_added_again(db_pool):
+    """Live: the list said "бананы" and the model sent name="банан", so the
+    same fruit ended up on two rows."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "бананы")
+
+    again = await core.list_add(db_pool, session_id, "банан", amount=1, unit="килограмм")
+
+    assert again["status"] == "updated"
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM list_items WHERE session_id = $1", session_id
+    ) == 1
+
+
+async def test_a_crate_becomes_an_amount(db_pool):
+    """Live: "ящик вина" reached the list as an item called "ящик вино" —
+    there was no crate in the unit vocabulary for it to go to."""
+    session_id = await _new_session(db_pool)
+
+    added = await core.list_add(db_pool, session_id, "ящик вина", amount=1, unit="ящик")
+
+    assert added["status"] == "ok"
+    assert "◻️ вино, 1 ящ." in added["rendered"]
