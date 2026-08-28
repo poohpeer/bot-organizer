@@ -109,3 +109,36 @@ def test_the_two_steps_commute():
     for name in cases:
         assert (item_names.strip_quantity(item_names.to_nominative(name))
                 == item_names.to_nominative(item_names.strip_quantity(name))), name
+
+
+def test_singular_and_plural_are_the_same_item():
+    """Live: the model sent name="банан" while the list already said
+    "бананы", and the two sat as separate rows. Someone asking for a banana
+    when bananas are listed is asking about the same fruit."""
+    assert item_names.match_key("банан") == item_names.match_key("бананы")
+    assert item_names.match_key("огурец") == item_names.match_key("огурцы")
+    assert item_names.match_key("помидоры") == item_names.match_key("2 кг помидоров")
+
+
+def test_the_lemma_is_used_for_matching_only():
+    """The lemma of "огурцы" is "огурец". Storing that would rewrite a
+    group's plural into a singular they never wrote — which is why the name
+    is inflected to the nominative and keeps number, while only the invisible
+    match key is lemmatised."""
+    assert item_names.canonical("огурцы") == "огурцы"
+    assert item_names.canonical("бананы") == "бананы"
+    assert item_names.match_key("огурцы") == item_names.match_key("огурец")
+
+
+def test_different_things_still_do_not_collide():
+    """Lemmatising loses information, so the comparison has to stay narrow
+    enough to tell an item from a container."""
+    assert item_names.match_key("банан") != item_names.match_key("банка")
+    assert item_names.match_key("мясо") != item_names.match_key("молоко")
+    assert item_names.match_key("красное вино") != item_names.match_key("белое вино")
+
+
+def test_a_crate_is_an_amount_not_a_name():
+    """Live: "ящик вина" reached the list as an item called "ящик вино"."""
+    assert item_names.canonical("ящик вина") == "вино"
+    assert item_names.canonical("мешок картошки") == "картошка"
