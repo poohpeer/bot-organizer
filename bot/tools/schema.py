@@ -33,7 +33,7 @@ ALL_TOOLS = types.Tool(function_declarations=[
          "name": _S(Type.STRING, "The thing itself, without the amount, in the nominative case: 'мясо', not 'мяса' or '2 кг мяса'. Keep the group's own wording and language otherwise."),
          "amount": _S(Type.NUMBER, "How many or how much, as a number. Omit if nobody said — never invent one. Use 1 when a single container was named ('бутылка водки' is amount=1)."),
          "unit": _S(Type.STRING, "One of: " + ", ".join(_QUANTITY_UNITS) + ". Use 'штука' for a plain count. Required whenever amount is given."),
-         "adding": _S(Type.BOOLEAN, "True only when they asked for MORE of something rather than saying how much there should be: 'добавь ещё бутылку' is adding=true, 'должно быть 700 г' and 'добавь 2 кг мяса' are not. An amount is treated as the total unless this says otherwise."),
+         "relative": _S(Type.BOOLEAN, "True when they asked for MORE or LESS of something rather than saying how much there should be in total. 'добавь ещё бутылку', 'убери один', 'на полкило меньше' are relative=true; 'должно быть 700 г', 'хлеб два', 'хлеба осталось 2' are not. An amount is treated as the total unless this says otherwise; a relative change is refused and the person is asked for the total, because this tool does no arithmetic on amounts."),
          "amounts": types.Schema(
              type=Type.ARRAY,
              description="The whole amount when it takes more than one unit to say — 'ящик и две бутылки' is amounts=[{amount:1,unit:'ящик'},{amount:2,unit:'бутылка'}]. It replaces whatever is stored; for a first or single amount use amount/unit instead.",

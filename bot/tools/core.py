@@ -243,7 +243,7 @@ async def _rendered_list(pool, session_id) -> str:
     return (await list_show(pool, session_id))["rendered"]
 
 
-async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None, adding=False, category=None) -> dict:
+async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None, relative=False, category=None) -> dict:
     """Add an item, or report that it is already on the list.
 
     Idempotent on purpose: two people asking for milk, or a model re-adding an
@@ -376,18 +376,24 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
     after = restated if restated is not None else _stated(None, value, unit)
 
     # A restatement, or a plain stated total, replaces what is there.
-    if after and not adding and quantity.combine(after) != was:
+    if after and not relative and quantity.combine(after) != was:
         return await _replace_amount(pool, session_id, existing, after, was)
 
-    # Filling in a blank is adding information, so a first amount applies
+    # Filling in a blank is stating information, so a first amount applies
     # even when they said "ещё" — there was nothing to add to.
     if after and not before:
         return await _replace_amount(pool, session_id, existing, after, was)
 
-    # They asked for more of something that already has an amount. This tool
-    # cannot add or subtract — "добавь ещё бутылку вина" against "1 бут."
-    # could mean two bottles or a bottle more, and guessing invents an
-    # intention. Say what is on the list and ask for the whole new value.
+    # A relative change to something that already has an amount, in either
+    # direction. This tool does no arithmetic on amounts, by design: "добавь
+    # ещё бутылку" against "1 бут." could mean two bottles or a bottle more,
+    # and "убери один" from "2 шт." is only obvious until the units differ.
+    # Say what is on the list and ask for the whole new value.
+    #
+    # Both directions land here on purpose. The flag used to be called
+    # "adding" and covered only more, so nothing described removal at all —
+    # asked "Хлеб. Убери один" the model found no action that fit, read the
+    # list, and answered with the status report instead.
     return {
         "status": "already_present",
         "item_id": existing["id"],
@@ -396,9 +402,11 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
         "ask_user": (
             "This is already on the list"
             + (f" as {was}" if was else " with no amount recorded")
-            + ". Amounts cannot be added to or subtracted from here — tell them what is "
-            "there, say you cannot add or take away, and ask for the whole new amount "
-            "(\"две бутылки\", not \"ещё одна\"). Pass their answer as amounts."
+            + ". Amounts are never added to or subtracted from here, in either "
+            "direction — tell them what is there, say you can neither add nor take "
+            "away, and ask what the amount should be in total (\"две бутылки\", not "
+            "\"ещё одна\"; \"один\", not \"на один меньше\"). Their answer is a plain "
+            "amount, so pass it without relative."
         ),
         "rendered": await _rendered_list(pool, session_id),
     }

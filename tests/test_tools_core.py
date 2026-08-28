@@ -797,11 +797,11 @@ async def test_a_second_amount_is_refused_rather_than_guessed_at(db_pool):
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "вино", amount=1, unit="ящик")
 
-    result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка", adding=True)
+    result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка", relative=True)
 
     assert result["status"] == "already_present"
     assert result["quantity"] == "1 ящ."
-    assert "cannot be added to or subtracted from" in result["ask_user"]
+    assert "never added to or subtracted from" in result["ask_user"]
     assert "◻️ вино, 1 ящ." in result["rendered"], "the list must be untouched"
 
 
@@ -1335,7 +1335,7 @@ async def test_an_older_single_amount_row_is_read_and_replaced(db_pool):
         session_id,
     )
 
-    refused = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка", adding=True)
+    refused = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка", relative=True)
     assert refused["status"] == "already_present"
     assert refused["quantity"] == "1 ящ."
 
@@ -1371,12 +1371,12 @@ async def test_an_item_with_no_amount_asks_how_much_instead_of_stonewalling(db_p
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "водка")
 
-    again = await core.list_add(db_pool, session_id, "водка", adding=True)
+    again = await core.list_add(db_pool, session_id, "водка", relative=True)
 
     assert again["status"] == "already_present"
     assert again["quantity"] is None
     assert "no amount recorded" in again["ask_user"]
-    assert "cannot be added to or subtracted from" in again["ask_user"]
+    assert "never added to or subtracted from" in again["ask_user"]
 
 
 async def test_the_refusal_names_what_is_already_there(db_pool):
@@ -1385,7 +1385,7 @@ async def test_the_refusal_names_what_is_already_there(db_pool):
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "пиво", amount=1, unit="ящик")
 
-    again = await core.list_add(db_pool, session_id, "пиво", adding=True)
+    again = await core.list_add(db_pool, session_id, "пиво", relative=True)
 
     assert again["status"] == "already_present"
     assert again["quantity"] == "1 ящ."
@@ -1442,27 +1442,68 @@ async def test_a_stated_total_applies_without_any_flag(db_pool):
     assert result["previous_quantity"] == "1 кг"
 
 
-async def test_asking_for_more_is_still_refused(db_pool):
+async def test_a_relative_change_is_still_refused(db_pool):
     """The flag is what preserves the behaviour that was asked for."""
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "пиво", amount=1, unit="ящик")
 
     result = await core.list_add(
-        db_pool, session_id, "пиво", amount=1, unit="бутылка", adding=True
+        db_pool, session_id, "пиво", amount=1, unit="бутылка", relative=True
     )
 
     assert result["status"] == "already_present"
     assert result["quantity"] == "1 ящ."
 
 
-async def test_asking_for_more_of_something_with_no_amount_just_sets_it(db_pool):
+async def test_a_relative_change_to_something_with_no_amount_just_sets_it(db_pool):
     """There was nothing to add to, so there is nothing to be confused about."""
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "водка")
 
     result = await core.list_add(
-        db_pool, session_id, "водка", amount=2, unit="бутылка", adding=True
+        db_pool, session_id, "водка", amount=2, unit="бутылка", relative=True
     )
 
     assert result["status"] == "updated"
     assert result["quantity"] == "2 бут."
+
+
+async def test_taking_some_away_is_refused_the_same_as_adding(db_pool):
+    """Live: "Хлеб. Убери один" against "хлеб, 2 шт." did nothing at all.
+    The flag was called "adding" and covered only more, so nothing in the
+    tool described removal — the model found no action that fit, read the
+    list, and answered with the status report instead."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "хлеб", amount=2, unit="штука")
+
+    result = await core.list_add(
+        db_pool, session_id, "хлеб", amount=1, unit="штука", relative=True
+    )
+
+    assert result["status"] == "already_present"
+    assert result["quantity"] == "2 шт."
+    assert "neither add nor take away" in result["ask_user"]
+    assert "◻️ хлеб, 2 шт." in result["rendered"], "the list must be untouched"
+
+
+async def test_the_answer_to_that_question_applies(db_pool):
+    """"сколько всего должно остаться" -> "один" is an absolute amount."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "хлеб", amount=2, unit="штука")
+
+    result = await core.list_add(db_pool, session_id, "хлеб", amount=1, unit="штука")
+
+    assert result["status"] == "updated"
+    assert result["quantity"] == "1 шт."
+    assert result["previous_quantity"] == "2 шт."
+
+
+async def test_a_leftover_count_is_an_absolute_amount(db_pool):
+    """"Хлеба осталось 2" says how much there is, not how much to change by."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "хлеб", amount=5, unit="штука")
+
+    result = await core.list_add(db_pool, session_id, "хлеб", amount=2, unit="штука")
+
+    assert result["status"] == "updated"
+    assert result["quantity"] == "2 шт."
