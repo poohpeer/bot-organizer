@@ -782,31 +782,26 @@ async def test_list_add_fills_in_a_blank_quantity(db_pool):
 
     assert result["status"] == "updated"
     assert result["item_id"] == first["item_id"]
-    row = await db_pool.fetchrow(
-        "SELECT amount, unit FROM list_items WHERE id = $1", first["item_id"]
-    )
-    assert (float(row["amount"]), row["unit"]) == (2.0, "килограмм")
+    assert result["quantity"] == "2 кг"
+    # amounts is where writes go now; amount/unit are the legacy read path.
+    assert (await core.list_show(db_pool, session_id))["items"][0]["amounts"] == [
+        {"amount": 2.0, "unit": "килограмм"}
+    ]
 
 
-async def test_a_stated_amount_replaces_the_one_on_the_list(db_pool):
-    """This rule used to be the other way round: overwriting was refused
-    because a re-parse of the same free-text phrase could clobber a good
-    value. With the model sending a number and a unit, a different value is
-    somebody correcting the list. Live: "вино, 1 ящ." was listed, "Добавь
-    вино 1 бут" came back already_present, and nothing changed."""
+async def test_a_second_unit_is_kept_alongside_the_first(db_pool):
+    """Reported: with "вино, 1 ящ." listed, "Добавь вино 1 бут" did nothing —
+    list_add refused to touch an amount that was already set. A crate and a
+    bottle are both real, and converting between them would invent a rate
+    nobody gave, so the item holds both."""
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "вино", amount=1, unit="ящик")
 
     result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
 
     assert result["status"] == "updated"
-    assert result["quantity"] == "1 бут."
+    assert result["quantity"] == "1 ящ. + 1 бут."
     assert result["previous_quantity"] == "1 ящ."
-    row = await db_pool.fetchrow(
-        "SELECT amount, unit FROM list_items WHERE session_id = $1 AND lower(name) = 'вино'",
-        session_id,
-    )
-    assert (float(row["amount"]), row["unit"]) == (1.0, "бутылка")
 
 
 async def test_restating_the_same_amount_changes_nothing(db_pool):
@@ -819,6 +814,7 @@ async def test_restating_the_same_amount_changes_nothing(db_pool):
 
     assert result["status"] == "already_present"
     assert result["quantity"] == "2 л"
+    assert len((await core.list_show(db_pool, session_id))["items"][0]["amounts"]) == 1
 
 
 async def test_list_claim_sets_claimant(db_pool):
@@ -894,7 +890,7 @@ async def test_list_show_includes_the_rendered_text(db_pool):
     shown = await core.list_show(db_pool, session_id)
 
     assert shown["items"][0]["quantity"] == "2 л"
-    assert (shown["items"][0]["amount"], shown["items"][0]["unit"]) == (2.0, "литр")
+    assert shown["items"][0]["amounts"] == [{"amount": 2.0, "unit": "литр"}]
     assert shown["items"][0]["category"] == "молочка"
     assert shown["rendered"] == "Ещё не разобрали:\n◻️ молоко, 2 л"
 
@@ -1087,7 +1083,10 @@ async def test_quantity_in_the_name_does_not_create_a_second_row(db_pool):
     second = await core.list_add(db_pool, session_id, "2 кг мяса", amount=2, unit="килограмм")
 
     assert first["status"] == "ok"
+    # Not "updated", and not 4 кг: one message reaching two paths must not
+    # double the amount.
     assert second["status"] == "already_present"
+    assert second["quantity"] == "2 кг"
     rows = await db_pool.fetchval(
         "SELECT count(*) FROM list_items WHERE session_id = $1", session_id
     )
@@ -1309,3 +1308,19 @@ async def test_merging_keeps_what_the_other_row_knew(db_pool):
     assert (row["name"], float(row["amount"]), row["unit"], row["claimed_by"]) == (
         "бананы", 2.0, "килограмм", "Alex",
     )
+
+
+async def test_an_older_single_amount_row_gains_a_second_unit(db_pool):
+    """Rows written before the amounts column carry one pair in amount/unit.
+    Adding a second unit has to fold the old shape into the new one rather
+    than losing it."""
+    session_id = await _new_session(db_pool)
+    await db_pool.execute(
+        "INSERT INTO list_items (session_id, name, amount, unit) VALUES ($1, 'вино', 1, 'ящик')",
+        session_id,
+    )
+
+    result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
+
+    assert result["quantity"] == "1 ящ. + 1 бут."
+    assert result["previous_quantity"] == "1 ящ."
