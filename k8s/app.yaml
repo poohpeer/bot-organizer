@@ -14,6 +14,7 @@ spec:
       labels:
         app: bot-organizer-bot
     spec:
+      enableServiceLinks: false
       imagePullSecrets:
         - name: bot-organizer-ghcr-pull-secret
       containers:
@@ -55,6 +56,7 @@ spec:
       labels:
         app: bot-organizer-worker
     spec:
+      enableServiceLinks: false
       imagePullSecrets:
         - name: bot-organizer-ghcr-pull-secret
       containers:

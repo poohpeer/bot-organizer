@@ -1,17 +1,13 @@
 import logging
 import os
 
-from bot.ai.providers import GeminiProvider, GroqProvider, build_gemini_client, build_groq_client, is_retryable
-from bot.ai.tool_schema_openai import openai_tools
-from bot.tools.schema import ALL_TOOLS
+from bot.ai.proxy import ProxyProvider, proxy
+from bot.ai.providers import is_retryable
 
 log = logging.getLogger(__name__)
 
-groq_client = build_groq_client()
-gemini = build_gemini_client()
-
-_GROQ = GroqProvider(groq_client) if groq_client is not None else None
-_GEMINI = GeminiProvider(gemini, ALL_TOOLS)
+groq_client = None
+gemini = None
 
 GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
@@ -41,11 +37,12 @@ def build_chain(groq_provider, gemini_provider) -> list[tuple]:
     return [(gemini_provider, model) for model in GEMINI_MODELS] + groq_entries
 
 
-CHAIN = build_chain(_GROQ, _GEMINI)
+PROXY_MODEL = os.environ.get("AI_PROXY_MODEL", "openai/gpt-oss-120b")
+CHAIN = [(proxy, PROXY_MODEL)] if proxy else []
 
 # Kept for the modules that only need to know which Gemini models exist, and
 # for web_search's grounded-search fallback.
-MODELS = GEMINI_MODELS
+MODELS = [PROXY_MODEL]
 
 # Cheap/fast model for the two-stage filter checks (active-mode relevance) so
 # the primary model is never spent on a binary "is this even relevant"
@@ -56,10 +53,7 @@ CLASSIFIER_MODEL = "gemini-3.1-flash-lite"
 
 # Groq's small model answers the same binary questions and comes from a
 # different quota pool, so the classifier survives a Gemini outage too.
-CLASSIFIER_CHAIN = [
-    *([(_GROQ, "openai/gpt-oss-20b")] if _GROQ else []),
-    (_GEMINI, CLASSIFIER_MODEL),
-]
+CLASSIFIER_CHAIN = [(proxy, PROXY_MODEL)] if proxy else []
 
 
 class AllModelsUnavailable(RuntimeError):

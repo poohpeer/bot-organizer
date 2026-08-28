@@ -66,6 +66,11 @@ How that reaches the containers, and where it deliberately does not:
 
 - **Into the containers** via `env_file: .env` in `docker-compose.yml`. The
   values become environment variables of the running process.
+
+The bot uses the shared proxy service. For a Compose deployment set
+`AI_PROXY_URL=http://ai-proxy:8787` (or the reachable service URL) in `.env`.
+For Kubernetes this is already configured as `http://ai-proxy:8787` in the
+ConfigMap; the proxy and bot must be in the same namespace.
 - **Never into the image.** Verified on the built image: no `.env` anywhere in
   the filesystem, and no secret values in its config. `.dockerignore` excludes
   `.env`, so a build cannot pick it up even by accident.

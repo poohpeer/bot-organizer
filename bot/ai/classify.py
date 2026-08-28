@@ -1,11 +1,12 @@
 import json
 import logging
+import os
 import time
 
-from google.genai import errors, types
+from google.genai import types
 
-from bot.ai.client import CLASSIFIER_CHAIN, CLASSIFIER_MODEL, gemini, groq_client
-from bot.ai.providers import is_retryable
+from bot.ai.client import CLASSIFIER_MODEL
+from bot.ai.proxy import proxy
 from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
@@ -47,36 +48,14 @@ def _json_schema_of(schema) -> dict:
 async def _extract_via_chain(instruction: str, text: str, schema) -> str | None:
     """Ask the cheap models in order, moving on for the same reasons the main
     chain does. Returns the raw JSON text, or None if nobody answered."""
-    last_error = None
-    for provider, model in CLASSIFIER_CHAIN:
-        try:
-            if provider.name == "groq":
-                resp = await groq_client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "system", "content": instruction},
-                              {"role": "user", "content": text}],
-                    response_format={"type": "json_schema", "json_schema": {
-                        "name": "extraction", "strict": True, "schema": _json_schema_of(schema)}},
-                )
-                return resp.choices[0].message.content
-            resp = await gemini.aio.models.generate_content(
-                model=model,
-                contents=text,
-                config=types.GenerateContentConfig(
-                    system_instruction=instruction,
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                ),
-            )
-            return resp.text
-        except Exception as e:
-            if not is_retryable(e):
-                raise
-            last_error = e
-            log.warning("classifier %s/%s unavailable (%s), trying the next", provider.name, model, e)
-    log.warning("every classifier model refused; last error: %s", last_error)
-    return None
+    if proxy is None:
+        raise RuntimeError("AI_PROXY_URL is not configured")
+    data = await proxy._request(
+        os.environ.get("AI_PROXY_MODEL", "openai/gpt-oss-120b"), text,
+        system_instruction=instruction, output_format="json",
+        schema=_json_schema_of(schema),
+    )
+    return json.dumps(data.get("structured_output")) if isinstance(data.get("structured_output"), dict) else None
 
 
 async def extract(instruction: str, text: str, schema: types.Schema) -> dict:

@@ -3,6 +3,10 @@ kind: ConfigMap
 metadata:
   name: bot-organizer-config
 data:
+  AI_PROXY_URL: http://ai-proxy:8787
+  AI_PROXY_PROVIDER: groq
+  AI_PROXY_MODEL: openai/gpt-oss-120b
+  AI_PROXY_TIMEOUT_S: "600"
   DEFAULT_TIMEZONE: Asia/Jerusalem
   QUIET_UNTIL_HOUR: "9"
   QUIET_FROM_HOUR: "21"

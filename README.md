@@ -42,8 +42,8 @@ TEST_DATABASE_URL=postgresql://postgres:test@localhost:5432/postgres uv run pyte
 ```
 
 No API keys are needed and no live API is called: `tests/conftest.py` supplies
-fake values, and an absent `GROQ_API_KEY` simply means the model chain runs on
-Gemini alone.
+fake values. AI requests are sent through the shared `ai-proxy`; configure its
+URL with `AI_PROXY_URL` (for Kubernetes this is `http://ai-proxy:8787`).
 
 ## Building
 
