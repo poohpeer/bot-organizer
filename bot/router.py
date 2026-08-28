@@ -17,6 +17,7 @@ from google.genai import types
 
 import bot.decision_log as decision_log
 import bot.group_info as group_info
+import bot.history as history
 import bot.list_render as list_render
 import bot.session as session
 import bot.timezones as timezones
@@ -690,6 +691,10 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             system_instruction=await _active_mode_instruction(
                 pool, chat_id, session_id, message.from_user
             ),
+            # Without this the bot cannot be answered: every question it asks
+            # arrives back as a message it has no memory of prompting. See
+            # bot/history.py.
+            history=await history.recent_turns(pool, chat_id),
         )
     except AllModelsUnavailable:
         # Every provider is rate-limited or down. Telling the user to
