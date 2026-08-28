@@ -1072,17 +1072,43 @@ async def test_quantity_in_the_name_does_not_create_a_second_row(db_pool):
     assert rows == 1
 
 
-async def test_the_amount_is_stripped_from_the_stored_name(db_pool):
-    """The amount already has its own column; repeating it in the name is what
-    made the two spellings differ in the first place."""
+async def test_the_stored_name_has_no_amount_and_is_nominative(db_pool):
+    """The amount already has its own column, and the case someone happened to
+    speak in is not part of the item's identity."""
     session_id = await _new_session(db_pool)
 
     await core.list_add(db_pool, session_id, "килограмм помидоров", quantity="1 кг")
+    await core.list_add(db_pool, session_id, "2 пачки макарон", quantity="2 пачки")
 
-    stored = await db_pool.fetchval(
-        "SELECT name FROM list_items WHERE session_id = $1", session_id
-    )
-    assert stored == "помидоров"
+    stored = [r["name"] for r in await db_pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1 ORDER BY id", session_id
+    )]
+    assert stored == ["помидоры", "макароны"]
+
+
+async def test_the_same_item_in_another_case_is_not_added_twice(db_pool):
+    """"Добавь мяса" then "добавь мясо" is one item, not two."""
+    session_id = await _new_session(db_pool)
+
+    await core.list_add(db_pool, session_id, "мяса", quantity="2 кг")
+    again = await core.list_add(db_pool, session_id, "мясо")
+
+    assert again["status"] == "already_present"
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM list_items WHERE session_id = $1", session_id
+    ) == 1
+
+
+async def test_checking_off_works_across_cases(db_pool):
+    """Stored as "мясо"; someone says they got "мяса". Without the same
+    normalisation on lookup this reports the item absent and invites a
+    duplicate — the asymmetry that made rewriting names dangerous before."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "мясо")
+
+    result = await core.list_check_off(db_pool, session_id, "мяса")
+
+    assert result["status"] == "ok"
 
 
 async def test_word_order_alone_does_not_create_a_second_row(db_pool):
