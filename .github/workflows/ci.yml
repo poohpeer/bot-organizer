@@ -46,10 +46,10 @@ jobs:
 
       - run: uv sync --frozen
 
-      # No GROQ_API_KEY: the chain treats Groq as optional and falls back to
-      # Gemini alone, which is the configuration the suite is written against.
-      # BOT_ORGANIZER_BOT_TOKEN / GEMINI_API_KEY / GOOGLE_MAPS_API_KEY get fake values from
-      # tests/conftest.py. Nothing here reaches a live API.
+      # No model API keys anywhere: the bot holds none and calls no provider
+      # directly — every model call goes through ai-proxy. BOT_ORGANIZER_BOT_TOKEN
+      # and GOOGLE_MAPS_API_KEY get fake values from tests/conftest.py.
+      # Nothing here reaches a live API.
       - run: uv run pytest -q
         env:
           TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
@@ -182,8 +182,5 @@ jobs:
           }
           if ($workerLog -notmatch 'Worker started') {
             throw "The worker never started its poll loop."
-          }
-          if ($botLog -match 'GROQ_API_KEY is not set') {
-            Write-Host "::warning::GROQ_API_KEY is missing from the cluster Secret - the bot is running on Gemini alone."
           }
           Write-Host "both processes are up"

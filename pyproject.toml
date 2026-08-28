@@ -8,8 +8,11 @@ dependencies = [
     "asyncpg>=0.29",
     "httpx>=0.27",
     "python-dotenv>=1.0",
-    "groq>=1.6.0",
 ]
+# No groq SDK: this bot calls no model provider directly, so nothing imports
+# it. google-genai stays, but only as a schema library — bot/tools/schema.py
+# writes tool declarations in its types and bot/ai/tool_schema_openai.py
+# renders them into the OpenAI dialect. No genai.Client is ever constructed.
 
 [dependency-groups]
 dev = [

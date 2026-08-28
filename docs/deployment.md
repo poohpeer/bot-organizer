@@ -24,12 +24,17 @@ setting. That is why the bot decides whether to act in code
 
 ## First run
 
-1. Copy `.env.example` to `.env` and fill it in. Required: `BOT_ORGANIZER_BOT_TOKEN`,
-   `GEMINI_API_KEY`, `GOOGLE_MAPS_API_KEY`, and a `POSTGRES_PASSWORD` of your
-   choosing — putting that same password into `DATABASE_URL`. Optional:
-   `GROQ_API_KEY`, which puts the GPT-OSS models ahead of Gemini in the model
-   chain; without it the bot logs a warning at startup and runs on Gemini
-   alone. Everything else has a working default. See **Secrets** below.
+1. Copy `.env.example` to `.env` and fill it in. Required:
+   `BOT_ORGANIZER_BOT_TOKEN`, `GOOGLE_MAPS_API_KEY`, and a `POSTGRES_PASSWORD`
+   of your choosing — putting that same password into `DATABASE_URL`.
+   Everything else has a working default. See **Secrets** below.
+
+   **No model API keys.** This bot calls no model provider directly: every
+   model call goes to the `ai-proxy` service named by `AI_PROXY_URL`, and
+   ai-proxy is the only component holding provider credentials. If model
+   calls fail, look at ai-proxy's own configuration and logs, not at this
+   bot's secrets. `GOOGLE_MAPS_API_KEY` is not an exception to this — it is
+   for place lookup, not a model.
 2. ```bash
    docker compose up -d --build
    ```

@@ -5,7 +5,7 @@ import time
 
 from google.genai import types
 
-from bot.ai.client import CLASSIFIER_MODEL, PROXY_MODELS
+from bot.ai.client import PROXY_MODELS
 from bot.ai.proxy import proxy
 from bot.logging_setup import truncate
 
@@ -72,7 +72,7 @@ async def _extract_via_chain(instruction: str, text: str, schema) -> str | None:
 
 
 async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
-    """Cheap structured-JSON extraction against CLASSIFIER_MODEL. Fails
+    """Cheap structured-JSON extraction against the model chain. Fails
     closed (returns {}) on any error — a classifier failure must never
     cause a session start/stop or an active-mode
     tool call to fire.
@@ -85,8 +85,13 @@ async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
     paths, turning a transient blip into a wrong action.
     """
     started = time.perf_counter()
-    log.debug("AI extract -> %s | instruction=%s | text=%s",
-              CLASSIFIER_MODEL, truncate(instruction, 120), truncate(text))
+    # Logs the chain, not a single name. This line used to print
+    # CLASSIFIER_MODEL, a constant no call ever used: _extract_via_chain walks
+    # PROXY_MODELS. The log therefore named one model while the request went
+    # to another, which is exactly the wrong thing to be told when debugging a
+    # classifier that returned nothing.
+    log.debug("AI extract -> chain=%s | instruction=%s | text=%s",
+              ",".join(PROXY_MODELS), truncate(instruction, 120), truncate(text))
     try:
         raw = await _extract_via_chain(instruction, text, schema)
         # An empty completion is not JSON. json.loads(None) raises TypeError,
