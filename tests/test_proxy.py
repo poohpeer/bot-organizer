@@ -41,6 +41,10 @@ async def test_routes_prefixed_models_to_their_backend(monkeypatch):
     provider = ProxyProvider("http://ai-proxy")
 
     for model, expected_provider, expected_model in (
+        # A bare prefix carries no model: codex only runs the ChatGPT
+        # account's default and rejects any name, so None must go out — not
+        # "", which the proxy would echo back as a model that does not exist.
+        ("codex:", "codex", None),
         ("codex:gpt-5.3-codex", "codex", "gpt-5.3-codex"),
         ("ollama:llama3.2", "ollama", "llama3.2"),
         ("claude:opus", "claude_code", "opus"),
@@ -50,6 +54,24 @@ async def test_routes_prefixed_models_to_their_backend(monkeypatch):
         await provider._request(model, "hello")
         assert FakeClient.body["provider"] == expected_provider
         assert FakeClient.body["model"] == expected_model
+
+
+async def test_the_codex_chain_entry_names_no_model(monkeypatch):
+    """The live chain entry itself, not just the routing helper: CODEX_MODELS
+    used to hold three names that all ran the same account-default model, so
+    a fallback walked them as three distinct attempts and paid three ~4s CLI
+    invocations to retry the identical request.
+    """
+    import bot.ai.client as client
+
+    assert client.CODEX_MODELS == ["codex:"]
+
+    monkeypatch.setattr("bot.ai.proxy.httpx.AsyncClient", FakeClient)
+    provider = ProxyProvider("http://ai-proxy")
+    for entry in client.CODEX_MODELS:
+        await provider._request(entry, "hello")
+        assert FakeClient.body["provider"] == "codex"
+        assert FakeClient.body["model"] is None
 
 
 async def test_unavailable_proxy_provider_becomes_retryable(monkeypatch):
