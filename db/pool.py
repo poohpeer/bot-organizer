@@ -164,10 +164,16 @@ CREATE TABLE IF NOT EXISTS list_items (
     added_by    BIGINT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     checked_at  TIMESTAMPTZ,
-    -- TEXT, not a number: people say "пару бутылок", "кг", "штук 5", and
-    -- parsing that into a number+unit would invent precision nobody gave
-    -- (R4). NULL means nobody said how much.
+    -- Superseded by amount/unit below and kept only for rows written before
+    -- them. The reasoning for free text was that parsing "пару бутылок" into
+    -- a number invents precision — true, but the cost was worse: the same
+    -- amount reached the list as "2 кг", "одну бутылку" and "полкило" and was
+    -- shown three different ways. The model now picks the number and a unit
+    -- from a fixed vocabulary, and bot/quantity.py writes it out.
     quantity    TEXT,
+    -- NULL means nobody said how much; it does not mean one.
+    amount      NUMERIC,
+    unit        TEXT,
     -- One of the fixed vocabulary in bot/tools/core.py, or NULL until set.
     category    TEXT,
     -- Both kept for the same reason participants keeps user_id and
@@ -320,6 +326,13 @@ ALTER TABLE list_items ADD COLUMN IF NOT EXISTS quantity TEXT;
 ALTER TABLE list_items ADD COLUMN IF NOT EXISTS category TEXT;
 ALTER TABLE list_items ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE list_items ADD COLUMN IF NOT EXISTS claimed_by_user_id BIGINT;
+-- Amount split into a number and a unit, replacing the free-text quantity.
+-- That column stored whatever phrasing reached it — "2 кг", "одну бутылку",
+-- "полкило" — so the same amount read three different ways in one list.
+-- quantity is kept, not dropped: rows written before this still carry their
+-- text, and bot/list_render.py falls back to it when amount is NULL.
+ALTER TABLE list_items ADD COLUMN IF NOT EXISTS amount NUMERIC;
+ALTER TABLE list_items ADD COLUMN IF NOT EXISTS unit TEXT;
 -- bot.group_info's last-seen bookkeeping (R7): NULL title_seen/description_seen
 -- means "never checked", not "checked and found nothing" — that distinction is
 -- what lets a first sighting store the values without announcing them as a
