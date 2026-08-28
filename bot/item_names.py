@@ -28,17 +28,26 @@ _QUANTITY_WORDS = frozenset({
     "бутылка", "бутылки", "бутылок", "банка", "банки", "банок",
     "упаковка", "упаковки", "пара", "пары", "пару", "коробка", "коробки",
     "ящик", "ящика", "ящиков", "мешок", "мешка", "мешков",
+    "булка", "булки", "булок", "буханка", "буханки", "буханок",
+    "кусок", "куска", "кусков", "рулон", "рулона", "рулонов",
 })
 
 _NUMERAL_WORDS = frozenset({
     "один", "одна", "одно", "два", "две", "три", "четыре", "пять", "шесть",
-    "семь", "восемь", "девять", "десять", "несколько", "пол", "полкило",
+    "семь", "восемь", "девять", "десять", "несколько", "немного", "пара",
+    "чуть", "побольше", "поменьше", "пол", "полкило",
     # Hyphenated half-measures the analyzer does not reduce to anything in
     # the list above.
     "пол-литра", "поллитра", "пол-кило", "полкило", "полтора", "полторы",
 })
 
 _CYRILLIC = re.compile(r"[а-яё]", re.IGNORECASE)
+
+# "1кг", "500г", "2л" — a number written against its unit with no space.
+# Whitespace tokenising keeps that as one token, which is neither a digit nor
+# a listed word, so it survived into the name: one live list showed
+# "1кг апельсины".
+_GLUED_AMOUNT = re.compile(r"^\d+[.,]?\d*(?=[а-яё])", re.IGNORECASE)
 
 
 @functools.lru_cache(maxsize=1)
@@ -56,6 +65,20 @@ def _analyzer():
 
 def _bare(token: str) -> str:
     return token.strip(".,;:!?()\"'")
+
+
+def _tokens(name: str) -> list[str]:
+    """Split on whitespace, and additionally where a number runs straight
+    into a word: "1кг" becomes "1", "кг"."""
+    out = []
+    for token in name.split():
+        match = _GLUED_AMOUNT.match(token)
+        if match:
+            out.append(match.group())
+            out.append(token[match.end():])
+        else:
+            out.append(token)
+    return out
 
 
 def _is_amount(word: str) -> bool:
@@ -95,7 +118,7 @@ def strip_quantity(name: str) -> str:
     """
     if not isinstance(name, str):
         return name
-    kept = [token for token in name.split() if not _is_amount(_bare(token))]
+    kept = [token for token in _tokens(name) if not _is_amount(_bare(token))]
     # Never leave nothing behind: a group asking for "бутылка" gets a bottle,
     # not a row called "".
     return " ".join(kept).strip() if kept else name.strip()
