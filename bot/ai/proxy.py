@@ -41,8 +41,15 @@ class ProxyProvider:
                 # absent (for example no Claude binary in this deployment).
                 # Make those typed configuration errors retryable so the
                 # model chain can continue to the next backend.
+                #
+                # unsupported_tool_use belongs with them: the proxy raises it
+                # when a backend cannot forward tool declarations at all, which
+                # says nothing about the request being wrong — only that this
+                # backend cannot serve it. The next one in the chain can. It
+                # exists because such a backend previously ran the request
+                # toolless and returned a fabricated answer instead.
                 retryable_status = exc.response.status_code
-                if error_type in {"unavailable_provider", "missing_api_key"}:
+                if error_type in {"unavailable_provider", "missing_api_key", "unsupported_tool_use"}:
                     retryable_status = 503
                 raise ProxyError(retryable_status, str(exc)) from exc
             return response.json()

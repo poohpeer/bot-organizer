@@ -89,6 +89,46 @@ async def test_unavailable_proxy_provider_becomes_retryable(monkeypatch):
         raise AssertionError("expected proxy error")
 
 
+async def test_unsupported_tool_use_becomes_retryable(monkeypatch):
+    """ai-proxy returns this when a backend cannot forward tool declarations
+    at all. That says nothing about the request being wrong — only that this
+    backend cannot serve it — so the chain must fall through to one that can,
+    not surface a 400 to the user. Left non-retryable, a chain whose first
+    entry is a CLI-backed provider would fail every tool-using turn outright.
+    """
+    FakeClient.response = FakeResponse(
+        400,
+        {"error": {"type": "unsupported_tool_use",
+                   "message": "provider codex does not support tool calling"}},
+    )
+    monkeypatch.setattr("bot.ai.proxy.httpx.AsyncClient", FakeClient)
+    provider = ProxyProvider("http://ai-proxy")
+
+    try:
+        await provider._request("codex:", "hello")
+    except Exception as exc:
+        assert exc.status == 503
+    else:
+        raise AssertionError("expected proxy error")
+
+
+async def test_a_genuinely_bad_request_stays_non_retryable(monkeypatch):
+    """The mapping must stay narrow: a 400 the next provider would also
+    reject has to surface, not walk the whole chain repeating it."""
+    FakeClient.response = FakeResponse(
+        400, {"error": {"type": "missing_schema", "message": "json_schema required"}}
+    )
+    monkeypatch.setattr("bot.ai.proxy.httpx.AsyncClient", FakeClient)
+    provider = ProxyProvider("http://ai-proxy")
+
+    try:
+        await provider._request("openai/gpt-oss-120b", "hello")
+    except Exception as exc:
+        assert exc.status == 400
+    else:
+        raise AssertionError("expected proxy error")
+
+
 def test_the_default_chain_excludes_providers_that_drop_tools():
     """ai-proxy's codex and claude_code adapters accept a tools array and
     silently ignore it — live: "start provider=codex tools=26" then
