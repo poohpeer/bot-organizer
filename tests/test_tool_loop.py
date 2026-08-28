@@ -237,3 +237,41 @@ async def test_a_tool_with_no_rendered_block_leaves_the_reply_untouched():
     )
 
     assert answer == "Записал."
+
+
+async def test_running_out_of_turns_still_sends_what_was_gathered():
+    """Seen live: after adding three items the model called event_status four
+    times in a row, exhausted the six-turn limit, and the person got the
+    generic failure message — while a correct, freshly rendered report had
+    come back from every one of those calls."""
+    report = "Вот текущая информация:\n\n🛒 Список:\n◻️ мясо"
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="event_status", args={}, id=f"c{i}")])
+        for i in range(MAX_TOOL_ITERATIONS + 2)
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+
+    answer = await run_tool_loop(
+        _fallback((provider, "openai/gpt-oss-120b")),
+        "покажи статус",
+        {"event_status": AsyncMock(return_value={"status": "ok", "report": report})},
+    )
+
+    assert answer == report
+
+
+async def test_running_out_of_turns_with_nothing_gathered_still_raises():
+    """No block means nothing useful to send; the router's generic reply is
+    the honest outcome."""
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="remember_fact", args={}, id=f"c{i}")])
+        for i in range(MAX_TOOL_ITERATIONS + 2)
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+
+    with pytest.raises(RuntimeError):
+        await run_tool_loop(
+            _fallback((provider, "openai/gpt-oss-120b")),
+            "запомни",
+            {"remember_fact": AsyncMock(return_value={"status": "ok"})},
+        )

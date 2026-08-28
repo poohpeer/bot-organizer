@@ -1011,3 +1011,45 @@ async def test_an_ordinary_fact_key_is_left_exactly_as_written(db_pool):
     facts = (await core.get_facts(db_pool, session_id))["facts"]
     assert facts["пиво"] == "каждый приносит на себя"
     assert facts["allergies"] == "орехи"
+
+
+async def test_adding_an_item_returns_the_updated_list_as_confirmation(db_pool):
+    """Asked to add three things the bot answered nothing at all: list_add
+    returned only {"status": "ok"}, the model decided no reply was needed, and
+    the person could not tell whether anything had been recorded. The rendered
+    block is the confirmation, and it also reaches tool_loop's verbatim guard
+    so it gets relayed rather than paraphrased."""
+    session_id = await _new_session(db_pool)
+
+    added = await core.list_add(db_pool, session_id, "мясо", quantity="2 кг")
+
+    assert added["status"] == "ok"
+    assert "◻️ мясо, 2 кг" in added["rendered"]
+
+
+async def test_every_list_add_outcome_carries_the_list(db_pool):
+    """A confirmation is just as necessary when nothing changed: "already on
+    the list" is only believable if it shows the list."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "пиво")
+
+    again = await core.list_add(db_pool, session_id, "пиво")
+    updated = await core.list_add(db_pool, session_id, "пиво", quantity="6 бутылок")
+
+    assert again["status"] == "already_present"
+    assert "◻️ пиво" in again["rendered"]
+    assert updated["status"] == "updated"
+    assert "◻️ пиво, 6 бутылок" in updated["rendered"]
+
+
+async def test_a_refused_participant_name_returns_no_list(db_pool):
+    """The refusal path adds nothing, so there is no change to confirm — and
+    returning a block here would have tool_loop relay the whole list in
+    answer to a message that was about a person."""
+    session_id = await _new_session(db_pool)
+    await core.set_participant(db_pool, session_id, "Витька", "unknown", user_id=7)
+
+    refused = await core.list_add(db_pool, session_id, "витька")
+
+    assert refused["status"] == "looks_like_a_participant"
+    assert "rendered" not in refused
