@@ -56,24 +56,6 @@ async def test_routes_prefixed_models_to_their_backend(monkeypatch):
         assert FakeClient.body["model"] == expected_model
 
 
-async def test_the_codex_chain_entry_names_no_model(monkeypatch):
-    """The live chain entry itself, not just the routing helper: CODEX_MODELS
-    used to hold three names that all ran the same account-default model, so
-    a fallback walked them as three distinct attempts and paid three ~4s CLI
-    invocations to retry the identical request.
-    """
-    import bot.ai.client as client
-
-    assert client.CODEX_MODELS == ["codex:"]
-
-    monkeypatch.setattr("bot.ai.proxy.httpx.AsyncClient", FakeClient)
-    provider = ProxyProvider("http://ai-proxy")
-    for entry in client.CODEX_MODELS:
-        await provider._request(entry, "hello")
-        assert FakeClient.body["provider"] == "codex"
-        assert FakeClient.body["model"] is None
-
-
 async def test_unavailable_proxy_provider_becomes_retryable(monkeypatch):
     FakeClient.response = FakeResponse(
         400, {"error": {"type": "unavailable_provider", "message": "not configured"}}

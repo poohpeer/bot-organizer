@@ -1,18 +1,23 @@
 from unittest.mock import AsyncMock
 
-import groq
-import httpx
 import pytest
 
 from bot.ai.client import AllModelsUnavailable, ModelFallback
 from bot.ai.providers import Reply, ToolCall
+from bot.ai.proxy import ProxyError
 from bot.ai.tool_loop import MAX_TOOL_ITERATIONS, run_tool_loop
 
 
 def _rate_limited():
-    request = httpx.Request("POST", "https://api.groq.com/x")
-    response = httpx.Response(429, request=request, json={"error": {"message": "x"}})
-    return groq.RateLimitError("rate limited", response=response, body=None)
+    """What a rate limit actually looks like here.
+
+    This used to build a groq.RateLimitError, a type no longer reachable in
+    this process: every model call goes through ai-proxy and surfaces as
+    ProxyError. The recovery below was therefore green against an error
+    production could never raise, while the real one fell straight through
+    tool_loop's `if not is_retryable(e): raise`.
+    """
+    return ProxyError(429, "ai-proxy returned 429")
 
 
 class _ScriptedChat:

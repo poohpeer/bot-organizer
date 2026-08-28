@@ -126,3 +126,24 @@ class ProxyError(RuntimeError):
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
+
+
+def is_retryable(exc) -> bool:
+    """Whether another model in the chain deserves a try.
+
+    Lives here, beside the only error type the bot can now raise from a model
+    call: every request goes through ai-proxy, so a Groq or Gemini SDK
+    exception can no longer reach this process. The previous version of this
+    function only understood those SDK exceptions and answered False for a
+    ProxyError — which quietly disabled tool_loop's mid-conversation recovery,
+    since that call site has no ProxyError branch of its own. `client.py` had
+    grown one inline, so the chain still advanced on the opening turn and the
+    gap only showed on a later turn.
+
+    429 and 5xx are the shared-quota and overload cases the chain exists for.
+    A 400 is the request itself and repeating it elsewhere buys nothing —
+    except for the types ai-proxy already re-labels as 503 (a backend that is
+    absent, unconfigured, or cannot serve the request's tools), which say
+    nothing about the request being wrong.
+    """
+    return isinstance(exc, ProxyError) and (exc.status == 429 or exc.status >= 500)

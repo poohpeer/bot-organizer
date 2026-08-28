@@ -2,7 +2,7 @@ import logging
 import time
 
 from bot.ai.client import AllModelsUnavailable
-from bot.ai.providers import is_retryable
+from bot.ai.proxy import is_retryable
 from bot.ai.tool_schema_openai import openai_tools
 from bot.logging_setup import truncate
 

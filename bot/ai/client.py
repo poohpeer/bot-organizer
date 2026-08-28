@@ -1,65 +1,42 @@
 import logging
 import os
 
-from bot.ai.proxy import ProxyError, ProxyProvider, proxy
-from bot.ai.providers import is_retryable
+from bot.ai.proxy import ProxyProvider, is_retryable, proxy
 
 log = logging.getLogger(__name__)
 
-groq_client = None
-gemini = None
-
-# One entry, and no model name after the prefix. A ChatGPT-authenticated
-# Codex CLI only runs the account's own default model — any explicit name is
-# rejected with "The '<name>' model is not supported when using Codex with a
-# ChatGPT account" — and ai-proxy's codex adapter never passes -m regardless.
-# The three names here previously all resolved to that same single model, so
-# the chain retried the identical request three times believing each was a
-# different fallback, burning two extra ~4s CLI invocations per outage.
-CODEX_MODELS = ["codex:"]
-CLAUDE_MODELS = ["claude:opus", "claude:sonnet", "claude:haiku"]
-GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
-
-# Priority order. The two Groq-hosted GPT-OSS models come first and Gemini
-# behind them: the chain switches on 429/5xx, so putting a separate provider —
-# separate account, separate quota, separate outage — ahead of the Gemini
-# models means a Gemini rate limit no longer takes the bot down.
-GEMINI_MODELS = [
-    "gemma-4-31b-it",
-    "gemma-4-26b-a4b-it",
+# The fallback order, as ai-proxy names these models. This bot calls no
+# model provider directly — there is no SDK client, no API key and no
+# provider endpoint anywhere in it — so every name here is only ever a string
+# handed to ai-proxy, which owns the credentials and the dialects.
+#
+# The two Groq-hosted GPT-OSS models come first and Gemini behind them: the
+# chain advances on 429/5xx, so putting a separate provider — separate
+# account, separate quota, separate outage — ahead of the Gemini models means
+# a Gemini rate limit no longer takes the bot down.
+#
+# No codex: or claude: entries. Both are CLI-backed adapters in ai-proxy that
+# accept a tools array and silently ignore it — observed live as "start
+# provider=codex tools=26" followed by "complete ... tool_calls=0". Almost
+# every turn here needs a tool call, so such a provider does not degrade, it
+# fabricates: asked to show the list, codex could not reach the database and
+# answered "доступ к данным организатора сейчас недоступен". ai-proxy now
+# refuses those requests outright with unsupported_tool_use.
+#
+# The gemini names are the ones ai-proxy's gemini adapter actually
+# accepts. Its /v1/models catalogue used to advertise three others
+# (gemma-4-26b-a4b-it, gemini-3.5-flash-lite, gemini-3.1-flash-lite)
+# that it then rejected with 400 model_not_found — and a 400 is not
+# retryable, so reaching one aborted the whole chain rather than
+# advancing past it. Half of this fallback was a landmine.
+DEFAULT_PROXY_MODELS = ",".join([
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-]
-
-
-def build_chain(groq_provider, gemini_provider) -> list[tuple]:
-    """The GPT-OSS models first, Gemini behind them.
-
-    A separate function rather than a module constant so the ordering can be
-    asserted without a Groq key present: without one the live chain is
-    Gemini-only, and a test reading the constant would quietly stop checking
-    the thing it was written to check.
-    """
-    groq_entries = [(groq_provider, model) for model in GROQ_MODELS] if groq_provider else []
-    return [(gemini_provider, model) for model in GEMINI_MODELS] + groq_entries
-
-
-# CODEX_MODELS and CLAUDE_MODELS are deliberately not in this chain. Both are
-# CLI-backed adapters in ai-proxy that accept a tools array and silently
-# ignore it — observed live as "start provider=codex tools=26" followed by
-# "complete ... tool_calls=0". Almost every turn here needs a tool call, so
-# such a provider does not degrade, it fabricates: asked to show the list,
-# codex could not reach the database and answered "доступ к данным
-# организатора сейчас недоступен". The constants stay defined because
-# AI_PROXY_MODELS can still name them explicitly for a tool-free workload.
-DEFAULT_PROXY_MODELS = ",".join(
-    GROQ_MODELS + [
-        "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.6-flash",
-        "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
-    ]
-)
+    "gemma-4-31b-it",
+])
 PROXY_MODELS = [m.strip() for m in os.environ.get(
     "AI_PROXY_MODELS",
     DEFAULT_PROXY_MODELS,
@@ -71,15 +48,10 @@ CHAIN = [(proxy, model) for model in PROXY_MODELS] if proxy else []
 # for web_search's grounded-search fallback.
 MODELS = PROXY_MODELS
 
-# Cheap/fast model for the two-stage filter checks (active-mode relevance) so
-# the primary model is never spent on a binary "is this even relevant"
-# question. Deliberately not the chain's last entry: that one is the emergency
-# fallback, and classify()/extract() fail closed, so a flaky classifier
-# degrades silently into "never do anything" rather than erroring visibly.
-CLASSIFIER_MODEL = "gemini-3.1-flash-lite"
-
-# Groq's small model answers the same binary questions and comes from a
-# different quota pool, so the classifier survives a Gemini outage too.
+# The cheap filter checks (active-mode relevance, session start/stop) walk
+# this same chain — see bot/ai/classify.py's _extract_via_chain. There is no
+# separate classifier model: a CLASSIFIER_MODEL constant used to sit here and
+# was only ever printed in a log line, naming a model no request went to.
 CLASSIFIER_CHAIN = [(proxy, PROXY_MODEL)] if proxy else []
 
 
@@ -126,8 +98,7 @@ class ModelFallback:
                 )
                 return provider, model, chat
             except Exception as e:
-                if not ((isinstance(e, ProxyError) and (e.status == 429 or e.status >= 500))
-                        or is_retryable(e)):
+                if not is_retryable(e):
                     raise
                 last_error = e
                 log.warning("%s/%s unavailable (%s), trying the next model", provider.name, model, e)

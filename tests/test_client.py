@@ -1,23 +1,22 @@
-import groq
-import httpx
+"""The model-fallback chain.
+
+Every case here is written against ProxyError, because that is now the only
+failure a model call in this bot can produce: there is no Groq or Gemini SDK
+client anywhere in it, so those SDKs' exception types can never reach this
+code. The previous version of this file tested exactly those unreachable
+types, which is how a real gap stayed hidden — see
+test_a_proxy_error_is_what_the_chain_actually_sees.
+"""
+
 import pytest
-from google.genai import errors as gemini_errors
 
 from bot.ai.client import AllModelsUnavailable, ModelFallback
-from bot.ai.providers import Reply, is_retryable
+from bot.ai.providers import Reply
+from bot.ai.proxy import ProxyError, is_retryable
 
 
-def _groq_error(status):
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    response = httpx.Response(status, request=request, json={"error": {"message": "x"}})
-    cls = {429: groq.RateLimitError, 400: groq.BadRequestError}.get(
-        status, groq.InternalServerError
-    )
-    return cls("boom", response=response, body=None)
-
-
-def _gemini_error(code):
-    return gemini_errors.APIError(code, {"error": {"message": "x", "code": code}})
+def _proxy_error(status):
+    return ProxyError(status, f"ai-proxy returned {status}")
 
 
 class _FakeProvider:
@@ -36,79 +35,88 @@ class _FakeProvider:
         return chat
 
 
-def test_retryable_covers_both_sdks_and_nothing_else():
+def test_retryable_covers_overload_and_nothing_else():
     """The chain exists for shared-quota and overload failures. A 400 means the
     request is wrong; repeating it elsewhere just spends another call."""
-    assert is_retryable(_groq_error(429)) is True
-    assert is_retryable(_groq_error(503)) is True
-    assert is_retryable(_gemini_error(429)) is True
-    assert is_retryable(_gemini_error(500)) is True
-    assert is_retryable(_groq_error(400)) is False
-    assert is_retryable(_gemini_error(400)) is False
-    assert is_retryable(ValueError("not an API error")) is False
+    assert is_retryable(_proxy_error(429)) is True
+    assert is_retryable(_proxy_error(500)) is True
+    assert is_retryable(_proxy_error(502)) is True
+    assert is_retryable(_proxy_error(503)) is True
+    assert is_retryable(_proxy_error(400)) is False
+    assert is_retryable(_proxy_error(404)) is False
+    assert is_retryable(ValueError("not a proxy error")) is False
 
 
-def test_a_gemini_error_with_no_usable_code_is_not_retryable():
-    """`code` is None when the body carries no numeric code, and the SDK does
-    not guarantee it is an int. Comparing either to 500 would raise TypeError
-    from inside an exception handler and bury the real failure."""
-    assert is_retryable(gemini_errors.APIError(None, {})) is False
-    assert is_retryable(gemini_errors.APIError("Service Unavailable", {})) is False
+def test_a_proxy_error_is_what_the_chain_actually_sees():
+    """The gap this file used to hide. is_retryable lived in providers.py and
+    understood only Groq/Gemini SDK exceptions, so it answered False for the
+    one error type that can actually occur. client.py had grown an inline
+    ProxyError branch and kept working; tool_loop.py had not, so a 429 partway
+    through a tool conversation raised instead of re-driving on the next
+    model. Both call sites now share this one function.
+    """
+    import bot.ai.client as client
+    import bot.ai.tool_loop as tool_loop
+
+    assert client.is_retryable is is_retryable
+    assert tool_loop.is_retryable is is_retryable
+    assert is_retryable(_proxy_error(429)) is True
 
 
-async def test_the_first_groq_model_is_tried_first():
-    """The whole point of the reordering: Groq ahead of Gemini."""
-    groq_provider, gemini_provider = _FakeProvider("groq"), _FakeProvider("gemini")
-    chain = [(groq_provider, "openai/gpt-oss-120b"), (gemini_provider, "gemini-3.6-flash")]
+async def test_the_first_model_is_tried_first():
+    provider = _FakeProvider("ai-proxy")
+    chain = [(provider, "openai/gpt-oss-120b"), (provider, "gemini-3.6-flash")]
 
-    provider, model, _chat = await ModelFallback(chain).start("привет")
+    used, model, _chat = await ModelFallback(chain).start("привет")
 
-    assert (provider.name, model) == ("groq", "openai/gpt-oss-120b")
-    assert gemini_provider.started == []
+    assert (used.name, model) == ("ai-proxy", "openai/gpt-oss-120b")
+    assert provider.started == ["openai/gpt-oss-120b"]
 
 
-async def test_a_rate_limited_groq_model_falls_through_to_the_second():
-    groq_provider = _FakeProvider("groq", {"openai/gpt-oss-120b": _groq_error(429)})
-    chain = [(groq_provider, "openai/gpt-oss-120b"), (groq_provider, "openai/gpt-oss-20b")]
+async def test_a_rate_limited_model_falls_through_to_the_second():
+    provider = _FakeProvider("ai-proxy", {"openai/gpt-oss-120b": _proxy_error(429)})
+    chain = [(provider, "openai/gpt-oss-120b"), (provider, "openai/gpt-oss-20b")]
 
-    _provider, model, _chat = await ModelFallback(chain).start("привет")
+    _used, model, _chat = await ModelFallback(chain).start("привет")
 
     assert model == "openai/gpt-oss-20b"
 
 
-async def test_both_groq_models_failing_falls_through_to_gemini():
-    """The case the user asked for explicitly: two Groq models, then Google."""
-    groq_provider = _FakeProvider("groq", {
-        "openai/gpt-oss-120b": _groq_error(429),
-        "openai/gpt-oss-20b": _groq_error(503),
+async def test_both_gpt_oss_models_failing_falls_through_to_gemini():
+    """Groq ahead of Gemini is the whole point of the ordering: a separate
+    account and quota, so one provider's rate limit does not stop the bot."""
+    provider = _FakeProvider("ai-proxy", {
+        "openai/gpt-oss-120b": _proxy_error(429),
+        "openai/gpt-oss-20b": _proxy_error(503),
     })
-    gemini_provider = _FakeProvider("gemini")
     chain = [
-        (groq_provider, "openai/gpt-oss-120b"),
-        (groq_provider, "openai/gpt-oss-20b"),
-        (gemini_provider, "gemini-3.6-flash"),
+        (provider, "openai/gpt-oss-120b"),
+        (provider, "openai/gpt-oss-20b"),
+        (provider, "gemini-3.6-flash"),
     ]
 
-    provider, model, _chat = await ModelFallback(chain).start("привет")
+    _used, model, _chat = await ModelFallback(chain).start("привет")
 
-    assert (provider.name, model) == ("gemini", "gemini-3.6-flash")
-    assert groq_provider.started == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+    assert model == "gemini-3.6-flash"
+    assert provider.started == [
+        "openai/gpt-oss-120b", "openai/gpt-oss-20b", "gemini-3.6-flash",
+    ]
 
 
 async def test_every_model_failing_raises_all_models_unavailable():
     """Distinct from a plain API error so the router can tell "the AI is
     unreachable" — which has its own reply — from a bug."""
-    provider = _FakeProvider("groq", {"a": _groq_error(429), "b": _groq_error(500)})
+    provider = _FakeProvider("ai-proxy", {"a": _proxy_error(429), "b": _proxy_error(500)})
 
     with pytest.raises(AllModelsUnavailable):
         await ModelFallback([(provider, "a"), (provider, "b")]).start("привет")
 
 
 async def test_a_non_retryable_error_is_raised_immediately():
-    provider = _FakeProvider("groq", {"a": _groq_error(400)})
+    provider = _FakeProvider("ai-proxy", {"a": _proxy_error(400)})
     chain = [(provider, "a"), (provider, "b")]
 
-    with pytest.raises(groq.BadRequestError):
+    with pytest.raises(ProxyError):
         await ModelFallback(chain).start("привет")
 
     assert provider.started == ["a"], "must not have tried the next model"
@@ -118,7 +126,7 @@ async def test_the_switch_is_sticky():
     """Quotas are shared process-wide: having just learned a model is rate
     limited, trying it again on the next message spends another call to be
     told the same thing."""
-    provider = _FakeProvider("groq", {"a": _groq_error(429)})
+    provider = _FakeProvider("ai-proxy", {"a": _proxy_error(429)})
     chain = [(provider, "a"), (provider, "b")]
     chosen = ModelFallback(chain)
 
@@ -129,47 +137,64 @@ async def test_the_switch_is_sticky():
     assert provider.started == ["b"], "should not have re-tried the rate-limited model"
 
 
-def test_the_chain_puts_the_two_gpt_oss_models_last():
-    from bot.ai.client import GEMINI_MODELS, build_chain
+def test_the_default_chain_puts_the_two_gpt_oss_models_first():
+    from bot.ai.client import DEFAULT_PROXY_MODELS
 
-    chain = build_chain(_FakeProvider("groq"), _FakeProvider("gemini"))
+    models = DEFAULT_PROXY_MODELS.split(",")
 
-    assert [(p.name, m) for p, m in chain[-2:]] == [
-        ("groq", "openai/gpt-oss-120b"),
-        ("groq", "openai/gpt-oss-20b"),
-    ]
-    assert [m for p, m in chain[:-2]] == GEMINI_MODELS
+    assert models[:2] == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+    assert all(m.startswith(("gemma-", "gemini-")) for m in models[2:])
 
 
-def test_without_a_groq_key_the_chain_is_gemini_only():
-    """Groq sits in front of Gemini to add resilience; it is not what the bot
-    is built on. A missing key must degrade, not stop the bot."""
-    from bot.ai.client import GEMINI_MODELS, build_chain
+def test_the_bot_holds_no_model_credentials_or_endpoints():
+    """The point of routing everything through ai-proxy. A key or provider URL
+    reappearing here is a direct path back to a model provider, and a wider
+    blast radius for this bot's Secret than it needs.
+    """
+    import pathlib
 
-    chain = build_chain(None, _FakeProvider("gemini"))
-
-    assert [m for p, m in chain] == GEMINI_MODELS
-
-
-def test_a_provider_failing_to_parse_its_own_model_is_retryable():
-    """Groq answers 400 output_parse_failed when it cannot parse the tool call
-    its own model emitted — observed on gpt-oss-20b in 3 of 6 tool-calling
-    runs. It is a 400, but it says nothing about our request, and treating it
-    as fatal answers half those turns with "не понял, переформулируй"."""
-    request = httpx.Request("POST", "https://api.groq.com/x")
-    body = {"error": {"message": "Parsing failed.", "type": "invalid_request_error",
-                      "code": "output_parse_failed"}}
-    response = httpx.Response(400, request=request, json=body)
-    error = groq.BadRequestError("parse failed", response=response, body=body)
-
-    assert is_retryable(error) is True
+    root = pathlib.Path(__file__).resolve().parent.parent
+    banned = ("GROQ_API_KEY", "GEMINI_API_KEY", "api.groq.com", "generativelanguage")
+    offenders = []
+    for path in list((root / "bot").rglob("*.py")) + list((root / "worker").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for needle in banned:
+            if needle in text:
+                offenders.append(f"{path.relative_to(root)}: {needle}")
+    assert offenders == [], f"model credentials/endpoints leaked back in: {offenders}"
 
 
-def test_an_ordinary_bad_request_is_still_fatal():
-    """Only the parse failure is special. A genuinely malformed request would
-    fail identically on every model."""
-    request = httpx.Request("POST", "https://api.groq.com/x")
-    body = {"error": {"message": "bad", "type": "invalid_request_error", "code": "invalid_value"}}
-    response = httpx.Response(400, request=request, json=body)
+def test_no_provider_sdk_is_imported_for_calling_models():
+    """google.genai stays as a *schema* library (bot/tools/schema.py writes
+    tool declarations in its types, converted to the OpenAI dialect by
+    bot/ai/tool_schema_openai.py). What must not come back is a client:
+    genai.Client or groq.AsyncGroq means this process can call a provider
+    directly again.
+    """
+    import pathlib
 
-    assert is_retryable(groq.BadRequestError("bad", response=response, body=body)) is False
+    root = pathlib.Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in list((root / "bot").rglob("*.py")) + list((root / "worker").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for needle in ("genai.Client(", "AsyncGroq(", "import groq"):
+            if needle in text:
+                offenders.append(f"{path.relative_to(root)}: {needle}")
+    assert offenders == [], f"a provider SDK client came back: {offenders}"
+
+
+def test_the_default_chain_names_only_models_ai_proxy_accepts():
+    """Half of this chain used to be dead. ai-proxy's /v1/models advertised
+    gemma-4-26b-a4b-it, gemini-3.5-flash-lite and gemini-3.1-flash-lite, but
+    its gemini adapter rejected all three with 400 model_not_found — and a 400
+    is not retryable, so reaching one aborted the chain instead of advancing
+    past it. Verified live against the running proxy: the four names below all
+    answer 200.
+    """
+    from bot.ai.client import DEFAULT_PROXY_MODELS
+
+    dead = {"gemma-4-26b-a4b-it", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"}
+    models = set(DEFAULT_PROXY_MODELS.split(","))
+
+    assert models & dead == set(), f"chain names models ai-proxy rejects: {models & dead}"
+    assert {"gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemma-4-31b-it"} <= models
