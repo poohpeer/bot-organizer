@@ -388,7 +388,14 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "chat_member_count higher than recorded_count, add a line: \"В чате "
     "{chat_member_count} человек, но записаны только {recorded_count}.\" "
     "Add it only when the numbers differ, and never when chat_member_count "
-    "is null — the roster is built up over time, not known all at once."
+    "is null — the roster is built up over time, not known all at once.\n"
+    "When you show the shopping list or the participant roster, use "
+    "list_show's or get_participants' rendered field character-for-character "
+    "— do not reformat it, invent your own bullets, or write out a status "
+    "in words. The icons (✅ taken/confirmed, ◻️ not taken/no response yet, "
+    "❓ maybe, ❌ declined) are already in rendered and are the only marker a "
+    "human should see; they update automatically every time the underlying "
+    "status changes, so there is nothing else to keep in sync."
 )
 
 _SESSION_BOUND_TOOLS = frozenset({

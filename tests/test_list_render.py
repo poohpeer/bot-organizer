@@ -28,14 +28,14 @@ def test_all_three_sort_keys_exercised_at_once():
     assert render(items) == (
         "Ещё не разобрали:\n"
         "Мясо\n"
-        "— антилопа\n"
-        "— Ягнёнок\n"
+        "◻️ антилопа\n"
+        "◻️ Ягнёнок\n"
         "Бакалея\n"
-        "— мука\n"
+        "◻️ мука\n"
         "\n"
         "Уже взяли:\n"
         "Мясо\n"
-        "— Утка — Дима"
+        "✅ Утка — Дима"
     )
 
 
@@ -49,7 +49,7 @@ def test_empty_list_renders_a_readable_message_not_an_empty_string():
 def test_missing_quantity_has_no_trailing_comma_and_never_says_none():
     result = render([_item("хлеб", "хлеб и выпечка")])
 
-    assert result == "Ещё не разобрали:\nХлеб и выпечка\n— хлеб"
+    assert result == "Ещё не разобрали:\nХлеб и выпечка\n◻️ хлеб"
     assert "None" not in result
     assert "," not in result
 
@@ -57,7 +57,7 @@ def test_missing_quantity_has_no_trailing_comma_and_never_says_none():
 def test_claimed_item_shows_the_claimants_name():
     result = render([_item("вода", "напитки", claimed_by="Alex", quantity="6 бутылок")])
 
-    assert result == "Уже взяли:\nНапитки\n— вода, 6 бутылок — Alex"
+    assert result == "Уже взяли:\nНапитки\n✅ вода, 6 бутылок — Alex"
 
 
 def test_claimed_section_omitted_when_nothing_is_claimed():
@@ -121,8 +121,8 @@ def test_unknown_or_missing_category_sorts_as_prochee():
     assert result == (
         "Ещё не разобрали:\n"
         "Мясо\n"
-        "— мясо для шашлыка\n"
+        "◻️ мясо для шашлыка\n"
         "Прочее\n"
-        "— гвозди\n"
-        "— сюрприз"
+        "◻️ гвозди\n"
+        "◻️ сюрприз"
     )

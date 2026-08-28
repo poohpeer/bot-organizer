@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from telegram.error import Forbidden
 
 import bot.list_render as list_render
+import bot.participant_render as participant_render
 import bot.timezones as timezones
 from bot.list_render import LIST_CATEGORIES
 
@@ -386,7 +387,7 @@ async def get_participants(pool, session_id) -> dict:
     """
     session_row = await _session_row(pool, session_id, columns="chat_id")
     rows = await pool.fetch(
-        "SELECT user_id, display_name, status FROM participants WHERE session_id = $1",
+        "SELECT user_id, display_name, status FROM participants WHERE session_id = $1 ORDER BY id",
         session_id,
     )
     participants = [
@@ -402,11 +403,16 @@ async def get_participants(pool, session_id) -> dict:
         "participants": participants,
         "chat_member_count": chat_member_count,
         "recorded_count": len(participants),
+        "rendered": participant_render.render(participants),
     }
 
 
 async def nudge_unconfirmed_participants(pool, telegram_bot, session_id) -> dict:
     """DM every participant whose status is still unknown.
+
+    Scoped to 'unknown' only, not 'maybe' — someone who hedged has already
+    answered, just non-committally; re-nudging them is chasing a response
+    they already gave, not the silence this tool exists to break.
 
     Each send is isolated: Telegram refuses (Forbidden) to DM anyone who has
     never started a private chat with the bot, which is the normal state for
