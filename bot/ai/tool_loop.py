@@ -131,4 +131,13 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
         return _honour_verbatim(reply.text, verbatim)
 
     log.warning("Tool loop still calling tools after %d turns, giving up", MAX_TOOL_ITERATIONS)
+    if verbatim:
+        # Seen live: after adding three items the model called event_status
+        # four times in a row, hit the limit, and the person got the generic
+        # "something went wrong" instead of any answer — while a correct,
+        # freshly rendered report had come back from every one of those calls.
+        # A loop that ran out of turns still gathered the answer; refusing to
+        # send it helps nobody.
+        log.warning("Sending the last rendered block rather than failing the turn")
+        return verbatim
     raise RuntimeError(f"tool loop exceeded max iterations ({MAX_TOOL_ITERATIONS})")

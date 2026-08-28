@@ -189,6 +189,20 @@ def _normalize_category(category) -> str:
     return category if category in LIST_CATEGORIES else list_render.DEFAULT_CATEGORY
 
 
+async def _rendered_list(pool, session_id) -> str:
+    """The list as the group should see it, after a change.
+
+    Returned by list_add so a "добавь X" gets a concrete confirmation
+    naming what is now on the list. Asked to add three things, the bot
+    previously answered nothing at all: the model had only {"status": "ok"}
+    to go on, decided no reply was needed, and the person was left unable to
+    tell whether anything had been recorded. A rendered block also reaches
+    bot/ai/tool_loop.py's verbatim guard, so it is relayed rather than
+    paraphrased.
+    """
+    return (await list_show(pool, session_id))["rendered"]
+
+
 async def list_add(pool, session_id, name, quantity=None, category=None) -> dict:
     """Add an item, or report that it is already on the list.
 
@@ -227,7 +241,7 @@ async def list_add(pool, session_id, name, quantity=None, category=None) -> dict
         session_id, name, quantity, _normalize_category(category),
     )
     if row is not None:
-        return {"status": "ok", "item_id": row["id"]}
+        return {"status": "ok", "item_id": row["id"], "rendered": await _rendered_list(pool, session_id)}
 
     existing = await pool.fetchrow(
         "SELECT id, status, quantity FROM list_items WHERE session_id = $1 AND lower(name) = lower($2)",
@@ -235,10 +249,12 @@ async def list_add(pool, session_id, name, quantity=None, category=None) -> dict
     )
     if quantity is not None and existing["quantity"] is None:
         await pool.execute("UPDATE list_items SET quantity = $2 WHERE id = $1", existing["id"], quantity)
-        return {"status": "updated", "item_id": existing["id"], "quantity": quantity}
+        return {"status": "updated", "item_id": existing["id"], "quantity": quantity,
+                "rendered": await _rendered_list(pool, session_id)}
 
     return {"status": "already_present", "item_id": existing["id"],
-            "item_status": existing["status"], "quantity": existing["quantity"]}
+            "item_status": existing["status"], "quantity": existing["quantity"],
+            "rendered": await _rendered_list(pool, session_id)}
 
 
 async def list_show(pool, session_id) -> dict:
