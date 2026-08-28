@@ -5,7 +5,7 @@ import time
 
 from google.genai import types
 
-from bot.ai.client import CLASSIFIER_MODEL
+from bot.ai.client import CLASSIFIER_MODEL, PROXY_MODELS
 from bot.ai.proxy import proxy
 from bot.logging_setup import truncate
 
@@ -50,12 +50,25 @@ async def _extract_via_chain(instruction: str, text: str, schema) -> str | None:
     chain does. Returns the raw JSON text, or None if nobody answered."""
     if proxy is None:
         raise RuntimeError("AI_PROXY_URL is not configured")
-    data = await proxy._request(
-        os.environ.get("AI_PROXY_MODEL", "openai/gpt-oss-120b"), text,
-        system_instruction=instruction, output_format="json",
-        schema=_json_schema_of(schema),
-    )
-    return json.dumps(data.get("structured_output")) if isinstance(data.get("structured_output"), dict) else None
+    models = [os.environ["AI_PROXY_MODEL"]] if os.environ.get("AI_PROXY_MODEL") else PROXY_MODELS
+    last_error = None
+    for model in models:
+        try:
+            data = await proxy._request(
+                model, text, system_instruction=instruction,
+                output_format="json", schema=_json_schema_of(schema),
+            )
+            result = data.get("structured_output")
+            return json.dumps(result) if isinstance(result, dict) else None
+        except Exception as exc:
+            last_error = exc
+            status = getattr(exc, "status", None) or getattr(exc, "code", None)
+            if status not in (429, 500, 502, 503, 504):
+                raise
+            log.warning("classifier proxy model %s unavailable, trying next", model)
+    if last_error:
+        raise last_error
+    return None
 
 
 async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
