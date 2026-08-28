@@ -799,8 +799,9 @@ async def test_a_second_amount_is_refused_rather_than_guessed_at(db_pool):
 
     result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
 
-    assert result["status"] == "amount_already_set"
+    assert result["status"] == "already_present"
     assert result["quantity"] == "1 ящ."
+    assert "cannot be added to or subtracted from" in result["ask_user"]
     assert "◻️ вино, 1 ящ." in result["rendered"], "the list must be untouched"
 
 
@@ -1335,7 +1336,7 @@ async def test_an_older_single_amount_row_is_read_and_replaced(db_pool):
     )
 
     refused = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
-    assert refused["status"] == "amount_already_set"
+    assert refused["status"] == "already_present"
     assert refused["quantity"] == "1 ящ."
 
     result = await core.list_add(db_pool, session_id, "вино", amounts=[
@@ -1360,3 +1361,32 @@ def test_a_nested_array_parameter_survives_the_openai_translation():
     assert amounts["items"]["type"] == "object"
     assert set(amounts["items"]["properties"]) == {"amount", "unit"}
     assert amounts["items"]["required"] == ["amount", "unit"]
+
+
+async def test_an_item_with_no_amount_asks_how_much_instead_of_stonewalling(db_pool):
+    """Live: "Добавь ещё водку" against a bare "водка" row came back
+    already_present, and the bot answered "Водка уже есть в списке." — true,
+    useless, and it ignored the word that mattered. There is nothing to add to
+    and nothing to add, so the only useful move is to ask."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "водка")
+
+    again = await core.list_add(db_pool, session_id, "водка")
+
+    assert again["status"] == "already_present"
+    assert again["quantity"] is None
+    assert "no amount recorded" in again["ask_user"]
+    assert "cannot be added to or subtracted from" in again["ask_user"]
+
+
+async def test_the_refusal_names_what_is_already_there(db_pool):
+    """The reply has to be actionable: "уже есть" alone leaves the person
+    guessing what to say instead."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "пиво", amount=1, unit="ящик")
+
+    again = await core.list_add(db_pool, session_id, "пиво")
+
+    assert again["status"] == "already_present"
+    assert again["quantity"] == "1 ящ."
+    assert "as 1 ящ." in again["ask_user"]

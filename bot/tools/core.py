@@ -367,32 +367,48 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
     was = quantity.combine(before)
     after = restated if restated is not None else _stated(None, value, unit)
 
-    if after:
-        now = quantity.combine(after)
-        # A restatement is the whole answer and always applies. A single
-        # stated amount only applies to an item that has none: told "добавь
-        # бутылку пива" when a crate is already listed, guessing between
-        # replacing the crate and adding to it would be inventing an
-        # intention. Say what is there and let the person name the total.
-        if restated is None and before and now != was:
-            return {"status": "amount_already_set", "item_id": existing["id"],
-                    "quantity": was, "you_were_told": now,
-                    "rendered": await _rendered_list(pool, session_id)}
-        if now != was:
-            await pool.execute(
-                "UPDATE list_items SET amounts = $2, amount = NULL, unit = NULL WHERE id = $1",
-                existing["id"], json.dumps(after),
-            )
-            result = {"status": "updated", "item_id": existing["id"], "quantity": now,
-                      "rendered": await _rendered_list(pool, session_id)}
-            if was is not None:
-                result["previous_quantity"] = was
-            return result
+    # A restatement is the whole answer and always applies.
+    if restated is not None and quantity.combine(after) != was:
+        return await _replace_amount(pool, session_id, existing, after, was)
 
-    return {"status": "already_present", "item_id": existing["id"],
-            "item_status": existing["status"],
-            "quantity": quantity.combine(_amounts_of(existing)),
-            "rendered": await _rendered_list(pool, session_id)}
+    # Filling in a blank is adding information, so a first amount applies.
+    if after and not before:
+        return await _replace_amount(pool, session_id, existing, after, was)
+
+    # Everything else is somebody trying to change what is already there, and
+    # this tool cannot add or subtract — "добавь ещё бутылку вина" against
+    # "1 бут." could mean two bottles or a bottle more, and guessing invents
+    # an intention. Live, the version without this said "Водка уже есть в
+    # списке." to "Добавь ещё водку": true, useless, and it ignored the word
+    # that mattered. Say what is on the list and ask for the whole new value.
+    return {
+        "status": "already_present",
+        "item_id": existing["id"],
+        "item_status": existing["status"],
+        "quantity": was,
+        "ask_user": (
+            "This is already on the list"
+            + (f" as {was}" if was else " with no amount recorded")
+            + ". Amounts cannot be added to or subtracted from here — tell them what is "
+            "there, say you cannot add or take away, and ask for the whole new amount "
+            "(\"две бутылки\", not \"ещё одна\"). Pass their answer as amounts."
+        ),
+        "rendered": await _rendered_list(pool, session_id),
+    }
+
+
+async def _replace_amount(pool, session_id, existing, after, was) -> dict:
+    """Store a stated amount, replacing whatever was there."""
+    await pool.execute(
+        "UPDATE list_items SET amounts = $2, amount = NULL, unit = NULL WHERE id = $1",
+        existing["id"], json.dumps(after),
+    )
+    result = {"status": "updated", "item_id": existing["id"],
+              "quantity": quantity.combine(after),
+              "rendered": await _rendered_list(pool, session_id)}
+    if was is not None:
+        result["previous_quantity"] = was
+    return result
 
 
 async def list_show(pool, session_id) -> dict:
