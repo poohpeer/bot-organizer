@@ -331,14 +331,29 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
         "WHERE session_id = $1 AND lower(name) = lower($2)",
         session_id, name,
     )
-    if value is not None and existing["amount"] is None:
-        await pool.execute(
-            "UPDATE list_items SET amount = $2, unit = $3 WHERE id = $1",
-            existing["id"], value, quantity.normalize_unit(unit),
-        )
-        return {"status": "updated", "item_id": existing["id"],
-                "quantity": quantity.render(value, unit),
-                "rendered": await _rendered_list(pool, session_id)}
+    if value is not None:
+        # An amount stated now wins, whether it fills a blank or replaces
+        # what was there. Refusing to overwrite protected a parsed-from-text
+        # amount from being clobbered by a re-parse of the same phrase; with
+        # the model sending a number and a unit, a different value is
+        # somebody correcting the list. Live: "вино, 1 ящ." was on the list,
+        # "Добавь вино 1 бут" came back already_present, and nothing changed
+        # — the person was ignored.
+        was = quantity.render(existing["amount"], existing["unit"])
+        now = quantity.render(value, unit)
+        if was != now:
+            await pool.execute(
+                "UPDATE list_items SET amount = $2, unit = $3 WHERE id = $1",
+                existing["id"], value, quantity.normalize_unit(unit),
+            )
+            result = {"status": "updated", "item_id": existing["id"], "quantity": now,
+                      "rendered": await _rendered_list(pool, session_id)}
+            # Named so the reply can say what it replaced rather than just
+            # confirming: silently swapping a crate for a bottle is the kind
+            # of change someone wants to see acknowledged.
+            if was is not None:
+                result["previous_quantity"] = was
+            return result
 
     return {"status": "already_present", "item_id": existing["id"],
             "item_status": existing["status"],

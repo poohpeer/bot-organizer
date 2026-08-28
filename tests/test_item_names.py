@@ -142,3 +142,27 @@ def test_a_crate_is_an_amount_not_a_name():
     """Live: "ящик вина" reached the list as an item called "ящик вино"."""
     assert item_names.canonical("ящик вина") == "вино"
     assert item_names.canonical("мешок картошки") == "картошка"
+
+
+def test_a_number_written_against_its_unit_is_still_an_amount():
+    """Live: "1кг апельсинов" reached the list as an item called
+    "1кг апельсины". Whitespace tokenising keeps "1кг" as one token, which is
+    neither a digit nor a listed word, so it survived into the name."""
+    assert item_names.canonical("1кг апельсинов") == "апельсины"
+    assert item_names.canonical("500г сыра") == "сыр"
+    assert item_names.canonical("2л молока") == "молоко"
+
+
+def test_the_measure_words_seen_in_a_real_list():
+    """"булка хлеб" and "немного виноград" were both on one live list — the
+    measure word had nowhere to go, so it stayed in the name."""
+    assert item_names.canonical("булка хлеба") == "хлеб"
+    assert item_names.canonical("немного винограда") == "виноград"
+    assert item_names.canonical("кусок сыра") == "сыр"
+
+
+def test_a_measure_word_on_its_own_is_still_an_item():
+    """Stripping never empties a name, however many measure words it holds."""
+    assert item_names.canonical("булка") == "булка"
+    assert item_names.canonical("немного") == "немного"
+    assert item_names.canonical("кусок") == "кусок"

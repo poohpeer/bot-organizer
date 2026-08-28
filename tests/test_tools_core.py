@@ -788,21 +788,37 @@ async def test_list_add_fills_in_a_blank_quantity(db_pool):
     assert (float(row["amount"]), row["unit"]) == (2.0, "килограмм")
 
 
-async def test_list_add_never_overwrites_an_existing_quantity(db_pool):
-    """Filling in a blank is adding information; overwriting a set value would
-    be losing it, so a second stated amount is reported, not silently applied."""
+async def test_a_stated_amount_replaces_the_one_on_the_list(db_pool):
+    """This rule used to be the other way round: overwriting was refused
+    because a re-parse of the same free-text phrase could clobber a good
+    value. With the model sending a number and a unit, a different value is
+    somebody correcting the list. Live: "вино, 1 ящ." was listed, "Добавь
+    вино 1 бут" came back already_present, and nothing changed."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "вино", amount=1, unit="ящик")
+
+    result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
+
+    assert result["status"] == "updated"
+    assert result["quantity"] == "1 бут."
+    assert result["previous_quantity"] == "1 ящ."
+    row = await db_pool.fetchrow(
+        "SELECT amount, unit FROM list_items WHERE session_id = $1 AND lower(name) = 'вино'",
+        session_id,
+    )
+    assert (float(row["amount"]), row["unit"]) == (1.0, "бутылка")
+
+
+async def test_restating_the_same_amount_changes_nothing(db_pool):
+    """Two people asking for the same two kilos is not a correction, and must
+    not read as one."""
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "молоко", amount=2, unit="литр")
 
-    result = await core.list_add(db_pool, session_id, "молоко", amount=3, unit="литр")
+    result = await core.list_add(db_pool, session_id, "молоко", amount=2, unit="литр")
 
     assert result["status"] == "already_present"
     assert result["quantity"] == "2 л"
-    row = await db_pool.fetchrow(
-        "SELECT amount, unit FROM list_items WHERE session_id = $1 AND lower(name) = 'молоко'",
-        session_id,
-    )
-    assert (float(row["amount"]), row["unit"]) == (2.0, "литр"), "the first amount must survive"
 
 
 async def test_list_claim_sets_claimant(db_pool):
