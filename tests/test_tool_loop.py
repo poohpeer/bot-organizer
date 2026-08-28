@@ -275,3 +275,44 @@ async def test_running_out_of_turns_with_nothing_gathered_still_raises():
             "запомни",
             {"remember_fact": AsyncMock(return_value={"status": "ok"})},
         )
+
+
+async def test_repeating_the_same_call_stops_instead_of_burning_the_limit():
+    """Live: after adding three items the model called event_status four times
+    in a row with identical arguments, took the turn limit and ~15s to do it,
+    and every call returned the same report."""
+    report = "Вот текущая информация:\n\n🛒 Список:\n◻️ мясо"
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="event_status", args={"session_id": 1}, id=f"c{i}")])
+        for i in range(MAX_TOOL_ITERATIONS + 2)
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+    tool = AsyncMock(return_value={"status": "ok", "report": report})
+
+    answer = await run_tool_loop(
+        _fallback((provider, "openai/gpt-oss-120b")), "покажи статус", {"event_status": tool},
+    )
+
+    assert answer == report
+    # Once, not six times: the repeat is recognised before it is executed, so
+    # the identical call never runs at all.
+    assert tool.await_count == 1
+
+
+async def test_a_different_call_is_not_treated_as_a_repeat():
+    """Only an identical request stops the loop; ordinary multi-step work must
+    still run to completion."""
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="list_add", args={"name": "мясо"}, id="c1")]),
+        Reply(text="", tool_calls=[ToolCall(name="list_add", args={"name": "пиво"}, id="c2")]),
+        Reply(text="Добавил."),
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+    tool = AsyncMock(return_value={"status": "ok", "rendered": "◻️ мясо"})
+
+    answer = await run_tool_loop(
+        _fallback((provider, "openai/gpt-oss-120b")), "добавь мясо и пиво", {"list_add": tool},
+    )
+
+    assert tool.await_count == 2
+    assert answer == "◻️ мясо" or answer == "Добавил."
