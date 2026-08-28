@@ -280,6 +280,17 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
             return {"status": "ok", "item_id": row["id"],
                     "rendered": await _rendered_list(pool, session_id)}
 
+    if twin is not None and twin["name"] != name:
+        # The same item under an older spelling. Rows written before names
+        # were canonicalised keep whatever reached them — one live list had
+        # "одна бутылка чай", which matches "чай" by key but reads as
+        # nonsense — and nothing else would ever repair them. Renaming on
+        # the next mention is safe: the key matched, so this is the same
+        # item, and the new name is derived from what someone just said.
+        await pool.execute(
+            "UPDATE list_items SET name = $2 WHERE id = $1", twin["id"], name
+        )
+
     existing = twin or await pool.fetchrow(
         "SELECT id, status, amount, unit FROM list_items "
         "WHERE session_id = $1 AND lower(name) = lower($2)",

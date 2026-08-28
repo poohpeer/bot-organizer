@@ -1202,3 +1202,24 @@ async def test_an_unparseable_amount_leaves_the_item_bare(db_pool):
         "SELECT amount, unit FROM list_items WHERE id = $1", added["item_id"]
     )
     assert (row["amount"], row["unit"]) == (None, None)
+
+
+async def test_an_older_spelling_is_repaired_when_the_item_comes_up_again(db_pool):
+    """Rows written before names were canonicalised keep whatever reached
+    them. One live list had "одна бутылка чай" — it matches "чай" by key, so
+    it was found and its amount updated, but the nonsense name stayed and
+    nothing would ever have repaired it."""
+    session_id = await _new_session(db_pool)
+    await db_pool.execute(
+        "INSERT INTO list_items (session_id, name) VALUES ($1, 'одна бутылка чай')",
+        session_id,
+    )
+
+    result = await core.list_add(db_pool, session_id, "чай", amount=1, unit="бутылка")
+
+    assert result["status"] == "updated"
+    names = [r["name"] for r in await db_pool.fetch(
+        "SELECT name FROM list_items WHERE session_id = $1", session_id
+    )]
+    assert names == ["чай"], "the older spelling should have been repaired, not duplicated"
+    assert "◻️ чай, 1 бут." in result["rendered"]
