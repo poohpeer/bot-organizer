@@ -46,8 +46,16 @@ def build_chain(groq_provider, gemini_provider) -> list[tuple]:
     return [(gemini_provider, model) for model in GEMINI_MODELS] + groq_entries
 
 
+# CODEX_MODELS and CLAUDE_MODELS are deliberately not in this chain. Both are
+# CLI-backed adapters in ai-proxy that accept a tools array and silently
+# ignore it — observed live as "start provider=codex tools=26" followed by
+# "complete ... tool_calls=0". Almost every turn here needs a tool call, so
+# such a provider does not degrade, it fabricates: asked to show the list,
+# codex could not reach the database and answered "доступ к данным
+# организатора сейчас недоступен". The constants stay defined because
+# AI_PROXY_MODELS can still name them explicitly for a tool-free workload.
 DEFAULT_PROXY_MODELS = ",".join(
-    CODEX_MODELS + CLAUDE_MODELS + GROQ_MODELS + [
+    GROQ_MODELS + [
         "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.6-flash",
         "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
     ]

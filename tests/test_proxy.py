@@ -87,3 +87,18 @@ async def test_unavailable_proxy_provider_becomes_retryable(monkeypatch):
         assert exc.status == 503
     else:
         raise AssertionError("expected proxy error")
+
+
+def test_the_default_chain_excludes_providers_that_drop_tools():
+    """ai-proxy's codex and claude_code adapters accept a tools array and
+    silently ignore it — live: "start provider=codex tools=26" then
+    "complete ... tool_calls=0". Almost every turn here needs a tool call, so
+    such a provider does not degrade, it fabricates: asked to show the list,
+    codex answered "доступ к данным организатора сейчас недоступен" rather
+    than reading the database. Neither may sit in the default chain.
+    """
+    import bot.ai.client as client
+
+    assert "codex:" not in client.DEFAULT_PROXY_MODELS
+    assert "claude:" not in client.DEFAULT_PROXY_MODELS
+    assert client.DEFAULT_PROXY_MODELS.startswith("openai/gpt-oss-120b")

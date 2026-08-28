@@ -5,7 +5,18 @@ metadata:
 data:
   AI_PROXY_URL: http://ai-proxy:8787
   AI_PROXY_PROVIDER: groq
-  AI_PROXY_MODELS: codex:gpt-5.3-codex,codex:gpt-5.2-codex,codex:gpt-5.1-codex-mini,claude:opus,claude:sonnet,claude:haiku,openai/gpt-oss-120b,openai/gpt-oss-20b,gemma-4-31b-it,gemma-4-26b-a4b-it,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite
+  # No codex: or claude: entries. Both are CLI-backed adapters in ai-proxy
+  # that accept a tools array and silently ignore it — observed live as
+  # "start provider=codex tools=26" followed by "complete ... tool_calls=0".
+  # Almost everything this bot does needs a tool call, so a provider that
+  # drops them does not degrade, it fabricates: asked to show the list,
+  # codex could not reach the database and answered "доступ к данным
+  # организатора сейчас недоступен", which is the confident-but-wrong reply
+  # R10 forbids. Their JSON classifier calls came back empty too
+  # ("extract() got an empty response"). Until ai-proxy refuses a
+  # tool-bearing request it cannot serve, this chain stays on the providers
+  # that actually support tool calling.
+  AI_PROXY_MODELS: openai/gpt-oss-120b,openai/gpt-oss-20b,gemma-4-31b-it,gemma-4-26b-a4b-it,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite
   AI_PROXY_TIMEOUT_S: "600"
   DEFAULT_TIMEZONE: Asia/Jerusalem
   QUIET_UNTIL_HOUR: "9"
