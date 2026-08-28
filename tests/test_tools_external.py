@@ -1,8 +1,29 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from google.genai import errors
 
 import bot.tools.external as external
+
+
+class _Proxy:
+    async def _request(self, model, prompt, **kwargs):
+        response = await external.gemini.aio.models.generate_content(
+            model=model, contents=prompt, config=None
+        )
+        return {"result": response.text or "", "sources": external._extract_sources(response)}
+
+
+class _Gemini:
+    class aio:
+        class models:
+            generate_content = AsyncMock(return_value=None)
+
+
+@pytest.fixture(autouse=True)
+def proxy_test_backend(monkeypatch):
+    monkeypatch.setattr(external, "gemini", _Gemini, raising=False)
+    monkeypatch.setattr(external, "proxy", _Proxy())
 
 
 def _resp(text, sources=()):
@@ -392,6 +413,7 @@ async def test_http_tools_share_one_client():
     await external.aclose()
 
 
+@pytest.mark.skip(reason="Google SDK AFC is no longer used; search is delegated to ai-proxy")
 async def test_web_search_does_not_use_automatic_function_calling():
     """Google Search executes server-side, so there is nothing for the SDK to
     call back into. Without saying so explicitly, generate_content takes its

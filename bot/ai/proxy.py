@@ -17,7 +17,7 @@ class ProxyProvider:
 
     async def _request(self, model, prompt, *, tools=None, system_instruction=None, history=None, output_format="text", schema=None):
         body = {
-            "provider": self.backend_provider,
+            "provider": "groq" if model.startswith("openai/") else "gemini",
             "model": model,
             "prompt": prompt,
             "system": system_instruction,
@@ -28,7 +28,10 @@ class ProxyProvider:
         }
         async with httpx.AsyncClient(timeout=float(os.environ.get("AI_PROXY_TIMEOUT_S", "600")) + 5) as client:
             response = await client.post(f"{self.endpoint}/v1/complete", json=body)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise ProxyError(exc.response.status_code, str(exc)) from exc
             return response.json()
 
     async def start(self, model, prompt, *, tools=None, system_instruction=None, history=None):
@@ -78,3 +81,9 @@ class _ProxyChat:
 
 proxy_endpoint = os.environ.get("AI_PROXY_URL")
 proxy = ProxyProvider(proxy_endpoint) if proxy_endpoint else None
+
+
+class ProxyError(RuntimeError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status

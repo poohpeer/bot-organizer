@@ -7,7 +7,7 @@ import httpx
 from google.genai import types
 
 from bot.ai.client import MODELS
-from bot.ai.proxy import proxy
+from bot.ai.proxy import ProxyError, proxy
 from bot.logging_setup import truncate
 
 log = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ _HTTP_TIMEOUT = 10.0
 # GPT-OSS models carry a server-side `browser_search`; Gemini has its own
 # Google Search grounding. Gemma has neither, so it is excluded even though it
 # is the last resort in the chat chain.
-SEARCH_MODELS = MODELS
+SEARCH_MODELS = [m for m in MODELS if m.startswith("gemini-")]
 
 # Seconds. Without this a hung grounded-search call blocks the tool loop, and
 # with it the user's Telegram reply, indefinitely.
@@ -74,16 +74,22 @@ async def web_search(query: str) -> dict:
     """
     if proxy is None:
         return {"found": False, "summary": None, "sources": []}
-    try:
-        data = await proxy._request(
-            os.environ.get("AI_PROXY_MODEL", MODELS[0]), query,
-            tools=[{"type": "browser_search"}],
-        )
-    except Exception:
-        log.warning("web_search via ai-proxy failed for query=%r", query, exc_info=True)
-        return {"found": False, "summary": None, "sources": []}
-    text = (data.get("result") or "").strip()
-    return {"found": bool(text), "summary": text or None, "sources": []}
+    last_error = None
+    for model in SEARCH_MODELS:
+        try:
+            data = await proxy._request(model, query, tools=[{"type": "browser_search"}])
+            text = (data.get("result") or "").strip()
+            if text:
+                return {"found": True, "summary": text, "sources": data.get("sources", [])}
+        except Exception as exc:
+            last_error = exc
+            log.warning("web_search via ai-proxy/%s failed", model, exc_info=True)
+            status = getattr(exc, "status", None) or getattr(exc, "code", None)
+            if status not in (429, 500, 502, 503, 504):
+                break
+    if last_error:
+        log.warning("web_search exhausted proxy models for query=%r", query)
+    return {"found": False, "summary": None, "sources": []}
 
 
 _MAPS_API_KEY = os.environ["GOOGLE_MAPS_API_KEY"]

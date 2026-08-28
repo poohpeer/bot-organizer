@@ -1,7 +1,7 @@
 import logging
 import os
 
-from bot.ai.proxy import ProxyProvider, proxy
+from bot.ai.proxy import ProxyError, ProxyProvider, proxy
 from bot.ai.providers import is_retryable
 
 log = logging.getLogger(__name__)
@@ -37,12 +37,17 @@ def build_chain(groq_provider, gemini_provider) -> list[tuple]:
     return [(gemini_provider, model) for model in GEMINI_MODELS] + groq_entries
 
 
-PROXY_MODEL = os.environ.get("AI_PROXY_MODEL", "openai/gpt-oss-120b")
-CHAIN = [(proxy, PROXY_MODEL)] if proxy else []
+PROXY_MODELS = [m.strip() for m in os.environ.get(
+    "AI_PROXY_MODELS",
+    "openai/gpt-oss-120b,openai/gpt-oss-20b,gemma-4-31b-it,gemma-4-26b-a4b-it,"
+    "gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite",
+).split(",") if m.strip()]
+PROXY_MODEL = os.environ.get("AI_PROXY_MODEL", PROXY_MODELS[0])
+CHAIN = [(proxy, model) for model in PROXY_MODELS] if proxy else []
 
 # Kept for the modules that only need to know which Gemini models exist, and
 # for web_search's grounded-search fallback.
-MODELS = [PROXY_MODEL]
+MODELS = PROXY_MODELS
 
 # Cheap/fast model for the two-stage filter checks (active-mode relevance) so
 # the primary model is never spent on a binary "is this even relevant"
@@ -99,7 +104,8 @@ class ModelFallback:
                 )
                 return provider, model, chat
             except Exception as e:
-                if not is_retryable(e):
+                if not ((isinstance(e, ProxyError) and (e.status == 429 or e.status >= 500))
+                        or is_retryable(e)):
                     raise
                 last_error = e
                 log.warning("%s/%s unavailable (%s), trying the next model", provider.name, model, e)
