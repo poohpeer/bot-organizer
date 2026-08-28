@@ -44,12 +44,41 @@ async def _session_row(pool, session_id, columns="chat_id"):
     return await pool.fetchrow(f"SELECT {columns} FROM sessions WHERE id = $1", session_id)
 
 
+# Keys the model has actually invented for "where the event is", observed in
+# one session's facts table: destination, event_name. Nothing ever wrote
+# "place", which is the key event_status reads — so the 📍 line was blank for
+# the whole life of that session while the answer sat right there under
+# another name.
+#
+# Canonicalising here rather than asking the instruction to be more specific,
+# for the reason this codebase keeps returning to: a free-form key is a
+# guess the model re-makes on every call, and one wrong guess is invisible —
+# the write succeeds, and only the report is quietly empty.
+_PLACE_KEY = "place"
+_PLACE_ALIASES = frozenset({
+    "place", "destination", "location", "venue", "spot", "address",
+    "event_name", "event_place", "event_location", "meeting_place",
+    "место", "локация", "адрес", "куда", "место_встречи", "местовстречи",
+})
+
+
+def canonical_fact_key(key: str) -> str:
+    """Fold the model's chosen key onto the canonical one where we have a
+    reader that depends on an exact name. Only place has such a reader
+    (bot.tools.composed.event_status); every other key stays as written,
+    since nothing looks those up by name."""
+    if isinstance(key, str) and key.strip().lower().replace(" ", "_") in _PLACE_ALIASES:
+        return _PLACE_KEY
+    return key
+
+
 async def remember_fact(pool, session_id, key, value) -> dict:
+    stored_key = canonical_fact_key(key)
     await pool.execute(
         "INSERT INTO facts (session_id, key, value) VALUES ($1, $2, $3)",
-        session_id, key, value,
+        session_id, stored_key, value,
     )
-    return {"status": "ok"}
+    return {"status": "ok", "key": stored_key}
 
 
 async def get_facts(pool, session_id, key=None) -> dict:

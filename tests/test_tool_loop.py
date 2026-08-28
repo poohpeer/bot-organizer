@@ -176,3 +176,64 @@ async def test_text_on_the_final_allowed_turn_is_still_returned():
     result = await run_tool_loop(_fallback((provider, "m")), "?", {"t": AsyncMock(return_value={})})
 
     assert result == "успел"
+
+
+async def test_a_dropped_rendered_block_is_sent_instead_of_the_models_own_words():
+    """The live failure. Asked "покажи список" the model called list_show,
+    received the rendered list, called event_status, received the full report
+    — then answered "Больше нет элементов в списке. Что ещё нужно?", throwing
+    both away while the data sat in front of it.
+    """
+    report = "Вот текущая информация:\n\n🛒 Список:\n◻️ пиво"
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="event_status", args={}, id="c1")]),
+        Reply(text="Больше нет элементов в списке. Что ещё нужно?"),
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+
+    answer = await run_tool_loop(
+        _fallback((provider, "openai/gpt-oss-120b")),
+        "покажи список",
+        {"event_status": AsyncMock(return_value={"status": "ok", "report": report})},
+    )
+
+    assert answer == report
+
+
+async def test_a_reply_that_already_carries_the_block_is_left_alone():
+    """Compliance plus additions is compliance. Overwriting a reply that
+    included the block and added the roster-gap remark would throw away real
+    information to satisfy a rule about formatting."""
+    rendered = "◻️ Витька\n✅ Андрюха"
+    composed = f"{rendered}\n\nВ чате 9 человек, но записаны только 2."
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="get_participants", args={}, id="c1")]),
+        Reply(text=composed),
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+
+    answer = await run_tool_loop(
+        _fallback((provider, "openai/gpt-oss-120b")),
+        "кто идёт?",
+        {"get_participants": AsyncMock(return_value={"participants": [], "rendered": rendered})},
+    )
+
+    assert answer == composed
+
+
+async def test_a_tool_with_no_rendered_block_leaves_the_reply_untouched():
+    """Most tools return data, not prose. Their results must not be mistaken
+    for something to relay verbatim."""
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="remember_fact", args={}, id="c1")]),
+        Reply(text="Записал."),
+    ])
+    provider = _ScriptedProvider("ai-proxy", [chat])
+
+    answer = await run_tool_loop(
+        _fallback((provider, "openai/gpt-oss-120b")),
+        "место — море",
+        {"remember_fact": AsyncMock(return_value={"status": "ok", "key": "place"})},
+    )
+
+    assert answer == "Записал."

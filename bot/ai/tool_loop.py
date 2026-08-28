@@ -37,6 +37,42 @@ async def _call_tool(registry: dict, call) -> dict:
     return result
 
 
+
+# Fields whose value is already the finished, human-facing block of text —
+# produced by a deterministic renderer (bot/list_render.py,
+# bot/participant_render.py, bot/status_render.py), not by the model.
+_VERBATIM_FIELDS = ("report", "rendered")
+
+
+def _verbatim_block(result: dict) -> str | None:
+    for field in _VERBATIM_FIELDS:
+        value = result.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _honour_verbatim(reply_text: str, block: str | None) -> str:
+    """Make "relay the rendered block character-for-character" true in code.
+
+    The instruction says it, and the model does not reliably obey: asked
+    "покажи список" it called list_show, received the rendered list, called
+    event_status, received the full report — and answered "Больше нет
+    элементов в списке. Что ещё нужно?", discarding both while the data sat
+    in front of it. That is the same failure the renderers exist to prevent,
+    one layer up.
+
+    Substitution only when the block is *entirely* absent from the reply. A
+    model that included it and added something — the roster-gap remark, a
+    short lead-in — has complied, and overwriting that would throw away real
+    information to satisfy a rule about formatting.
+    """
+    if not block or block in reply_text:
+        return reply_text
+    log.warning("Model dropped a rendered block from its reply; sending the block instead")
+    return block
+
+
 async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, system_instruction=None) -> str:
     """Sends `prompt`, runs whatever tools the model asks for, feeds the
     results back, and repeats until it answers in plain text.
@@ -55,16 +91,22 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
     )
     log.debug("tool loop: first turn answered by %s/%s", provider.name, model)
     reply = chat.reply
+    # The most recent renderer output seen this conversation. Latest wins: it
+    # reflects the freshest state, and it is the last thing the model itself
+    # chose to go and fetch.
+    verbatim = None
 
     for turn in range(1, MAX_TOOL_ITERATIONS + 1):
         if not reply.tool_calls:
             log.debug("tool loop <- %.0fms after %d turn(s) | %s",
                       (time.perf_counter() - started) * 1000, turn, truncate(reply.text))
-            return reply.text
+            return _honour_verbatim(reply.text, verbatim)
 
         log.debug("tool loop turn %d: model requested %s",
                   turn, ", ".join(c.name for c in reply.tool_calls))
         results = [(call, await _call_tool(registry, call)) for call in reply.tool_calls]
+        for _call, result in results:
+            verbatim = _verbatim_block(result) or verbatim
 
         try:
             reply = await chat.send_tool_results(results)
@@ -86,7 +128,7 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
     if not reply.tool_calls:
         log.debug("tool loop <- %.0fms at the iteration limit | %s",
                   (time.perf_counter() - started) * 1000, truncate(reply.text))
-        return reply.text
+        return _honour_verbatim(reply.text, verbatim)
 
     log.warning("Tool loop still calling tools after %d turns, giving up", MAX_TOOL_ITERATIONS)
     raise RuntimeError(f"tool loop exceeded max iterations ({MAX_TOOL_ITERATIONS})")
