@@ -77,28 +77,28 @@ def combine(amounts) -> str | None:
     return _JOIN.join(parts) if parts else None
 
 
-def add_to(amounts, amount, unit) -> list[dict]:
-    """Fold a new amount into what an item already holds.
+def as_amounts(entries) -> list[dict]:
+    """A model-supplied list of {amount, unit} cleaned into storable pairs.
 
-    A different unit is kept alongside: a crate and a bottle are both real,
-    and converting between them would be inventing a rate nobody gave.
-
-    The same unit replaces rather than sums, which is the one part of this
-    nobody has specified. Summing reads better for "добавь ещё два литра",
-    but one message has already been seen reaching both the silent-capture
-    and the addressed path, and under summing that duplicate delivery would
-    quietly double the amount — a wrong number nobody can see is wrong.
-    Replacing is the recoverable failure: say it again and it is right.
+    Anything without a usable number is dropped rather than stored as a zero,
+    and a unit named twice is collapsed onto its last value — "ящик и две
+    бутылки, нет, три" is one restatement, not two contradictory ones.
     """
-    if amount is None:
-        return list(amounts or [])
-    unit = normalize_unit(unit)
-    out = [dict(entry) for entry in (amounts or [])]
-    for entry in out:
-        if normalize_unit(entry.get("unit")) == unit:
-            entry["amount"] = float(amount)
-            return out
-    out.append({"amount": float(amount), "unit": unit})
+    out: list[dict] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            value = float(entry.get("amount"))
+        except (TypeError, ValueError):
+            continue
+        unit = normalize_unit(entry.get("unit"))
+        for existing in out:
+            if existing["unit"] == unit:
+                existing["amount"] = value
+                break
+        else:
+            out.append({"amount": value, "unit": unit})
     return out
 
 

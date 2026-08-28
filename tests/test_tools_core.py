@@ -789,18 +789,33 @@ async def test_list_add_fills_in_a_blank_quantity(db_pool):
     ]
 
 
-async def test_a_second_unit_is_kept_alongside_the_first(db_pool):
-    """Reported: with "вино, 1 ящ." listed, "Добавь вино 1 бут" did nothing —
-    list_add refused to touch an amount that was already set. A crate and a
-    bottle are both real, and converting between them would invent a rate
-    nobody gave, so the item holds both."""
+async def test_a_second_amount_is_refused_rather_than_guessed_at(db_pool):
+    """With "вино, 1 ящ." listed, "добавь бутылку" could mean replace the
+    crate or add to it. Guessing either way invents an intention, and a wrong
+    quantity nobody can see is wrong. So nothing changes and the caller is
+    told what is there, to ask for the total instead."""
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "вино", amount=1, unit="ящик")
 
     result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
 
+    assert result["status"] == "amount_already_set"
+    assert result["quantity"] == "1 ящ."
+    assert "◻️ вино, 1 ящ." in result["rendered"], "the list must be untouched"
+
+
+async def test_a_restated_total_replaces_what_was_there(db_pool):
+    """The answer to the question above: "ящик и две бутылки" is one total,
+    and it replaces rather than adding to what it already says."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "вино", amount=1, unit="ящик")
+
+    result = await core.list_add(db_pool, session_id, "вино", amounts=[
+        {"amount": 1, "unit": "ящик"}, {"amount": 2, "unit": "бутылка"},
+    ])
+
     assert result["status"] == "updated"
-    assert result["quantity"] == "1 ящ. + 1 бут."
+    assert result["quantity"] == "1 ящ. + 2 бут."
     assert result["previous_quantity"] == "1 ящ."
 
 
@@ -1310,17 +1325,38 @@ async def test_merging_keeps_what_the_other_row_knew(db_pool):
     )
 
 
-async def test_an_older_single_amount_row_gains_a_second_unit(db_pool):
+async def test_an_older_single_amount_row_is_read_and_replaced(db_pool):
     """Rows written before the amounts column carry one pair in amount/unit.
-    Adding a second unit has to fold the old shape into the new one rather
-    than losing it."""
+    Both the refusal and the restatement have to see it."""
     session_id = await _new_session(db_pool)
     await db_pool.execute(
         "INSERT INTO list_items (session_id, name, amount, unit) VALUES ($1, 'вино', 1, 'ящик')",
         session_id,
     )
 
-    result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
+    refused = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
+    assert refused["status"] == "amount_already_set"
+    assert refused["quantity"] == "1 ящ."
 
-    assert result["quantity"] == "1 ящ. + 1 бут."
-    assert result["previous_quantity"] == "1 ящ."
+    result = await core.list_add(db_pool, session_id, "вино", amounts=[
+        {"amount": 1, "unit": "ящик"}, {"amount": 2, "unit": "бутылка"},
+    ])
+    assert result["quantity"] == "1 ящ. + 2 бут."
+
+
+def test_a_nested_array_parameter_survives_the_openai_translation():
+    """Groq gets its tools through bot/ai/tool_schema_openai.py, which used to
+    render only type and description. list_add's amounts is the first
+    array-of-objects declared, and came out as a bare {"type": "array"} with
+    no item schema — leaving the model to guess what belongs inside."""
+    from bot.ai.tool_schema_openai import openai_tools
+
+    declared = next(
+        t["function"] for t in openai_tools() if t["function"]["name"] == "list_add"
+    )
+    amounts = declared["parameters"]["properties"]["amounts"]
+
+    assert amounts["type"] == "array"
+    assert amounts["items"]["type"] == "object"
+    assert set(amounts["items"]["properties"]) == {"amount", "unit"}
+    assert amounts["items"]["required"] == ["amount", "unit"]
