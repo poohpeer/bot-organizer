@@ -204,6 +204,15 @@ def _as_amount(amount):
         return None
 
 
+def _stated(restated, value, unit) -> list[dict]:
+    """Whichever of the two inputs the caller used, as one list of pairs."""
+    if restated is not None:
+        return restated
+    if value is None:
+        return []
+    return [{"amount": value, "unit": quantity.normalize_unit(unit)}]
+
+
 def _amounts_of(row) -> list[dict]:
     """What an item holds, from whichever column knows.
 
@@ -234,7 +243,7 @@ async def _rendered_list(pool, session_id) -> str:
     return (await list_show(pool, session_id))["rendered"]
 
 
-async def list_add(pool, session_id, name, amount=None, unit=None, category=None) -> dict:
+async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None, category=None) -> dict:
     """Add an item, or report that it is already on the list.
 
     Idempotent on purpose: two people asking for milk, or a model re-adding an
@@ -270,6 +279,11 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
     # The unique index still keys on lower(name), which only catches an exact
     # repeat. Word-order and leftover-quantity variants have to be found
     # first, or they insert cleanly as a second row for the same thing.
+    # Two ways in, deliberately different. amount/unit states one amount, and
+    # is what "добавь бутылку пива" produces. amounts restates the whole
+    # thing, and is what someone gives after being told an amount is already
+    # set — "ящик и две бутылки" is one answer, not two additions.
+    restated = quantity.as_amounts(amounts) if amounts else None
     value = _as_amount(amount)
     key = item_names.match_key(name)
     rows = await pool.fetch(
@@ -299,7 +313,7 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
             # NULL amount leaves a row claiming "килограмм" of nothing.
             session_id, name, value,
             quantity.normalize_unit(unit) if value is not None else None,
-            json.dumps(quantity.add_to([], value, unit)) if value is not None else None,
+            json.dumps(_stated(restated, value, unit)) or None,
             _normalize_category(category),
         )
         if row is not None:
@@ -349,24 +363,28 @@ async def list_add(pool, session_id, name, amount=None, unit=None, category=None
         "WHERE session_id = $1 AND lower(name) = lower($2)",
         session_id, name,
     )
-    if value is not None:
-        # "Добавь" adds. A same-unit amount sums, and a different unit is kept
-        # alongside — asked for a bottle of wine with a crate already listed,
-        # the answer is "1 ящ. + 1 бут.", because both are real and converting
-        # between them would invent a rate nobody gave.
-        before = _amounts_of(existing)
-        after = quantity.add_to(before, value, unit)
-        was, now = quantity.combine(before), quantity.combine(after)
-        if was != now:
+    before = _amounts_of(existing)
+    was = quantity.combine(before)
+    after = restated if restated is not None else _stated(None, value, unit)
+
+    if after:
+        now = quantity.combine(after)
+        # A restatement is the whole answer and always applies. A single
+        # stated amount only applies to an item that has none: told "добавь
+        # бутылку пива" when a crate is already listed, guessing between
+        # replacing the crate and adding to it would be inventing an
+        # intention. Say what is there and let the person name the total.
+        if restated is None and before and now != was:
+            return {"status": "amount_already_set", "item_id": existing["id"],
+                    "quantity": was, "you_were_told": now,
+                    "rendered": await _rendered_list(pool, session_id)}
+        if now != was:
             await pool.execute(
                 "UPDATE list_items SET amounts = $2, amount = NULL, unit = NULL WHERE id = $1",
                 existing["id"], json.dumps(after),
             )
             result = {"status": "updated", "item_id": existing["id"], "quantity": now,
                       "rendered": await _rendered_list(pool, session_id)}
-            # Named so the reply can say what changed rather than only
-            # confirming: going from a crate to a crate and a bottle is worth
-            # acknowledging.
             if was is not None:
                 result["previous_quantity"] = was
             return result
