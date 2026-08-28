@@ -49,7 +49,7 @@ ALL_TOOLS = types.Tool(function_declarations=[
         ["session_id", "name"]),
     _fn("set_participant", "Record or update a participant's confirmation status for the session.",
         {"session_id": _S(Type.INTEGER), "display_name": _S(Type.STRING),
-         "status": _S(Type.STRING, "One of: unknown, confirmed, declined."),
+         "status": _S(Type.STRING, "One of: unknown, confirmed, maybe, declined. Use 'maybe' for a hedged reply ('может быть', 'постараюсь') — distinct from 'unknown', which means nobody has answered at all."),
          "user_id": _S(Type.INTEGER, "Telegram user id, if known.")},
         ["session_id", "display_name", "status"]),
     _fn("get_participants", "List participants and their confirmation status for the session.",

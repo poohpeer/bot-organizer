@@ -6,6 +6,11 @@ Telegram drops the whole message — a worse failure than ragged columns, since
 the group would see nothing at all. Grouped plain text reads correctly in any
 font and cannot fail to send, and keeps the bot to the one outgoing format S1
 already guarantees.
+
+Each item's leading marker is a pure function of its current claimed state —
+there is no cached rendering anywhere, so an icon is always current as of the
+call that produced it, and "update the icons when a status changes" is not a
+separate mechanism to get right, just a consequence of calling render() again.
 """
 
 import itertools
@@ -42,11 +47,17 @@ def _sort_key(item: dict):
     return (_category_rank(item), item["name"].lower())
 
 
+_TAKEN = "✅"      # someone has claimed it
+_NOT_TAKEN = "◻️"  # nobody has claimed it yet
+
+# Neither is *, - or + at a line start, so bot.formatting.to_plain_text's
+# bullet rewrite never touches these lines — same reasoning that picked the em
+# dash before, still holds for an emoji marker.
+
+
 def _item_line(item: dict) -> str:
-    # Em dash on purpose, not "-": bot.formatting.to_plain_text only rewrites
-    # a line-leading *, - or + into "—", so a line already written with "—"
-    # passes through untouched instead of being rewritten a second time.
-    line = f"— {item['name']}"
+    marker = _TAKEN if item.get("claimed_by") else _NOT_TAKEN
+    line = f"{marker} {item['name']}"
     if item.get("quantity"):
         line += f", {item['quantity']}"
     if item.get("claimed_by"):

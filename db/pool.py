@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS participants (
     user_id       BIGINT,
     display_name  TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'unknown'
-                       CHECK (status IN ('unknown', 'confirmed', 'declined')),
+                       CHECK (status IN ('unknown', 'confirmed', 'maybe', 'declined')),
     responded_at  TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -304,6 +304,12 @@ ALTER TABLE reminders ADD COLUMN IF NOT EXISTS assumed_timezone TEXT;
 ALTER TABLE reminders DROP CONSTRAINT IF EXISTS reminders_status_check;
 ALTER TABLE reminders ADD CONSTRAINT reminders_status_check
     CHECK (status IN ('pending', 'sent', 'cancelled', 'failed'));
+-- "maybe" is a hedged reply ("может быть", "постараюсь") — distinct from
+-- "unknown", which means nobody has answered at all. Conflating the two
+-- would make the ❓/◻️ icon distinction the user asked for impossible to draw.
+ALTER TABLE participants DROP CONSTRAINT IF EXISTS participants_status_check;
+ALTER TABLE participants ADD CONSTRAINT participants_status_check
+    CHECK (status IN ('unknown', 'confirmed', 'maybe', 'declined'));
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeat_every_minutes INT;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeat_until TIMESTAMPTZ;
 -- TEXT, not a number: people say "пару бутылок", "кг", "штук 5", and parsing

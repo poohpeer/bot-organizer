@@ -870,7 +870,7 @@ async def test_list_show_includes_the_rendered_text(db_pool):
 
     assert shown["items"][0]["quantity"] == "2 л"
     assert shown["items"][0]["category"] == "молочка"
-    assert shown["rendered"] == "Ещё не разобрали:\nМолочка\n— молоко, 2 л"
+    assert shown["rendered"] == "Ещё не разобрали:\nМолочка\n◻️ молоко, 2 л"
 
 
 async def test_a_missed_check_off_hands_back_the_real_item_names(db_pool):
@@ -938,3 +938,42 @@ async def test_an_item_added_before_the_name_becomes_a_participant_is_not_remove
     items = [i["name"] for i in (await core.list_show(db_pool, session_id))["items"]]
     assert items == ["Персик"]
 
+
+
+async def test_set_participant_accepts_maybe_as_a_distinct_status(db_pool):
+    """"maybe" (a hedged reply) is a genuinely separate state from "unknown"
+    (nobody has answered at all) — without a distinct value in the schema the
+    ❓/◻️ icon distinction the participant renderer draws would be impossible."""
+    session_id = await _new_session(db_pool)
+
+    await core.set_participant(db_pool, session_id, "Света", "maybe", user_id=333)
+
+    status = await db_pool.fetchval(
+        "SELECT status FROM participants WHERE session_id = $1 AND user_id = 333", session_id
+    )
+    assert status == "maybe"
+
+
+async def test_get_participants_includes_the_rendered_roster(db_pool):
+    session_id = await _new_session(db_pool)
+    await core.set_participant(db_pool, session_id, "Андрюха", "confirmed", user_id=1)
+    await core.set_participant(db_pool, session_id, "Витька", "maybe", user_id=2)
+
+    result = await core.get_participants(db_pool, session_id)
+
+    assert result["rendered"] == "✅ Андрюха\n❓ Витька"
+
+
+async def test_participant_icon_updates_live_when_status_changes(db_pool):
+    """End to end, against a real database: the rendered icon for one person
+    changes the moment their status does, with no separate step to keep it
+    in sync."""
+    session_id = await _new_session(db_pool)
+    await core.set_participant(db_pool, session_id, "Витька", "unknown", user_id=2)
+
+    before = (await core.get_participants(db_pool, session_id))["rendered"]
+    await core.set_participant(db_pool, session_id, "Витька", "confirmed", user_id=2)
+    after = (await core.get_participants(db_pool, session_id))["rendered"]
+
+    assert before == "◻️ Витька"
+    assert after == "✅ Витька"
