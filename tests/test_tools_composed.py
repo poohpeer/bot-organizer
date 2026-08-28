@@ -508,21 +508,46 @@ async def test_sync_chat_info_unavailable_when_telegram_call_fails(db_pool):
     assert result == {"status": "unavailable"}
 
 
-async def test_event_status_falls_back_to_the_resolved_place(db_pool):
-    """The live gap: event_status read only facts['place'], and in one real
+async def test_event_status_falls_back_to_the_place_as_it_was_written(db_pool):
+    """Two things at once.
+
+    The live gap: event_status read only facts['place'], and in one real
     session nothing ever wrote that key — the model chose "destination", then
     "event_name" — so the 📍 line was blank for the session's whole life while
-    the places table held two maps-resolved addresses."""
+    the places table held maps-resolved addresses.
+
+    And the report repeats the group back to itself. A chat called
+    "Море 20/11" had its place resolved to "The Old Man and the Sea", a
+    restaurant, and the report announced that as the meeting place. The
+    lookup stays for coordinates and the venue card; the report shows the
+    words someone typed.
+    """
     session_id = await _new_session(db_pool, chat_id=55)
     await db_pool.execute(
         "INSERT INTO places (session_id, name, address, lat, lon, query) "
-        "VALUES ($1, 'Tel Aviv Beach', 'Promenade', 32.0, 34.7, 'Tel Aviv, sea')",
+        "VALUES ($1, 'The Old Man and the Sea', 'Kedem St 85', 32.0, 34.7, 'Море')",
         session_id,
     )
 
     result = await composed.event_status(db_pool, session_id)
 
-    assert "📍 Место: Tel Aviv Beach" in result["report"]
+    assert "📍 Место: Море" in result["report"]
+    assert "The Old Man and the Sea" not in result["report"]
+
+
+async def test_a_place_row_with_no_original_phrasing_still_shows_something(db_pool):
+    """query is nullable — rows written before it was recorded have only the
+    maps name. Showing that beats showing nothing."""
+    session_id = await _new_session(db_pool, chat_id=58)
+    await db_pool.execute(
+        "INSERT INTO places (session_id, name, address, lat, lon) "
+        "VALUES ($1, 'Hanania Meadow', 'Route 1', 32.0, 34.7)",
+        session_id,
+    )
+
+    result = await composed.event_status(db_pool, session_id)
+
+    assert "📍 Место: Hanania Meadow" in result["report"]
 
 
 async def test_a_stated_place_beats_an_older_lookup(db_pool):

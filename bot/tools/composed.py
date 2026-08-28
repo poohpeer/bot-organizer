@@ -160,15 +160,28 @@ async def _current_place(pool, session_id) -> str | None:
     The fact wins when present, because someone stating a place in
     conversation is more current than an older lookup; `places` is the
     fallback, most recently resolved first.
+
+    Either way this reports the place *as the group wrote it*, never the name
+    maps came back with. Those differ, and not subtly: a chat called
+    "Море 20/11" had its place resolved to "The Old Man and the Sea", a
+    restaurant, and the status report announced that as the meeting place.
+    The lookup is worth keeping for coordinates and the venue card
+    (send_location uses the canonical name there, which is right for a map
+    pin), but the report is meant to repeat the group back to itself.
     """
     fact = (await core_tools.get_facts(pool, session_id, key="place"))["facts"].get("place")
     if fact:
         return fact
     row = await pool.fetchrow(
-        "SELECT name FROM places WHERE session_id = $1 ORDER BY resolved_at DESC LIMIT 1",
+        "SELECT query, name FROM places WHERE session_id = $1 ORDER BY resolved_at DESC LIMIT 1",
         session_id,
     )
-    return row["name"] if row else None
+    if row is None:
+        return None
+    # query is the phrasing that resolved it — what someone actually typed.
+    # It is nullable for rows written before it was recorded, so name is the
+    # last resort rather than the default.
+    return row["query"] or row["name"]
 
 
 async def event_status(pool, session_id) -> dict:
