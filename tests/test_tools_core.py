@@ -797,7 +797,7 @@ async def test_a_second_amount_is_refused_rather_than_guessed_at(db_pool):
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "вино", amount=1, unit="ящик")
 
-    result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
+    result = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка", adding=True)
 
     assert result["status"] == "already_present"
     assert result["quantity"] == "1 ящ."
@@ -1335,7 +1335,7 @@ async def test_an_older_single_amount_row_is_read_and_replaced(db_pool):
         session_id,
     )
 
-    refused = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка")
+    refused = await core.list_add(db_pool, session_id, "вино", amount=1, unit="бутылка", adding=True)
     assert refused["status"] == "already_present"
     assert refused["quantity"] == "1 ящ."
 
@@ -1371,7 +1371,7 @@ async def test_an_item_with_no_amount_asks_how_much_instead_of_stonewalling(db_p
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "водка")
 
-    again = await core.list_add(db_pool, session_id, "водка")
+    again = await core.list_add(db_pool, session_id, "водка", adding=True)
 
     assert again["status"] == "already_present"
     assert again["quantity"] is None
@@ -1385,7 +1385,7 @@ async def test_the_refusal_names_what_is_already_there(db_pool):
     session_id = await _new_session(db_pool)
     await core.list_add(db_pool, session_id, "пиво", amount=1, unit="ящик")
 
-    again = await core.list_add(db_pool, session_id, "пиво")
+    again = await core.list_add(db_pool, session_id, "пиво", adding=True)
 
     assert again["status"] == "already_present"
     assert again["quantity"] == "1 ящ."
@@ -1423,3 +1423,46 @@ async def test_a_name_nothing_would_produce_today_is_still_repaired(db_pool):
         "SELECT name FROM list_items WHERE session_id = $1", session_id
     )]
     assert names == ["чай"]
+
+
+async def test_a_stated_total_applies_without_any_flag(db_pool):
+    """The failure this default was inverted for. Told "Должно быть 700 г
+    бананов" the model called with amount/unit rather than the restatement
+    parameter, was refused, and the person could not change the number at
+    all. Both mistakes are possible; they are not equal — setting an amount
+    when someone meant "ещё" is recoverable by saying the total, refusing a
+    total is a dead end."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "бананы", amount=1, unit="килограмм")
+
+    result = await core.list_add(db_pool, session_id, "бананы", amount=700, unit="грамм")
+
+    assert result["status"] == "updated"
+    assert result["quantity"] == "700 г"
+    assert result["previous_quantity"] == "1 кг"
+
+
+async def test_asking_for_more_is_still_refused(db_pool):
+    """The flag is what preserves the behaviour that was asked for."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "пиво", amount=1, unit="ящик")
+
+    result = await core.list_add(
+        db_pool, session_id, "пиво", amount=1, unit="бутылка", adding=True
+    )
+
+    assert result["status"] == "already_present"
+    assert result["quantity"] == "1 ящ."
+
+
+async def test_asking_for_more_of_something_with_no_amount_just_sets_it(db_pool):
+    """There was nothing to add to, so there is nothing to be confused about."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "водка")
+
+    result = await core.list_add(
+        db_pool, session_id, "водка", amount=2, unit="бутылка", adding=True
+    )
+
+    assert result["status"] == "updated"
+    assert result["quantity"] == "2 бут."

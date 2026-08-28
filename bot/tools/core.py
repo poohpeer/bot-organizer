@@ -243,7 +243,7 @@ async def _rendered_list(pool, session_id) -> str:
     return (await list_show(pool, session_id))["rendered"]
 
 
-async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None, category=None) -> dict:
+async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None, adding=False, category=None) -> dict:
     """Add an item, or report that it is already on the list.
 
     Idempotent on purpose: two people asking for milk, or a model re-adding an
@@ -279,10 +279,14 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
     # The unique index still keys on lower(name), which only catches an exact
     # repeat. Word-order and leftover-quantity variants have to be found
     # first, or they insert cleanly as a second row for the same thing.
-    # Two ways in, deliberately different. amount/unit states one amount, and
-    # is what "добавь бутылку пива" produces. amounts restates the whole
-    # thing, and is what someone gives after being told an amount is already
-    # set — "ящик и две бутылки" is one answer, not two additions.
+    # A stated amount is the total unless the caller says otherwise. The
+    # default used to be the other way round, with a separate amounts
+    # parameter for a restatement, and the model did not reliably reach for
+    # it: told "Должно быть 700 г бананов" it called with amount/unit, was
+    # refused, and the person could not change the number at all. Both
+    # failures are possible, and they are not equal — silently setting an
+    # amount when someone meant "ещё" is recoverable by saying the total,
+    # while refusing a total is a dead end.
     restated = quantity.as_amounts(amounts) if amounts else None
     value = _as_amount(amount)
     key = item_names.match_key(name)
@@ -371,20 +375,19 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
     was = quantity.combine(before)
     after = restated if restated is not None else _stated(None, value, unit)
 
-    # A restatement is the whole answer and always applies.
-    if restated is not None and quantity.combine(after) != was:
+    # A restatement, or a plain stated total, replaces what is there.
+    if after and not adding and quantity.combine(after) != was:
         return await _replace_amount(pool, session_id, existing, after, was)
 
-    # Filling in a blank is adding information, so a first amount applies.
+    # Filling in a blank is adding information, so a first amount applies
+    # even when they said "ещё" — there was nothing to add to.
     if after and not before:
         return await _replace_amount(pool, session_id, existing, after, was)
 
-    # Everything else is somebody trying to change what is already there, and
-    # this tool cannot add or subtract — "добавь ещё бутылку вина" against
-    # "1 бут." could mean two bottles or a bottle more, and guessing invents
-    # an intention. Live, the version without this said "Водка уже есть в
-    # списке." to "Добавь ещё водку": true, useless, and it ignored the word
-    # that mattered. Say what is on the list and ask for the whole new value.
+    # They asked for more of something that already has an amount. This tool
+    # cannot add or subtract — "добавь ещё бутылку вина" against "1 бут."
+    # could mean two bottles or a bottle more, and guessing invents an
+    # intention. Say what is on the list and ask for the whole new value.
     return {
         "status": "already_present",
         "item_id": existing["id"],
