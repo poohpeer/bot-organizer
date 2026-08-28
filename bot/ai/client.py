@@ -9,7 +9,14 @@ log = logging.getLogger(__name__)
 groq_client = None
 gemini = None
 
-CODEX_MODELS = ["codex:gpt-5.3-codex", "codex:gpt-5.2-codex", "codex:gpt-5.1-codex-mini"]
+# One entry, and no model name after the prefix. A ChatGPT-authenticated
+# Codex CLI only runs the account's own default model — any explicit name is
+# rejected with "The '<name>' model is not supported when using Codex with a
+# ChatGPT account" — and ai-proxy's codex adapter never passes -m regardless.
+# The three names here previously all resolved to that same single model, so
+# the chain retried the identical request three times believing each was a
+# different fallback, burning two extra ~4s CLI invocations per outage.
+CODEX_MODELS = ["codex:"]
 CLAUDE_MODELS = ["claude:opus", "claude:sonnet", "claude:haiku"]
 GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 

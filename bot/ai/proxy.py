@@ -48,14 +48,20 @@ class ProxyProvider:
             return response.json()
 
     def _route_model(self, model):
-        """Map a chain model name to the proxy provider and its model name."""
+        """Map a chain model name to the proxy provider and its model name.
+
+        A bare prefix ("codex:") means "this provider, no model" and sends
+        model=None rather than an empty string: codex runs the ChatGPT
+        account's own default and rejects any explicit name, so there is no
+        model to name here and "" would be echoed back as a bogus one.
+        """
         for prefix, provider in (
             ("codex:", "codex"),
             ("ollama:", "ollama"),
             ("claude:", "claude_code"),
         ):
             if model.startswith(prefix):
-                return provider, model[len(prefix):]
+                return provider, model[len(prefix):] or None
         if model.startswith("openai/"):
             return "groq", model
         return self.backend_provider if self.backend_provider != "groq" else "gemini", model
