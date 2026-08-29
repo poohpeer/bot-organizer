@@ -10,9 +10,11 @@ from telegram.constants import ChatMemberStatus
 from telegram.ext import Application, ChatMemberHandler, ContextTypes, MessageHandler, filters
 
 import bot.dedup as dedup
+import bot.mcp_server as mcp_server
 import bot.router as router
 import bot.session as session
 import bot.tools.core as core_tools
+from bot.tools.schema import ALL_TOOLS
 import db.pool as db_pool_module
 from bot.logging_setup import configure_logging, truncate
 
@@ -174,6 +176,29 @@ async def post_init(app: Application) -> None:
     app.bot_data["bot_username"] = me.username
     log.info("Resolved bot identity: id=%s username=%s", me.id, me.username)
 
+    # Started here rather than as its own process: the endpoint dispatches
+    # into the same registry and the same pool this one already holds, and a
+    # second process would need its own copy of both. Kept on the runner so
+    # post_shutdown can close it rather than leaving a listening socket
+    # behind on a restart.
+    app.bot_data["mcp_grants"] = mcp_server.GrantStore()
+    # The router issues grants; it learns where to get them from here rather
+    # than importing this module, which would be a cycle.
+    router.set_grant_store(app.bot_data["mcp_grants"])
+    app.bot_data["mcp_runner"] = await mcp_server.serve(
+        lambda session_id, current_user: router._build_registry(
+            pool, app.bot, session_id=session_id, current_user=current_user,
+        ),
+        ALL_TOOLS.function_declarations,
+        app.bot_data["mcp_grants"],
+    )
+
+
+async def post_shutdown(app: Application) -> None:
+    runner = app.bot_data.get("mcp_runner")
+    if runner is not None:
+        await runner.cleanup()
+
 
 def main() -> None:
     app = (
@@ -181,6 +206,7 @@ def main() -> None:
         .token(os.environ["BOT_ORGANIZER_BOT_TOKEN"])
         .concurrent_updates(True)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_message))

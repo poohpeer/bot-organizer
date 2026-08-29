@@ -84,7 +84,7 @@ def _honour_verbatim(reply_text: str, block: str | None) -> str:
     return block
 
 
-async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, system_instruction=None) -> str:
+async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, system_instruction=None, mcp_url=None) -> str:
     """Sends `prompt`, runs whatever tools the model asks for, feeds the
     results back, and repeats until it answers in plain text.
 
@@ -98,7 +98,8 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
     log.debug("tool loop -> prompt=%s | history=%d turns", truncate(prompt), len(history or []))
 
     provider, model, chat = await fallback.start(
-        prompt, tools=tools, system_instruction=system_instruction, history=history
+        prompt, tools=tools, system_instruction=system_instruction, history=history,
+        mcp_url=mcp_url,
     )
     log.debug("tool loop: first turn answered by %s/%s", provider.name, model)
     reply = chat.reply
@@ -144,7 +145,8 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
             log.warning("Tool loop turn failed (%s), re-driving on the next model", e)
             fallback.index += 1
             provider, model, chat = await fallback.start(
-                None, tools=tools, system_instruction=system_instruction, history=chat.history()
+                None, tools=tools, system_instruction=system_instruction,
+                history=chat.history(), mcp_url=mcp_url,
             )
             log.debug("tool loop: recovered on %s/%s", provider.name, model)
             reply = chat.reply

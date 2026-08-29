@@ -758,7 +758,11 @@ async def test_private_reply_request_dms_the_asker_and_acks_in_group(db_pool, mo
     monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
     private_text = "Вот список: помидоры, хлеб"
 
-    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None):
+    # **_ rather than a spelled-out signature: run_tool_loop has gained a
+    # keyword argument twice now, and each time these doubles raised
+    # TypeError that the router caught and turned into its generic reply —
+    # so a signature mismatch looked like a wrong answer, not a crash.
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, **_):
         result = await registry["send_private_message"](text=private_text)
         assert result == {"status": "ok"}
         return "Отправил в личку."
@@ -783,7 +787,7 @@ async def test_private_reply_cannot_reach_tells_group_to_start_a_chat_without_le
     monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
     private_text = "Вот список: помидоры, хлеб, секретный ингредиент"
 
-    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None):
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, **_):
         result = await registry["send_private_message"](text=private_text)
         assert result["status"] == "cannot_reach"
         return "Не получилось отправить в личку — откройте чат со мной и нажмите Start."
@@ -807,7 +811,7 @@ async def test_private_reply_with_no_from_user_does_not_crash(db_pool, monkeypat
     telegram_bot = AsyncMock()
     monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
 
-    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None):
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, **_):
         result = await registry["send_private_message"](text="что угодно")
         assert result == {"status": "failed", "detail": "no telegram user to message"}
         return "Не получилось понять, кому писать в личку."
@@ -1000,3 +1004,108 @@ async def test_the_tool_loop_is_given_the_recent_conversation(db_pool):
     passed = loop.await_args.kwargs["history"]
     assert {"role": "user", "content": "Добавь ещё 0.5 воды"} in passed
     assert {"role": "assistant", "content": "Сколько всего?"} in passed
+
+
+async def test_a_grant_is_issued_for_the_turn_and_revoked_after(db_pool, monkeypatch):
+    """A CLI-backed model reaches for tools itself, so it needs somewhere to
+    call and something that says which session it is calling as. The token
+    should be valid for about as long as it is needed, no longer."""
+    from unittest.mock import AsyncMock, patch
+
+    import bot.mcp_server as mcp_server
+
+    grants = mcp_server.GrantStore()
+    monkeypatch.setattr(router, "MCP_BASE_URL", "http://bot-organizer-bot:8081")
+    router.set_grant_store(grants)
+    active = await _new_active_session(db_pool)
+    telegram_bot = AsyncMock()
+    seen = {}
+
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None):
+        seen["url"] = mcp_url
+        seen["resolved"] = grants.resolve(mcp_url.rsplit("/", 1)[-1])
+        return "ок"
+
+    monkeypatch.setattr(router, "run_tool_loop", fake_run_tool_loop)
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@bot покажи список"), BOT_ID, BOT_USERNAME,
+    )
+    router.set_grant_store(None)
+
+    assert seen["url"].startswith("http://bot-organizer-bot:8081/mcp/")
+    assert seen["resolved"].session_id == active["id"], "the grant must name this session"
+    token = seen["url"].rsplit("/", 1)[-1]
+    assert grants.resolve(token) is None, "the token must not outlive the turn"
+
+
+async def test_no_grant_and_no_url_when_nothing_serves_mcp(db_pool, monkeypatch):
+    """Every deployment that has not enabled it. Sending an address nothing
+    answers on would be worse than sending none."""
+    from unittest.mock import AsyncMock
+
+    import bot.mcp_server as mcp_server
+
+    # A store *is* present — otherwise this passes whether or not the
+    # MCP_BASE_URL guard exists, which is how it passed a sabotage run that
+    # removed the guard entirely.
+    class _CountingStore(mcp_server.GrantStore):
+        """Counts issues. Checking the store is empty afterwards cannot fail:
+        the router revokes in a finally, so it is empty either way."""
+
+        issued = 0
+
+        def issue(self, *a, **kw):
+            type(self).issued += 1
+            return super().issue(*a, **kw)
+
+    grants = _CountingStore()
+    router.set_grant_store(grants)
+    monkeypatch.setattr(router, "MCP_BASE_URL", None)
+    active = await _new_active_session(db_pool)
+    seen = {}
+
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None):
+        seen["url"] = mcp_url
+        return "ок"
+
+    monkeypatch.setattr(router, "run_tool_loop", fake_run_tool_loop)
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+
+    await router.handle_active_message(
+        db_pool, AsyncMock(), active, _message("@bot покажи список"), BOT_ID, BOT_USERNAME,
+    )
+
+    router.set_grant_store(None)
+
+    # Both halves: no address to send, and no token minted to go in one.
+    assert seen["url"] is None
+    assert type(grants).issued == 0, "a token was issued with nowhere to use it"
+
+
+async def test_the_grant_is_revoked_even_when_the_turn_fails(db_pool, monkeypatch):
+    """The TTL is a backstop, not the plan."""
+    from unittest.mock import AsyncMock
+
+    import bot.mcp_server as mcp_server
+
+    grants = mcp_server.GrantStore()
+    monkeypatch.setattr(router, "MCP_BASE_URL", "http://bot:8081")
+    router.set_grant_store(grants)
+    active = await _new_active_session(db_pool)
+    tokens = []
+
+    async def exploding_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None):
+        tokens.append(mcp_url.rsplit("/", 1)[-1])
+        raise RuntimeError("the model fell over")
+
+    monkeypatch.setattr(router, "run_tool_loop", exploding_loop)
+    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+
+    await router.handle_active_message(
+        db_pool, AsyncMock(), active, _message("@bot покажи список"), BOT_ID, BOT_USERNAME,
+    )
+    router.set_grant_store(None)
+
+    assert grants.resolve(tokens[0]) is None

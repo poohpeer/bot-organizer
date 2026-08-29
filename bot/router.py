@@ -7,6 +7,7 @@ that gate runs unless a human explicitly spoke to the bot.
 """
 
 import logging
+import os
 import random
 import unicodedata
 
@@ -511,6 +512,26 @@ async def _active_mode_instruction(pool, chat_id: int, session_id: int, current_
     )
 
 
+# Set by bot/main.py once the endpoint is listening. None in tests and in any
+# deployment that does not run it, which is the signal to send no mcp_url at
+# all rather than an address nothing answers on.
+_grant_store = None
+MCP_BASE_URL = os.environ.get("MCP_BASE_URL")
+
+
+def set_grant_store(store) -> None:
+    global _grant_store
+    _grant_store = store
+
+
+def _mcp_grants():
+    return _grant_store if MCP_BASE_URL else None
+
+
+def _mcp_url(token: str | None) -> str | None:
+    return f"{MCP_BASE_URL.rstrip('/')}/mcp/{token}" if (MCP_BASE_URL and token) else None
+
+
 def _bind_session_context(registry: dict, session_id: int, current_user) -> dict:
     """Trust active-session context from the router, not tool args from the model."""
     user_id = getattr(current_user, "id", None)
@@ -693,6 +714,15 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
 
     await session.touch_activity(pool, session_id)
     registry = _build_registry(pool, telegram_bot, session_id=session_id, current_user=message.from_user)
+
+    # A CLI-backed model reaches for tools itself over MCP rather than asking
+    # for them in its reply, so it needs somewhere to call and something that
+    # says which session it is calling as. Issued per turn and revoked below,
+    # so the token is valid for about as long as it is needed. Absent when
+    # nothing is serving MCP, which is every deployment that has not enabled
+    # it — the field is simply not sent.
+    grants = _mcp_grants()
+    mcp_token = grants.issue(session_id, message.from_user) if grants else None
     try:
         reply_text = await run_tool_loop(
             fallback, text, registry,
@@ -703,6 +733,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             # arrives back as a message it has no memory of prompting. See
             # bot/history.py.
             history=await history.recent_turns(pool, chat_id),
+            mcp_url=_mcp_url(mcp_token),
         )
     except AllModelsUnavailable:
         # Every provider is rate-limited or down. Telling the user to
@@ -713,6 +744,12 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     except Exception:
         log.exception("Tool loop failed for chat_id=%s session_id=%s", chat_id, session_id)
         reply_text = _FALLBACK_MESSAGE
+
+    finally:
+        if grants is not None and mcp_token is not None:
+            # In a finally so a failed turn does not leave a live token
+            # behind: the TTL is a backstop, not the plan.
+            grants.revoke(mcp_token)
 
     # Converted before the silence check below: a model that answers with
     # "**<silent>**" instead of the bare sentinel must still be silenced, and

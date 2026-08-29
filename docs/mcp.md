@@ -59,12 +59,26 @@ The registry the endpoint dispatches into is `bot.router._build_registry`,
 passed in rather than imported, so the binding rules have exactly one
 implementation — the one the Groq and Gemini paths already go through.
 
+## The lifetime of a grant
+
+One turn. `bot/router.py` issues a token before calling the model and revokes
+it in a `finally`, so a turn that fails does not leave a live token behind —
+the TTL is a backstop, not the plan.
+
+The endpoint runs inside the bot process, started in `post_init` and closed
+in `post_shutdown`. It is not a second process because it dispatches into the
+same registry and the same connection pool this one already holds.
+
 ## Configuration
 
 | variable | default | meaning |
 |---|---|---|
+| `MCP_BASE_URL` | unset | where a CLI reaches this bot. **Unset means MCP is not in use**: no grant is issued and no address is sent, which is the right behaviour for a deployment that does not run it |
 | `MCP_PORT` | `8081` | port the endpoint listens on |
 | `MCP_GRANT_TTL_SECONDS` | `600` | how long a grant stays valid |
+
+In the cluster `MCP_BASE_URL` is `http://bot-organizer-bot:8081`, a ClusterIP
+Service that exists for this and nothing else.
 
 The endpoint is reachable only inside the cluster; it is not exposed through
 an Ingress and must not be.
