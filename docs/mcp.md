@@ -69,6 +69,34 @@ The endpoint runs inside the bot process, started in `post_init` and closed
 in `post_shutdown`. It is not a second process because it dispatches into the
 same registry and the same connection pool this one already holds.
 
+## What the turn did
+
+A grant carries a `TurnRecord` (`bot/turn_outcome.py`): the tools that ran
+under it, and the last block a renderer produced. `revoke` hands the grant
+back so the router can read it after the turn ends.
+
+It exists because a CLI provider calls its tools *here*, not through
+`bot/ai/tool_loop.py`, and the tool loop is where two rules are enforced on
+what a turn may say:
+
+- **A rendered block is the answer.** `list_show`, `event_status` and the
+  others return text a deterministic renderer produced; a model that answers
+  around it gets overruled and the block is sent instead.
+- **A turn that changed something has to say so.** `<silent>` is for a
+  message that only gives the bot something to record. It is not for a
+  message answering a question the bot itself asked.
+
+Without the record the CLI path had neither. Live: the bot asked how many
+bottles of beer there should be in total, the person answered "Две бутылки
+пива", codex called `list_add`, the row was updated — and codex answered
+`<silent>`. The list was correct and the chat saw nothing, which from the
+group's side is indistinguishable from the bot being down.
+
+Tools that deliver a message themselves — `send_private_message`,
+`broadcast_message`, `send_location`, `nudge_unconfirmed_participants` — do
+not count as "changed something and said nothing". Answering in a DM and
+staying quiet in the group is the whole point of the first one.
+
 ## Configuration
 
 | variable | default | meaning |
