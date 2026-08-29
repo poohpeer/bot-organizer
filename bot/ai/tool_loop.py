@@ -39,7 +39,7 @@ async def _call_tool(registry: dict, call) -> dict:
 
 
 
-async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, system_instruction=None, mcp_url=None) -> str:
+async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, system_instruction=None, mcp_url=None, record=None) -> str:
     """Sends `prompt`, runs whatever tools the model asks for, feeds the
     results back, and repeats until it answers in plain text.
 
@@ -87,6 +87,10 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
         results = [(call, await _call_tool(registry, call)) for call in reply.tool_calls]
         for _call, result in results:
             verbatim = _verbatim_block(result) or verbatim
+            # The same record a CLI's own tool calls write to through
+            # bot/mcp_server.py, so the router sees one turn either way.
+            if record is not None:
+                record.record(call.name, result)
 
         try:
             reply = await chat.send_tool_results(results)

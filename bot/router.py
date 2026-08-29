@@ -82,14 +82,15 @@ def _break_the_silence(reply_text: str, record: TurnRecord) -> str:
     "<silent>". The list was right and the chat saw nothing — indistinguishable
     from the bot being broken.
 
-    The rendered block first, because it says what the list now holds; a bare
-    acknowledgement only when no renderer produced one.
+    A sentence the tool wrote for exactly this first, then the rendered
+    block because it says what the list now holds, and a bare acknowledgement
+    only when there is neither.
     """
     if _has_visible_text(reply_text) or not record.changed_something():
         return reply_text
     log.warning("Model went silent after changing something (%s); acknowledging instead",
                 ", ".join(record.tools_called))
-    return record.verbatim or ACKNOWLEDGEMENT
+    return record.say or record.verbatim or ACKNOWLEDGEMENT
 
 
 def _has_visible_text(text: str) -> bool:
@@ -413,9 +414,13 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "instead. Pass the number in the unit they used — \"700 г\" is amount=700 "
     "unit=\"грамм\", never 0.7. An amount is taken as the total. Set "
     "relative=true when they asked for MORE or LESS of something instead of "
-    "saying how much there should be in total — \"добавь ещё бутылку\", "
-    "\"убери один\", \"на полкило меньше\" are relative; \"должно быть 700 г\", "
-    "\"хлеб два\", \"хлеба осталось 2\" are not. Removing some of something is "
+    "saying how much there should be in total. The verb decides this, not "
+    "the word \"ещё\": \"добавь бутылку пива\", \"добавь ещё бутылку\", "
+    "\"докупи пачку\", \"убери один\", \"на полкило меньше\" are all relative. "
+    "Only a stated total is not: \"должно быть 700 г\", \"хлеб два\", "
+    "\"хлеба осталось 2\". Getting this wrong destroys what was there — "
+    "\"добавь бутылку пива\" against 2 бут. wrote 1 бут. and the group lost a "
+    "bottle. Removing some of something is "
     "a list_add with relative=true, not list_remove_item — that deletes the "
     "whole line. "
     "If list_add answers already_present, nothing was changed and "
@@ -748,9 +753,12 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     # so the token is valid for about as long as it is needed. Absent when
     # nothing is serving MCP, which is every deployment that has not enabled
     # it — the field is simply not sent.
+    # One record per turn, written to from both sides: the tool loop for an
+    # HTTP provider's tool calls, bot/mcp_server.py for a CLI's. The router
+    # reads it once, below, and does not care which path ran.
+    record = TurnRecord()
     grants = _mcp_grants()
-    mcp_token = grants.issue(session_id, message.from_user) if grants else None
-    spent_grant = None
+    mcp_token = grants.issue(session_id, message.from_user, record=record) if grants else None
     try:
         reply_text = await run_tool_loop(
             ai_client.fallback_for(chat_id, await settings.get_provider_chain(pool, chat_id)),
@@ -763,6 +771,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             # bot/history.py.
             history=await history.recent_turns(pool, chat_id),
             mcp_url=_mcp_url(mcp_token),
+            record=record,
         )
     except AllModelsUnavailable:
         # Every provider is rate-limited or down. Telling the user to
@@ -777,18 +786,15 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     finally:
         if grants is not None and mcp_token is not None:
             # In a finally so a failed turn does not leave a live token
-            # behind: the TTL is a backstop, not the plan. The revoked grant
-            # is kept because its record of the turn is what the two guards
-            # below read.
-            spent_grant = grants.revoke(mcp_token)
+            # behind: the TTL is a backstop, not the plan.
+            grants.revoke(mcp_token)
 
-    # The tool loop applies both of these to a turn it ran itself. A turn a
-    # CLI ran over MCP never passes through it, so they are applied here from
-    # what the grant recorded — otherwise the CLI providers are the one path
-    # with no guard on either failure.
-    if spent_grant is not None:
-        reply_text = honour_verbatim(reply_text, spent_grant.record.verbatim)
-        reply_text = _break_the_silence(reply_text, spent_grant.record)
+    # Both guards, from one record, for both paths. The tool loop applies the
+    # first to a turn it ran itself; a turn a CLI ran over MCP never passes
+    # through it, and before the record existed the CLI providers were the
+    # one path with no guard on either failure.
+    reply_text = honour_verbatim(reply_text, record.verbatim)
+    reply_text = _break_the_silence(reply_text, record)
 
     # Converted before the silence check below: a model that answers with
     # "**<silent>**" instead of the bare sentinel must still be silenced, and

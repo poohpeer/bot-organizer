@@ -89,7 +89,7 @@ def honour_verbatim(reply_text: str, block: str | None) -> str:
 
 @dataclass
 class TurnRecord:
-    """Which tools ran during one turn, and the last block they rendered.
+    """Which tools ran during one turn, and what they left for the reply.
 
     Kept separate from the grant that identifies the session: a grant says
     who may act, this says what was done. Mutable because it is filled in as
@@ -98,6 +98,14 @@ class TurnRecord:
 
     tools_called: list[str] = field(default_factory=list)
     verbatim: str | None = None
+    # A sentence the tool wrote for the case where the model says nothing.
+    # Distinct from verbatim, which is relayed over a model that talked
+    # around it, and from ask_user, which is instructions to the model and
+    # is in English. Live, "добавь бутылку пива" replaced 2 бут. with 1 бут.
+    # and the model answered "<silent>": "Записал." would have been true and
+    # useless, while "пиво: было 2 бут., стало 1 бут." is the one thing the
+    # group needed to see to catch it.
+    say: str | None = None
 
     def record(self, name: str, result) -> None:
         self.tools_called.append(name)
@@ -106,6 +114,10 @@ class TurnRecord:
         block = verbatim_block(result)
         if block:
             self.verbatim = block
+        if isinstance(result, dict):
+            said = result.get("say")
+            if isinstance(said, str) and said.strip():
+                self.say = said
 
     def changed_something(self) -> bool:
         return any(
