@@ -73,3 +73,46 @@ def strip_coordinates(name: str) -> str:
         return name
     stripped = _COORDINATES.sub("", name).strip(" ,;:—–-")
     return stripped or name.strip()
+
+
+# Hosts that only ever mean "here is a place". Matched on the host, not on
+# the path, because every one of these has several link shapes — a short
+# link, a share link, a coordinate link — and enumerating them ages badly.
+_NAVIGATOR_HOSTS = (
+    "google.com/maps", "google.co", "maps.google.", "maps.app.goo.gl", "goo.gl/maps",
+    "waze.com", "waze.to", "ul.waze.com",
+    "maps.apple.com", "maps.yandex.", "yandex.com/maps", "yandex.ru/maps",
+    "2gis.", "openstreetmap.org", "osm.org", "w3w.co", "what3words.com",
+    "moovitapp.com", "here.com", "mapy.cz", "komoot.", "organicmaps.app",
+)
+
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+
+# A coordinate pair anywhere in a URL. The catch-all for a navigator nobody
+# listed above: a link carrying a latitude and a longitude is a link to a
+# place, whoever generated it.
+_URL_COORDINATES = re.compile(r"-?\d{1,3}\.\d{3,}[,/;+]-?\d{1,3}\.\d{3,}")
+
+
+def find_map_url(text: str) -> str | None:
+    """The first navigator link in a message, or None.
+
+    Recognised by host, plus any URL carrying a coordinate pair. Deliberately
+    not resolved, not expanded and not checked: a short link that maps refuse
+    to expand is still a link that opens correctly on the phone of whoever
+    receives it, and the bot answering "не смог открыть эту короткую ссылку"
+    was worse than useless — it turned a working link into a conversation.
+
+    Trailing punctuation is dropped: "вот сюда: https://waze.com/ul/x." would
+    otherwise store a URL with a full stop welded on.
+    """
+    if not isinstance(text, str):
+        return None
+    for match in _URL.finditer(text):
+        url = match.group().rstrip(".,;:!?)]}»\"'")
+        lowered = url.lower()
+        if any(host in lowered for host in _NAVIGATOR_HOSTS):
+            return url
+        if _URL_COORDINATES.search(url):
+            return url
+    return None

@@ -124,6 +124,28 @@ async def test_a_location_reaches_the_location_handler_and_stops_there(monkeypat
     active_handler.assert_not_awaited()
 
 
+async def test_a_navigator_link_reaches_its_handler_and_stops_there(monkeypatch):
+    """Asserted here because nothing else does: removing the branch from
+    route_update left the whole suite green when the location branch had the
+    same gap."""
+    pool = MagicMock()
+    telegram_bot = AsyncMock()
+    active_row = {"id": 5, "chat_id": -100}
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    monkeypatch.setattr(main.session, "get_active_session", AsyncMock(return_value=active_row))
+    monkeypatch.setattr(main.router, "handle_shared_location", AsyncMock(return_value=False))
+    link_handler = AsyncMock(return_value=True)
+    active_handler = AsyncMock()
+    monkeypatch.setattr(main.router, "handle_shared_map_link", link_handler)
+    monkeypatch.setattr(main.router, "handle_active_message", active_handler)
+    msg = _message(text="https://maps.app.goo.gl/aBcD1234")
+
+    await main.route_update(pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
+
+    link_handler.assert_awaited_once_with(pool, telegram_bot, active_row, msg)
+    active_handler.assert_not_awaited()
+
+
 async def test_an_ordinary_message_still_falls_through_to_the_text_path(monkeypatch):
     """The other half: the location branch must not swallow ordinary chat."""
     pool = MagicMock()
@@ -132,6 +154,7 @@ async def test_an_ordinary_message_still_falls_through_to_the_text_path(monkeypa
     monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
     monkeypatch.setattr(main.session, "get_active_session", AsyncMock(return_value=active_row))
     monkeypatch.setattr(main.router, "handle_shared_location", AsyncMock(return_value=False))
+    monkeypatch.setattr(main.router, "handle_shared_map_link", AsyncMock(return_value=False))
     active_handler = AsyncMock()
     monkeypatch.setattr(main.router, "handle_active_message", active_handler)
 

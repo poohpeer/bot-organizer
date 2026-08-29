@@ -20,6 +20,7 @@ import bot.decision_log as decision_log
 import bot.group_info as group_info
 import bot.history as history
 import bot.list_render as list_render
+import bot.maps_links as maps_links
 import bot.places as places
 import bot.session as session
 import bot.telegram_text as telegram_text
@@ -626,6 +627,60 @@ async def _summarize_session(pool, session_id: int) -> str:
     items = ", ".join(i["name"] for i in list_result["items"]) or "пусто"
     confirmed = [p["display_name"] for p in participants_result["participants"] if p["status"] == "confirmed"]
     return f"Готово, сессию закрываю. Список: {items}. Подтвердили: {', '.join(confirmed) or 'никто'}."
+
+
+LINK_ADDED = "Добавил ссылку на место."
+LINK_ADDED_WITH_NAME = "Добавил место: {name}."
+
+
+async def handle_shared_map_link(pool, telegram_bot, active, message) -> bool:
+    """Take a navigator link exactly as it was sent.
+
+    Not resolved, not expanded, not checked against maps. Live, the model
+    tried to look one up and answered "Не смог открыть эту короткую ссылку —
+    карты её не раскрывают. Пришли, пожалуйста, название места или точку,
+    которая открывается" — turning a link that opens perfectly well on the
+    recipient's phone into a conversation. Whether maps can expand a short
+    link says nothing about whether the link works.
+
+    Handled here rather than by the model for the same reason: there is
+    nothing to decide. A Waze or Google Maps link in an organizing chat is
+    where the event is, and the whole job is to keep it and say so.
+
+    Additive on purpose — only the link is set. The place's name is whatever
+    the group already called it, and a link is not a reason to rename
+    anything. A name is taken only when there is none at all and the message
+    said something besides the URL.
+
+    Returns True when the message carried one, so the caller can stop.
+    """
+    url = maps_links.find_map_url(_text_of(message))
+    if url is None:
+        return False
+
+    session_id = active["id"]
+    await pool.execute(
+        "UPDATE sessions SET place_url = $2 WHERE id = $1", session_id, url
+    )
+
+    name = None
+    current = await composed_tools.current_place(pool, session_id)
+    if not current["name"]:
+        # Whatever was said alongside the link. "вот сюда:" and friends are
+        # left in rather than guessed at — the place should be written the
+        # way the group writes it, and a wrong strip is worse than a clumsy
+        # name they can correct in one message.
+        said = _text_of(message).replace(url, " ").strip(" \n\t.,;:—–-")
+        if said:
+            name = said
+            await core_tools.remember_fact(pool, session_id, "place", name)
+
+    log.info("session %s: place link set from a shared navigator link", session_id)
+    await telegram_bot.send_message(
+        chat_id=message.chat.id,
+        text=LINK_ADDED_WITH_NAME.format(name=name) if name else LINK_ADDED,
+    )
+    return True
 
 
 async def handle_shared_location(pool, active, message, bot_id, bot_username) -> bool:

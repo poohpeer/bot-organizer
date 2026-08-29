@@ -312,6 +312,11 @@ async def create_pool(dsn: str, *, init=None) -> asyncpg.Pool:
 # constraints — and safe to run on every startup.
 _ALTERS_SQL = """
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS closing_question_snoozed_until TIMESTAMPTZ;
+-- A navigator link somebody sent, kept exactly as sent. Not in `places`:
+-- that table's lat/lon are NOT NULL and a short link carries neither, and
+-- expanding one to find out is the thing this column exists to stop the bot
+-- doing. One event has one place, so one column rather than a table.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS place_url TEXT;
 ALTER TABLE places ADD COLUMN IF NOT EXISTS query TEXT;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS timezone TEXT;
