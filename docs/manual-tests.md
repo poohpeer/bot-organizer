@@ -252,9 +252,16 @@ recreated**. Worth knowing before it happens.
 
 ## Recording a run
 
-One GitHub issue per run, titled by the date and what changed, with a
-checkbox per case copied from this file. Tick as you go, and link the issue
-from any bug it turns up.
+**Actions → Manual test run → Run workflow.** It opens an issue whose
+checklist is generated from this file, one checkbox per case, grouped by
+section. Two optional inputs: a note for the title ("after #73") and a
+section filter ("3,4") when only part of it is worth running.
+
+Tick as you go. Anything that fails gets its own issue, linked from the line.
+
+The checklist is generated, never copied, so it is always whatever this file
+said at the moment the run was opened. Add a case in a PR and the next run
+has it.
 
 **Why the cases live here and not in a test-management tool.** They change
 with the code — case 3.5 exists because live location is unhandled *today* —
