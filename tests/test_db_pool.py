@@ -8,6 +8,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 EXPECTED_TABLES = {
+    "chat_settings",
     "chats", "sessions", "facts", "participants", "list_items",
     "reminders", "places", "seen_updates",
     "decision_log", "pending_confirmations",
