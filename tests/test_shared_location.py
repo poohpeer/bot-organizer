@@ -18,6 +18,8 @@ import bot.router as router
 import bot.session as session
 import bot.tools.composed as composed
 import bot.tools.core as core_tools
+import bot.status_render as status_render
+import bot.telegram_text as telegram_text
 from bot.maps_links import maps_link
 
 BOT_ID = 999
@@ -182,7 +184,10 @@ async def test_the_status_report_links_the_place(db_pool):
 
     report = (await composed.event_status(db_pool, active["id"]))["report"]
 
-    assert "📍 Место: Маленькая прага — " + maps_link(LAT, LON) in report
+    # The link is its own line under the name, and its label is a word — see
+    # tests/test_map_link.py for why.
+    assert "📍 Место: Маленькая прага\n" in report
+    assert telegram_text.link(maps_link(LAT, LON), status_render.MAP_LABEL) in report
 
 
 async def test_a_place_with_no_coordinates_has_no_link(db_pool):

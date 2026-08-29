@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from telegram.error import Forbidden
 
 import bot.item_names as item_names
+import bot.maps_links as maps_links
 import bot.quantity as quantity
 import bot.list_render as list_render
 import bot.participant_render as participant_render
@@ -77,6 +78,14 @@ def canonical_fact_key(key: str) -> str:
 
 async def remember_fact(pool, session_id, key, value) -> dict:
     stored_key = canonical_fact_key(key)
+    if stored_key == _PLACE_KEY:
+        # A name is a name. Live, the model recorded the place as
+        # "Бен шемен, координаты 31.9460200, 34.9434050" — the same mistake
+        # as an item called "2 кг мяса", and it costs the same two things:
+        # the report reads like a database row, and the name matches nothing
+        # in `places`, so the coordinates that would have made a map link
+        # are unreachable.
+        value = maps_links.strip_coordinates(value)
     await pool.execute(
         "INSERT INTO facts (session_id, key, value) VALUES ($1, $2, $3)",
         session_id, stored_key, value,

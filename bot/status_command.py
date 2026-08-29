@@ -18,6 +18,7 @@ import logging
 
 import bot.dm as dm
 import bot.session as session
+import bot.telegram_text as telegram_text
 import bot.tools.composed as composed_tools
 import bot.tools.core as core_tools
 
@@ -52,7 +53,9 @@ ANSWERS = {"status": _status_text, "list": _list_text}
 
 async def _answer(pool, telegram_bot, chat_id: int, session_id: int, verb: str) -> None:
     text = await ANSWERS[verb](pool, session_id)
-    await telegram_bot.send_message(chat_id=chat_id, text=text or NO_SESSION)
+    # send_text, not send_message: the report may carry a map link, and this
+    # is one of the two places a report can leave the process.
+    await telegram_text.send_text(telegram_bot, chat_id, text or NO_SESSION)
 
 
 async def handle_command(pool, telegram_bot, message, verb: str = "status") -> None:

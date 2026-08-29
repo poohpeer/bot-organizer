@@ -230,16 +230,49 @@ asks the bot to read the group's title — goes through the same
 ## A location shared in the chat
 
 Someone dropping a pin (or sharing a place from Telegram's picker) sets the
-event's place, and the status report then carries a map link beside the name:
+event's place, and the status report then carries a map link on its own line
+under the name:
 
 ```
-📍 Место: Маленькая прага — https://www.google.com/maps?q=32.062512,34.771235
+📍 Место: Маленькая прага
+🔗 Map
 ```
 
-A bare URL, not Markdown: `parse_mode` is never set anywhere in `bot/`, so
-Telegram auto-links it, while `[Место](url)` would arrive as literal brackets.
-The link goes **after** the name, never instead of it — the report exists to
-repeat the group's own wording back to them.
+`🔗 Map` is the link. A word rather than the URL: coordinates are unreadable
+and a raw maps link is three lines long on a phone. Beside the name the two
+ran together and the name stopped being readable at a glance, which is the
+one job that line has.
+
+**A place name never carries coordinates.** Live, the model recorded the
+place as `Бен шемен, координаты 31.9460200, 34.9434050` — the same mistake as
+an item called "2 кг мяса", and it costs the same two things: the line reads
+like a database row, *and* the name matches nothing in `places`, so the
+coordinates that would have made a link are unreachable. `remember_fact`
+strips a trailing coordinate pair from the place key, where the value is
+written rather than where it is read — several callers write it and only one
+of them is the model.
+
+### The link needs entities
+
+`parse_mode` is set nowhere else in `bot/` on purpose: Telegram drops a whole
+message on unbalanced entities, and names come from users. So renderers write
+a link as a **marker** (`bot/telegram_text.py`), and that module is the only
+thing that turns one into HTML. Two properties keep it safe:
+
+- a message with no marker is sent exactly as before — plain, no `parse_mode`
+  at all — so nothing that works today can start failing;
+- a message with one is escaped in full first, and the only tags that survive
+  are the anchors the module writes itself, so entities are balanced by
+  construction. A place called `<b>Бен</b> & Co` is shown, not interpreted.
+
+`send_text` is used at the two places a report can leave the process: the
+`/status` and `/list` commands, and the model relaying `event_status`
+verbatim. `strip_links` reduces a marker to its label for everywhere else —
+`decision_log`, which people read and `bot/history.py` feeds back to the
+model.
+
+Only `http://` and `https://` become links; anything else stays as the plain
+label.
 
 **Not every pin is the venue.** People share shops, stations, where they are
 standing. Silently replacing a place the group agreed on by conversation is

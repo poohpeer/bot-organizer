@@ -11,6 +11,8 @@ Telegram auto-links a bare https:// URL, so a link costs nothing and risks
 nothing, while "[Место](url)" would arrive as literal brackets.
 """
 
+import re
+
 # Google Maps rather than a geo: URI or an OpenStreetMap link: geo: opens
 # nothing on desktop, and this form is what every phone's map app already
 # handles.
@@ -35,3 +37,39 @@ def maps_link(lat, lon) -> str | None:
                                 lon=round(float(lon), _PRECISION))
     except (TypeError, ValueError):
         return None
+
+
+# A coordinate pair anywhere in a place name, with or without a word
+# introducing it. Live, the model recorded the place as
+# "Бен шемен, координаты 31.9460200, 34.9434050": the name and the
+# coordinates in one string.
+#
+# That is the same mistake as an item called "2 кг мяса" — data stuffed into
+# a name field — and it costs the same two things. The report reads like a
+# database row, and the name no longer matches anything in `places`, so the
+# coordinates that would have made a link are unreachable.
+_COORDINATES = re.compile(
+    r"[\s,;:—–-]*"
+    # An opening bracket, when the pair is parenthesised.
+    r"[(\[]?"
+    r"\s*(?:коорд\w*|coord\w*|gps|geo|широта|долгота|lat\w*|lon\w*)?"
+    r"[\s,;:.]*"
+    r"-?\d{1,3}\.\d{3,}\s*[,;]?\s*-?\d{1,3}\.\d{3,}"
+    r"\s*[)\]]?[\s,;.]*$",
+    re.IGNORECASE,
+)
+
+
+def strip_coordinates(name: str) -> str:
+    """A place name with a trailing coordinate pair removed.
+
+    Only at the end, and only with at least three decimals on both numbers:
+    that is what a machine writes and what a person never does. A name that
+    is *nothing but* coordinates is left alone — bot/router.py stores a pin
+    that way on purpose when nobody has named the place yet, and stripping it
+    would leave an empty name.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return name
+    stripped = _COORDINATES.sub("", name).strip(" ,;:—–-")
+    return stripped or name.strip()
