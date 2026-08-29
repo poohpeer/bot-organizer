@@ -17,6 +17,7 @@ import bot.dedup as dedup
 import bot.mcp_server as mcp_server
 import bot.router as router
 import bot.session as session
+import bot.status_command as status_command
 import bot.tools.core as core_tools
 from bot.tools.schema import ALL_TOOLS
 import db.pool as db_pool_module
@@ -173,6 +174,14 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    await status_command.handle_command(
+        context.bot_data["pool"], context.bot, update.message
+    )
+
+
 async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
@@ -232,6 +241,7 @@ def main() -> None:
         .post_shutdown(post_shutdown)
         .build()
     )
+    app.add_handler(CommandHandler("status", on_status))
     app.add_handler(CommandHandler("admin", on_admin))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^adm:"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_message))
