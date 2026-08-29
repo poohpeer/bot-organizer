@@ -19,20 +19,34 @@ log = logging.getLogger(__name__)
 _NOT_AN_ADMIN = "Настройки доступны администраторам чата."
 _MENU_TITLE = "Настройки бота. Что меняем?"
 _CHAIN_TITLE = (
-    "Порядок моделей. Бот идёт по списку сверху вниз и переходит к следующей, "
-    "когда предыдущая недоступна.\n\n"
+    "Порядок моделей. Нажимайте их в том порядке, в каком бот должен их "
+    "звать: первое нажатие — первый номер. Нажать ещё раз — убрать.\n\n"
 )
-_CHAIN_EMPTY = "Все модели выключены — бот не сможет ответить. Включите хотя бы одну."
+# Not a warning. An empty selection is a valid state — bot/settings.py falls
+# back to the deployment default — and the ▲▼ menu this replaced could not
+# express "start over" at all without disabling eight models one by one.
+_CHAIN_EMPTY = "Ничего не выбрано — бот идёт по умолчанию:\n{chain}"
 _SAVED = "Сохранено."
+
+# 1..8 today; the list is short and Telegram's own digits are the clearest
+# way to say "this one is third" on a button.
+_NUMBERS = ("1\ufe0f\u20e3", "2\ufe0f\u20e3", "3\ufe0f\u20e3", "4\ufe0f\u20e3", "5\ufe0f\u20e3",
+            "6\ufe0f\u20e3", "7\ufe0f\u20e3", "8\ufe0f\u20e3", "9\ufe0f\u20e3")
+
+
+def _mark(index: int | None) -> str:
+    """The badge in front of a model: its place in the chain, or an empty box."""
+    if index is None:
+        return "\u25fb\ufe0f"
+    return _NUMBERS[index] if index < len(_NUMBERS) else f"{index + 1}."
+
 
 # Callback payloads. Short on purpose: Telegram caps callback_data at 64
 # bytes, and a model name like "openai/gpt-oss-120b" plus a verb would not
 # fit reliably — so a position is sent instead of a name.
 _MENU = "adm:menu"
 _CHAIN = "adm:chain"
-_UP = "adm:up:"
-_DOWN = "adm:down:"
-_TOGGLE = "adm:tog:"
+_PICK = "adm:pick:"
 _RESET = "adm:reset"
 _CLOSE = "adm:close"
 
@@ -62,68 +76,62 @@ def _menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _shown_order(chosen: list[str]) -> list[str]:
+    """Chosen first, in their chain order, then everything still unpicked.
+
+    The numbered ones float to the top so the chain reads down the screen,
+    and the rest stay listed so turning one on never means remembering it
+    exists — a menu that hides what you did not pick cannot undo itself.
+    """
+    available = list(ai_client.PROXY_MODELS)
+    return [m for m in chosen if m in available] + [m for m in available if m not in chosen]
+
+
 def chain_view(chosen: list[str]) -> tuple[str, InlineKeyboardMarkup]:
     """The chain as text plus its controls.
 
-    Every model the deployment offers is listed, on or off, so turning one
-    back on is possible from the same screen that turned it off — a menu that
-    hides what you disabled cannot undo itself.
+    One button per model, full width: the names are long ("openai/gpt-oss-120b")
+    and the three-button rows this replaced left no room to read them.
     """
-    available = list(ai_client.PROXY_MODELS)
-    order = [m for m in chosen if m in available] + [m for m in available if m not in chosen]
+    order = _shown_order(chosen)
 
     lines, rows = [], []
     for position, model in enumerate(order):
-        enabled = model in chosen
-        mark = f"{chosen.index(model) + 1}." if enabled else "—"
-        lines.append(f"{mark} {model}" + ("" if enabled else "  (выключена)"))
-        rows.append([
-            InlineKeyboardButton("▲", callback_data=f"{_UP}{position}"),
-            InlineKeyboardButton("▼", callback_data=f"{_DOWN}{position}"),
-            InlineKeyboardButton("✅" if enabled else "◻️", callback_data=f"{_TOGGLE}{position}"),
-        ])
+        index = chosen.index(model) if model in chosen else None
+        badge = _mark(index)
+        lines.append(f"{badge} {model}")
+        rows.append([InlineKeyboardButton(f"{badge} {model}", callback_data=f"{_PICK}{position}")])
 
     rows.append([
-        InlineKeyboardButton("Сбросить", callback_data=_RESET),
+        InlineKeyboardButton("Очистить", callback_data=_RESET),
         InlineKeyboardButton("Назад", callback_data=_MENU),
     ])
-    body = _CHAIN_TITLE + "\n".join(lines)
-    if not chosen:
-        body += "\n\n" + _CHAIN_EMPTY
+    if chosen:
+        body = _CHAIN_TITLE + "\n".join(lines)
+    else:
+        body = _CHAIN_TITLE + _CHAIN_EMPTY.format(
+            chain=" \u2192 ".join(ai_client.PROXY_MODELS)
+        ) + "\n\n" + "\n".join(lines)
     return body, InlineKeyboardMarkup(rows)
 
 
-def apply_action(chosen: list[str], action: str, position: int) -> list[str]:
+def pick(chosen: list[str], position: int) -> list[str]:
     """One button press against the shown order.
 
-    Works on the shown order — enabled entries first, then disabled ones —
-    because that is what the person is looking at when they press a button.
-    Returns the new enabled list; a move that would fall off either end is a
-    no-op rather than an error.
+    A model not yet in the chain goes on the end, taking the next number; one
+    already in it comes out, and everything after it moves up. That is the
+    whole interaction — the ▲▼ pair this replaced needed seven presses to
+    lift the last model to the front, and this needs one press per model you
+    actually want.
     """
-    available = list(ai_client.PROXY_MODELS)
-    order = [m for m in chosen if m in available] + [m for m in available if m not in chosen]
+    order = _shown_order(chosen)
     if not 0 <= position < len(order):
         return list(chosen)
 
     model = order[position]
-    if action == "tog":
-        if model in chosen:
-            return [m for m in chosen if m != model]
-        return list(chosen) + [model]
-
-    if model not in chosen:
-        # Moving a disabled model would reorder something the chain never
-        # reaches, which reads as nothing happening.
-        return list(chosen)
-
-    index = chosen.index(model)
-    swap_with = index - 1 if action == "up" else index + 1
-    if not 0 <= swap_with < len(chosen):
-        return list(chosen)
-    new = list(chosen)
-    new[index], new[swap_with] = new[swap_with], new[index]
-    return new
+    if model in chosen:
+        return [m for m in chosen if m != model]
+    return list(chosen) + [model]
 
 
 async def handle_command(pool, telegram_bot, message) -> None:
@@ -164,6 +172,10 @@ async def handle_callback(pool, telegram_bot, query) -> None:
         return
 
     if data == _RESET:
+        # Deleting the row is both "clear the selection" and "back to the
+        # default" — with the fallback in settings they are the same state,
+        # so the menu offers one button rather than two that look different
+        # and are not.
         await settings.reset_provider_chain(pool, chat_id)
         ai_client.forget_chat(chat_id)
         await query.answer(_SAVED)
@@ -175,29 +187,31 @@ async def handle_callback(pool, telegram_bot, query) -> None:
         await _show_chain(pool, chat_id, query)
         return
 
-    for prefix, action in ((_UP, "up"), (_DOWN, "down"), (_TOGGLE, "tog")):
-        if data.startswith(prefix):
-            try:
-                position = int(data[len(prefix):])
-            except ValueError:
-                await query.answer()
-                return
-            chosen = await settings.get_provider_chain(pool, chat_id)
-            updated = apply_action(chosen, action, position)
-            if updated != chosen:
-                await settings.set_provider_chain(pool, chat_id, updated, updated_by=user_id)
-                # Dropped rather than edited: the sticky index the chain
-                # carries refers to positions that just moved.
-                ai_client.forget_chat(chat_id)
+    if data.startswith(_PICK):
+        try:
+            position = int(data[len(_PICK):])
+        except ValueError:
             await query.answer()
-            await _show_chain(pool, chat_id, query)
             return
+        chosen = await settings.get_stored_chain(pool, chat_id) or []
+        updated = pick(chosen, position)
+        if updated != chosen:
+            await settings.set_provider_chain(pool, chat_id, updated, updated_by=user_id)
+            # Dropped rather than edited: the sticky index the chain carries
+            # refers to positions that just moved.
+            ai_client.forget_chat(chat_id)
+        await query.answer()
+        await _show_chain(pool, chat_id, query)
+        return
 
     await query.answer()
 
 
 async def _show_chain(pool, chat_id: int, query) -> None:
-    body, keyboard = chain_view(await settings.get_provider_chain(pool, chat_id))
+    # The stored selection, not the effective chain: get_provider_chain
+    # substitutes the default for an empty one, which would draw eight
+    # numbered models over a chat that has picked none.
+    body, keyboard = chain_view(await settings.get_stored_chain(pool, chat_id) or [])
     try:
         await query.edit_message_text(body, reply_markup=keyboard)
     except Exception as e:

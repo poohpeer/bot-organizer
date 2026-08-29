@@ -69,7 +69,6 @@ class ProxyProvider:
         """
         for prefix, provider in (
             ("codex:", "codex"),
-            ("ollama:", "ollama"),
             ("claude:", "claude_code"),
         ):
             if model.startswith(prefix):

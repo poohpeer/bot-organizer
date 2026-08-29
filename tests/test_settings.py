@@ -41,6 +41,19 @@ async def test_a_chain_with_nothing_left_falls_back_to_the_default(db_pool):
     assert await settings.get_provider_chain(db_pool, -100) == list(ai_client.PROXY_MODELS)
 
 
+async def test_the_menu_can_tell_never_chosen_from_chose_nothing(db_pool):
+    """get_provider_chain answers "what will be tried", so it substitutes the
+    default for both and cannot tell them apart. The settings menu has to:
+    one draws eight numbered models, the other draws none."""
+    await settings.set_provider_chain(db_pool, 2, [])
+
+    assert await settings.get_stored_chain(db_pool, 1) is None
+    assert await settings.get_stored_chain(db_pool, 2) == []
+    # Both still run on the default — an empty selection is not a dead bot.
+    assert await settings.get_provider_chain(db_pool, 1) == list(ai_client.PROXY_MODELS)
+    assert await settings.get_provider_chain(db_pool, 2) == list(ai_client.PROXY_MODELS)
+
+
 async def test_resetting_follows_the_default_again_rather_than_copying_it(db_pool):
     """Deleting the row, not storing today's default: the chat should follow
     the deployment if the deployment changes."""

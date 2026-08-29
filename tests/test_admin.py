@@ -72,59 +72,121 @@ async def test_a_failed_admin_check_answers_no(db_pool):
 
 # --- the buttons ----------------------------------------------------------
 
-def test_moving_an_entry_up_swaps_it_with_the_one_above():
-    chain = list(ai_client.PROXY_MODELS)
+def test_the_first_press_makes_a_model_first():
+    """The whole point of the rewrite. Under the ▲▼ pair it replaced,
+    lifting the last model to the front took seven presses."""
+    last = ai_client.PROXY_MODELS[-1]
 
-    moved = admin.apply_action(chain, "up", 1)
+    chosen = admin.pick([], len(ai_client.PROXY_MODELS) - 1)
 
-    assert moved[:2] == [chain[1], chain[0]]
-
-
-def test_moving_the_top_entry_up_changes_nothing():
-    """A no-op rather than an error: the button is still there to press."""
-    chain = list(ai_client.PROXY_MODELS)
-
-    assert admin.apply_action(chain, "up", 0) == chain
+    assert chosen == [last]
 
 
-def test_moving_the_last_entry_down_changes_nothing():
-    chain = list(ai_client.PROXY_MODELS)
+def test_each_press_appends_in_the_order_pressed():
+    catalogue = list(ai_client.PROXY_MODELS)
+    chosen = []
 
-    assert admin.apply_action(chain, "down", len(chain) - 1) == chain
+    # Pressed back to front. The shown order puts chosen models first, so
+    # after each press the remaining ones sit below them.
+    for model in reversed(catalogue[:3]):
+        shown = chosen + [m for m in catalogue if m not in chosen]
+        chosen = admin.pick(chosen, shown.index(model))
 
-
-def test_toggling_removes_and_restores_a_model():
-    chain = list(ai_client.PROXY_MODELS)
-
-    without = admin.apply_action(chain, "tog", 0)
-    assert chain[0] not in without
-
-    # The disabled one shows below the enabled ones, so its position moved.
-    shown = without + [m for m in ai_client.PROXY_MODELS if m not in without]
-    restored = admin.apply_action(without, "tog", shown.index(chain[0]))
-    assert chain[0] in restored
+    assert chosen == [catalogue[2], catalogue[1], catalogue[0]]
 
 
-def test_a_disabled_model_is_still_listed_so_it_can_be_turned_back_on():
-    """A menu that hides what you disabled cannot undo itself."""
+def test_pressing_a_chosen_model_takes_it_out_and_renumbers_the_rest():
+    catalogue = list(ai_client.PROXY_MODELS)
+    chosen = catalogue[:3]
+
+    without = admin.pick(chosen, 1)
+
+    assert without == [catalogue[0], catalogue[2]], "the third moves up to second"
+
+
+def test_taking_one_out_and_pressing_it_again_puts_it_last():
+    """Two presses to move a model to the end of the chain."""
+    catalogue = list(ai_client.PROXY_MODELS)
+    chosen = catalogue[:3]
+
+    without = admin.pick(chosen, 0)
+    shown = without + [m for m in catalogue if m not in without]
+    again = admin.pick(without, shown.index(catalogue[0]))
+
+    assert again == [catalogue[1], catalogue[2], catalogue[0]]
+
+
+def test_an_unchosen_model_is_still_listed_so_it_can_be_picked():
+    """A menu that hides what you did not pick cannot undo itself."""
     chain = list(ai_client.PROXY_MODELS)[1:]
 
     body, keyboard = admin.chain_view(chain)
 
     assert ai_client.PROXY_MODELS[0] in body
-    assert "выключена" in body
     assert len(keyboard.inline_keyboard) == len(ai_client.PROXY_MODELS) + 1
+    assert all(len(row) == 1 for row in keyboard.inline_keyboard[:-1]), \
+        "one button per model: the names are too long to share a row"
 
 
-def test_turning_everything_off_says_so():
+def test_the_chain_is_numbered_in_the_order_it_runs():
+    catalogue = list(ai_client.PROXY_MODELS)
+
+    body, _ = admin.chain_view([catalogue[2], catalogue[0]])
+
+    assert body.index("1\ufe0f\u20e3") < body.index("2\ufe0f\u20e3")
+    assert body.index(catalogue[2]) < body.index(catalogue[0])
+
+
+def test_choosing_nothing_says_which_default_is_standing_in():
+    """Not an error state: bot/settings.py falls back to the deployment
+    default, so the menu says so instead of warning about a broken bot."""
     body, _ = admin.chain_view([])
 
-    assert "не сможет ответить" in body
+    assert "по умолчанию" in body
+    for model in ai_client.PROXY_MODELS:
+        assert model in body
 
 
 def test_an_out_of_range_position_is_ignored():
     """Callback data comes from a keyboard that may be older than the list."""
     chain = list(ai_client.PROXY_MODELS)
 
-    assert admin.apply_action(chain, "up", 99) == chain
-    assert admin.apply_action(chain, "tog", -1) == chain
+    assert admin.pick(chain, 99) == chain
+    assert admin.pick(chain, -1) == chain
+
+
+# --- pressing them for real -----------------------------------------------
+
+async def test_pressing_a_model_stores_it_as_the_whole_chain(db_pool):
+    """A chat on the default that picks one model gets that one model — the
+    screen says "нажимайте в том порядке, в каком бот должен их звать", and
+    quietly keeping the other seven behind it would not be that."""
+    bot = _bot()
+    last = ai_client.PROXY_MODELS[-1]
+
+    await admin.handle_callback(
+        db_pool, bot, _Query(f"{admin._PICK}{len(ai_client.PROXY_MODELS) - 1}")
+    )
+
+    assert await settings.get_stored_chain(db_pool, -100) == [last]
+
+
+async def test_pressing_it_again_takes_it_back_out(db_pool):
+    bot = _bot()
+    first = ai_client.PROXY_MODELS[0]
+    await settings.set_provider_chain(db_pool, -100, [first])
+
+    await admin.handle_callback(db_pool, bot, _Query(f"{admin._PICK}0"))
+
+    assert await settings.get_stored_chain(db_pool, -100) == []
+    # And the bot is still able to answer.
+    assert await settings.get_provider_chain(db_pool, -100) == list(ai_client.PROXY_MODELS)
+
+
+async def test_clearing_deletes_the_row_rather_than_storing_a_copy(db_pool):
+    bot = _bot()
+    await settings.set_provider_chain(db_pool, -100, [ai_client.PROXY_MODELS[0]])
+
+    await admin.handle_callback(db_pool, bot, _Query(admin._RESET))
+
+    assert await settings.get_stored_chain(db_pool, -100) is None
