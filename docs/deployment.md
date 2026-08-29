@@ -227,6 +227,44 @@ is re-read, and a model call spent on it, every minute forever.
 asks the bot to read the group's title — goes through the same
 `group_info.apply_event`, so all of the above holds there too.
 
+## A location shared in the chat
+
+Someone dropping a pin (or sharing a place from Telegram's picker) sets the
+event's place, and the status report then carries a map link beside the name:
+
+```
+📍 Место: Маленькая прага — https://www.google.com/maps?q=32.062512,34.771235
+```
+
+A bare URL, not Markdown: `parse_mode` is never set anywhere in `bot/`, so
+Telegram auto-links it, while `[Место](url)` would arrive as literal brackets.
+The link goes **after** the name, never instead of it — the report exists to
+repeat the group's own wording back to them.
+
+**Not every pin is the venue.** People share shops, stations, where they are
+standing. Silently replacing a place the group agreed on by conversation is
+the same kind of destruction as overwriting an amount nobody asked to change,
+so a pin is only taken when:
+
+| shared | place already recorded | taken? |
+|---|---|---|
+| venue (named) | — | yes |
+| bare pin | no | yes, named after its own coordinates |
+| bare pin, addressed to the bot | yes | yes — coordinates only, the name survives |
+| bare pin, not addressed | yes | **no**, logged and ignored |
+
+A bare pin with no place yet is stored under its coordinates as the name, so
+the report shows a working link immediately; the first person to name the
+place replaces the label without losing the pin.
+
+Pinning the same place twice is a **correction**, not a duplicate: the
+coordinates move and `resolved_at` is refreshed. A bare pin never blanks out
+an address a venue or a maps lookup already supplied.
+
+The coordinates the report links are looked up for **the name being
+reported**, not the most recently resolved row — otherwise a pin someone
+dropped for a supermarket would appear beside the picnic's own place.
+
 ## Logs and troubleshooting
 
 ```bash

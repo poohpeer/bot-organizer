@@ -102,6 +102,44 @@ async def test_route_update_active_chat_dispatches_with_session_row(monkeypatch)
     active_handler.assert_awaited_once_with(pool, telegram_bot, active_row, msg, BOT_ID, BOT_USERNAME)
 
 
+async def test_a_location_reaches_the_location_handler_and_stops_there(monkeypatch):
+    """A pin carries no text. Without this branch it reached the ordinary
+    path and was classified as an empty message — the location was seen and
+    forgotten. Asserted here because nothing else does: removing the branch
+    from route_update left every other test in the suite green."""
+    pool = MagicMock()
+    telegram_bot = AsyncMock()
+    active_row = {"id": 5, "chat_id": -100}
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    monkeypatch.setattr(main.session, "get_active_session", AsyncMock(return_value=active_row))
+    shared = AsyncMock(return_value=True)
+    active_handler = AsyncMock()
+    monkeypatch.setattr(main.router, "handle_shared_location", shared)
+    monkeypatch.setattr(main.router, "handle_active_message", active_handler)
+    msg = _message(text=None)
+
+    await main.route_update(pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
+
+    shared.assert_awaited_once_with(pool, active_row, msg, BOT_ID, BOT_USERNAME)
+    active_handler.assert_not_awaited()
+
+
+async def test_an_ordinary_message_still_falls_through_to_the_text_path(monkeypatch):
+    """The other half: the location branch must not swallow ordinary chat."""
+    pool = MagicMock()
+    telegram_bot = AsyncMock()
+    active_row = {"id": 5, "chat_id": -100}
+    monkeypatch.setattr(main.dedup, "is_duplicate", AsyncMock(return_value=False))
+    monkeypatch.setattr(main.session, "get_active_session", AsyncMock(return_value=active_row))
+    monkeypatch.setattr(main.router, "handle_shared_location", AsyncMock(return_value=False))
+    active_handler = AsyncMock()
+    monkeypatch.setattr(main.router, "handle_active_message", active_handler)
+
+    await main.route_update(pool, telegram_bot, _message(), BOT_ID, BOT_USERNAME, update_id=1)
+
+    active_handler.assert_awaited_once()
+
+
 # --- new_chat_members -------------------------------------------------------
 
 async def _ensure_chat(db_pool, chat_id=-100):

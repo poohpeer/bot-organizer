@@ -20,6 +20,7 @@ import bot.decision_log as decision_log
 import bot.group_info as group_info
 import bot.history as history
 import bot.list_render as list_render
+import bot.places as places
 import bot.session as session
 import bot.timezones as timezones
 import bot.tools.composed as composed_tools
@@ -624,6 +625,64 @@ async def _summarize_session(pool, session_id: int) -> str:
     items = ", ".join(i["name"] for i in list_result["items"]) or "пусто"
     confirmed = [p["display_name"] for p in participants_result["participants"] if p["status"] == "confirmed"]
     return f"Готово, сессию закрываю. Список: {items}. Подтвердили: {', '.join(confirmed) or 'никто'}."
+
+
+async def handle_shared_location(pool, active, message, bot_id, bot_username) -> bool:
+    """Record a location someone dropped in the chat as the event's place.
+
+    A location message carries no text, so it used to reach the ordinary
+    active-message path and be classified as an empty string — the pin was
+    seen and forgotten.
+
+    Two shapes arrive. A **venue** comes from Telegram's place picker and
+    names itself, so it is taken as the place. A **bare pin** names nothing;
+    it attaches its coordinates to the place the group already agreed on, and
+    only becomes the place itself when there is none.
+
+    Not every pin is the venue. Someone shares a shop, a station, where they
+    are right now — and silently replacing a place the group confirmed by
+    conversation is the same kind of destruction as overwriting an amount
+    nobody asked to change. So a pin only names the place when it is
+    addressed to the bot, or when no place is recorded yet and there is
+    nothing to lose. Anything else is ignored, with a line in the log saying
+    which.
+
+    Returns True when the message was a location, so the caller can stop
+    rather than fall through to the text path with nothing to read.
+    """
+    venue = message.venue
+    location = venue.location if venue is not None else message.location
+    if location is None:
+        return False
+
+    session_id = active["id"]
+    addressed = addressed_to_bot(message, bot_id, bot_username)
+    current = await composed_tools.current_place(pool, session_id)
+    name = (venue.title if venue is not None else None) or current["name"]
+
+    if not addressed and current["name"] and venue is None:
+        # A bare pin, not addressed, over a place the group already named.
+        # Ambiguous, and the destructive reading is the likelier mistake.
+        log.info("session %s: ignoring an unaddressed pin; %r is already the place",
+                 session_id, current["name"])
+        return True
+
+    if name is None:
+        # A pin before anyone named the place. There is nothing to call it,
+        # so it is stored under its own coordinates: the status report shows
+        # a link that works, and the first person to name the place replaces
+        # the label without losing the pin.
+        name = f"{round(location.latitude, 6)}, {round(location.longitude, 6)}"
+
+    await places.save_shared_location(
+        pool, session_id, name=name,
+        address=venue.address if venue is not None else None,
+        lat=location.latitude, lon=location.longitude,
+    )
+    await core_tools.remember_fact(pool, session_id, "place", name)
+    log.info("session %s: place set from a shared %s: %r",
+             session_id, "venue" if venue is not None else "pin", name)
+    return True
 
 
 async def _silent_capture(pool, telegram_bot, session_id: int, text: str) -> dict:
