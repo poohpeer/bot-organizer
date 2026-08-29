@@ -432,7 +432,16 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "so never reply with just \"уже есть\": say what is on the list, say you "
     "cannot add or take away, and ask for the whole new amount rather than "
     "the difference — \"уже есть 1 бут. вина; прибавить не могу, скажи, "
-    "сколько всего: две бутылки, три бутылки\". When they answer, pass that "
+    "сколько должно быть всего\". Ask it as an open question and never offer "
+    "numbers to choose from; the person is the one who knows the answer. "
+    # The example above used to end with two sample amounts, and the model
+    # copied the shape rather than the point: asked to add a loaf to four, it
+    # answered "скажи, сколько всего должно быть: пять штук, шесть штук?" —
+    # two numbers invented out of nothing, offered in place of the one answer
+    # the person actually had. The wrong output is kept out of the prompt
+    # entirely rather than shown as something to avoid: an instruction cannot
+    # demonstrate what it forbids and expect the demonstration to be ignored.
+    "When they answer, pass that "
     "as amounts, which replaces what is stored: \"ящик и две бутылки\" is "
     "amounts=[{amount:1,unit:\"ящик\"},{amount:2,unit:\"бутылка\"}]. "
     "When someone says they will bring something, call list_claim with "
