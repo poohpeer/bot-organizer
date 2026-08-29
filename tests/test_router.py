@@ -1021,7 +1021,7 @@ async def test_a_grant_is_issued_for_the_turn_and_revoked_after(db_pool, monkeyp
     telegram_bot = AsyncMock()
     seen = {}
 
-    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None):
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None, record=None):
         seen["url"] = mcp_url
         seen["resolved"] = grants.resolve(mcp_url.rsplit("/", 1)[-1])
         return "ок"
@@ -1066,7 +1066,7 @@ async def test_no_grant_and_no_url_when_nothing_serves_mcp(db_pool, monkeypatch)
     active = await _new_active_session(db_pool)
     seen = {}
 
-    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None):
+    async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None, record=None):
         seen["url"] = mcp_url
         return "ок"
 
@@ -1096,7 +1096,7 @@ async def test_the_grant_is_revoked_even_when_the_turn_fails(db_pool, monkeypatc
     active = await _new_active_session(db_pool)
     tokens = []
 
-    async def exploding_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None):
+    async def exploding_loop(model_fn, text, registry, *, system_instruction, history=None, mcp_url=None, record=None):
         tokens.append(mcp_url.rsplit("/", 1)[-1])
         raise RuntimeError("the model fell over")
 

@@ -78,7 +78,14 @@ class GrantStore:
         self._ttl = ttl_seconds
         self._grants: dict[str, Grant] = {}
 
-    def issue(self, session_id: int, current_user=None) -> str:
+    def issue(self, session_id: int, current_user=None, record=None) -> str:
+        """`record` is the turn's own TurnRecord, shared with the tool loop.
+
+        Passed in rather than created here so both halves of a turn write to
+        one object: a CLI's tools arrive through this endpoint, an HTTP
+        provider's through bot/ai/tool_loop.py, and the router has to read
+        one record either way.
+        """
         self._drop_expired()
         token = secrets.token_urlsafe(32)
         self._grants[token] = Grant(
@@ -86,6 +93,7 @@ class GrantStore:
             user_id=getattr(current_user, "id", None),
             display_name=_display_name_of(current_user),
             expires_at=time.monotonic() + self._ttl,
+            record=record if record is not None else TurnRecord(),
         )
         return token
 

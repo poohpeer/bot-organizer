@@ -71,9 +71,12 @@ same registry and the same connection pool this one already holds.
 
 ## What the turn did
 
-A grant carries a `TurnRecord` (`bot/turn_outcome.py`): the tools that ran
-under it, and the last block a renderer produced. `revoke` hands the grant
-back so the router can read it after the turn ends.
+One `TurnRecord` (`bot/turn_outcome.py`) per turn, created by the router and
+handed to both paths — to the tool loop directly, and to `issue()` so a CLI's
+calls through this endpoint write to the same object. It holds the tools that
+ran, the last block a renderer produced, and any sentence a tool wrote for
+the reply. The router reads it once, after the turn, and does not care which
+path ran.
 
 It exists because a CLI provider calls its tools *here*, not through
 `bot/ai/tool_loop.py`, and the tool loop is where two rules are enforced on
@@ -91,6 +94,22 @@ bottles of beer there should be in total, the person answered "Две бутыл
 пива", codex called `list_add`, the row was updated — and codex answered
 `<silent>`. The list was correct and the chat saw nothing, which from the
 group's side is indistinguishable from the bot being down.
+
+### What a tool asks to have said
+
+A result may carry `say`: a finished sentence for the case where the model
+stays quiet. It is not `rendered` (relayed over a model that talked around
+it) and not `ask_user` (instructions to the model, in English).
+
+`list_add` uses it when a stated amount **overwrote** one already recorded.
+Live, "добавь бутылку пива" against `2 бут.` was read as a total, wrote
+`1 бут.`, and the model answered `<silent>` — the group got eleven unchanged
+rows and nothing to say a bottle had just vanished. `"Записал."` would have
+been true and equally useless; `"пиво: было 2 бут., стало 1 бут."` is the one
+line that makes a wrong replacement visible.
+
+That result deliberately carries no `rendered`, for the same reason:
+answering "я поменял" with the whole list hides the row that changed.
 
 Tools that deliver a message themselves — `send_private_message`,
 `broadcast_message`, `send_location`, `nudge_unconfirmed_participants` — do

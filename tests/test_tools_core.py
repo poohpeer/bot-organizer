@@ -1507,3 +1507,35 @@ async def test_a_leftover_count_is_an_absolute_amount(db_pool):
 
     assert result["status"] == "updated"
     assert result["quantity"] == "2 шт."
+
+
+async def test_replacing_an_amount_says_what_it_replaced(db_pool):
+    """Live: "добавь бутылку пива" against "2 бут." wrote "1 бут." and the
+    reply was the whole list, with nothing naming the bottle that vanished.
+    A replacement that overwrote something has to name both values."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "пиво", amount=2, unit="бутылка")
+
+    result = await core.list_add(db_pool, session_id, "пиво", amount=1, unit="бутылка")
+
+    assert result["status"] == "updated"
+    assert result["previous_quantity"] == "2 бут."
+    assert result["quantity"] == "1 бут."
+    assert "2 бут." in result["say"] and "1 бут." in result["say"]
+    assert "пиво" in result["say"]
+    # No rendered block: it is relayed verbatim, and answering "я поменял"
+    # with eleven unchanged rows hides the one line that changed.
+    assert "rendered" not in result
+
+
+async def test_a_first_amount_still_answers_with_the_list(db_pool):
+    """Nothing was overwritten, so there is no old value to name and the
+    list is the answer as for any other addition."""
+    session_id = await _new_session(db_pool)
+    await core.list_add(db_pool, session_id, "пиво")
+
+    result = await core.list_add(db_pool, session_id, "пиво", amount=2, unit="бутылка")
+
+    assert result["status"] == "updated"
+    assert "rendered" in result
+    assert "say" not in result

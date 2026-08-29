@@ -36,8 +36,12 @@ async def _turn(db_pool, monkeypatch, *, reply, does):
     telegram_bot = AsyncMock()
 
     async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction,
-                                 history=None, mcp_url=None):
+                                 history=None, mcp_url=None, record=None):
+        # Through the grant on purpose: the router hands the same object to
+        # both, so resolving the token has to reach the record the tool loop
+        # was given, or the two halves of a turn are writing to two places.
         grant = grants.resolve(mcp_url.rsplit("/", 1)[-1])
+        assert grant.record is record, "one record per turn, shared by both paths"
         does(grant.record)
         return reply
 
@@ -155,3 +159,35 @@ def test_a_tool_that_raised_is_not_recorded_as_a_change():
     assert record.changed_something() is False
     record.record("list_add", {"status": "added"})
     assert record.changed_something() is True
+
+
+async def test_a_replacement_the_model_did_not_announce_names_both_values(db_pool, monkeypatch):
+    """The live loss. "добавь бутылку пива" against 2 бут. wrote 1 бут., the
+    model answered "<silent>", and the group was shown eleven unchanged rows
+    with nothing to say a bottle had just disappeared."""
+    telegram_bot = await _turn(
+        db_pool, monkeypatch,
+        reply="<silent>",
+        does=lambda record: record.record("list_add", {
+            "status": "updated",
+            "quantity": "1 бут.",
+            "previous_quantity": "2 бут.",
+            "say": "пиво: было 2 бут., стало 1 бут.",
+            "ask_user": "say both values",
+        }),
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] == (
+        "пиво: было 2 бут., стало 1 бут."
+    )
+
+
+async def test_the_tools_sentence_beats_the_bare_acknowledgement(db_pool, monkeypatch):
+    """"Записал." is true and useless when a value was overwritten."""
+    telegram_bot = await _turn(
+        db_pool, monkeypatch,
+        reply="<silent>",
+        does=lambda record: record.record("list_add", {"say": "хлеб: было 2 шт., стало 3 шт."}),
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] != ACKNOWLEDGEMENT

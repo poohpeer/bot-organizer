@@ -377,12 +377,12 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
 
     # A restatement, or a plain stated total, replaces what is there.
     if after and not relative and quantity.combine(after) != was:
-        return await _replace_amount(pool, session_id, existing, after, was)
+        return await _replace_amount(pool, session_id, existing, after, was, name)
 
     # Filling in a blank is stating information, so a first amount applies
     # even when they said "ещё" — there was nothing to add to.
     if after and not before:
-        return await _replace_amount(pool, session_id, existing, after, was)
+        return await _replace_amount(pool, session_id, existing, after, was, name)
 
     # A relative change to something that already has an amount, in either
     # direction. This tool does no arithmetic on amounts, by design: "добавь
@@ -412,17 +412,32 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
     }
 
 
-async def _replace_amount(pool, session_id, existing, after, was) -> dict:
+async def _replace_amount(pool, session_id, existing, after, was, name=None) -> dict:
     """Store a stated amount, replacing whatever was there."""
     await pool.execute(
         "UPDATE list_items SET amounts = $2, amount = NULL, unit = NULL WHERE id = $1",
         existing["id"], json.dumps(after),
     )
-    result = {"status": "updated", "item_id": existing["id"],
-              "quantity": quantity.combine(after),
-              "rendered": await _rendered_list(pool, session_id)}
-    if was is not None:
-        result["previous_quantity"] = was
+    now = quantity.combine(after)
+    result = {"status": "updated", "item_id": existing["id"], "quantity": now}
+    if was is None:
+        # Nothing was overwritten — the item had no amount. The list is the
+        # answer, as for any other addition.
+        result["rendered"] = await _rendered_list(pool, session_id)
+        return result
+
+    # Something was overwritten, so the reply has to name both values.
+    # Deliberately no "rendered": that field is relayed verbatim by
+    # bot/turn_outcome.py, and answering "я поменял" with the whole list
+    # hides the one line that changed. Live, "добавь бутылку пива" against
+    # "2 бут." wrote 1 бут. and the group was shown eleven unchanged rows.
+    result["previous_quantity"] = was
+    result["say"] = f"{name or 'Позиция'}: было {was}, стало {now}."
+    result["ask_user"] = (
+        f"This replaced an amount that was already recorded ({was} -> {now}). "
+        "Say both the old value and the new one, so a wrong replacement is "
+        "visible and can be corrected — never answer with just the list."
+    )
     return result
 
 
