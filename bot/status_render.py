@@ -14,13 +14,22 @@ _TITLE = "Вот текущая информация по организации
 _NO_REMINDERS = "Нет запланированных напоминаний"
 
 
-def _place_and_date(place: str | None, event_date: str | None) -> str | None:
+def _place_and_date(
+    place: str | None, event_date: str | None, place_link: str | None = None
+) -> str | None:
     # Both, either, or neither can be known at once — R7's "nothing invented"
     # applies here too: a line for a fact nobody has stated is worse than no
     # line at all.
     lines = []
     if place:
-        lines.append(f"📍 Место: {place}")
+        # The link goes after the name, never instead of it: the group's own
+        # wording is what this report exists to repeat back to them, and a
+        # URL alone answers "where" while losing "what it is called".
+        lines.append(f"📍 Место: {place}" + (f" — {place_link}" if place_link else ""))
+    elif place_link:
+        # A pin shared before anyone named the place. Knowing where without
+        # knowing what it is called is still worth showing.
+        lines.append(f"📍 Место: {place_link}")
     if event_date:
         lines.append(f"📅 Дата: {event_date}")
     return "\n".join(lines) if lines else None
@@ -44,10 +53,11 @@ def _reminder_line(reminder: dict) -> str:
 def render_status(
     *, place: str | None, event_date: str | None,
     participants_rendered: str, list_rendered: str, reminders_rendered: str,
+    place_link: str | None = None,
 ) -> str:
     blocks = [_TITLE]
 
-    place_date = _place_and_date(place, event_date)
+    place_date = _place_and_date(place, event_date, place_link)
     if place_date:
         blocks.append(place_date)
 

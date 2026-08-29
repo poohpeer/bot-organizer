@@ -2,6 +2,7 @@ import functools
 from datetime import date
 
 import bot.group_info as group_info
+import bot.maps_links as maps_links
 import bot.timezones as timezones
 import bot.tools.core as core_tools
 import bot.status_render as status_render
@@ -146,8 +147,8 @@ async def archive_lookup(pool, session_id, activity_type) -> dict:
     return {"pattern": "tied", "places": tied}
 
 
-async def _current_place(pool, session_id) -> str | None:
-    """Where the event is, from whichever store actually knows.
+async def current_place(pool, session_id) -> dict:
+    """Where the event is and, when known, its coordinates.
 
     Two stores hold this and they disagree in practice. `places` is the
     canonical one — resolve_and_save_place writes a maps-resolved name and
@@ -168,20 +169,37 @@ async def _current_place(pool, session_id) -> str | None:
     The lookup is worth keeping for coordinates and the venue card
     (send_location uses the canonical name there, which is right for a map
     pin), but the report is meant to repeat the group back to itself.
+
+    The coordinates are what the report turns into a map link, so they are
+    looked up *for the name being reported* rather than taken from whatever
+    was resolved most recently — a pin someone dropped for a shop must not
+    end up linked beside the picnic's own place.
     """
     fact = (await core_tools.get_facts(pool, session_id, key="place"))["facts"].get("place")
-    if fact:
-        return fact
-    row = await pool.fetchrow(
-        "SELECT query, name FROM places WHERE session_id = $1 ORDER BY resolved_at DESC LIMIT 1",
+    latest = await pool.fetchrow(
+        "SELECT query, name, lat, lon FROM places WHERE session_id = $1 "
+        "ORDER BY resolved_at DESC LIMIT 1",
         session_id,
     )
-    if row is None:
-        return None
+
+    if fact:
+        # Coordinates for the name the group uses, not for whatever was
+        # resolved last: a pin for a shop someone mentioned must not put its
+        # link beside the picnic's own place. _PLACE_MATCH matches the
+        # canonical name or the phrasing that resolved it, which is how a
+        # group's "Море" finds the row it saved.
+        row = await pool.fetchrow(_PLACE_MATCH, session_id, fact)
+        return {"name": fact,
+                "lat": row["lat"] if row else None,
+                "lon": row["lon"] if row else None}
+
+    if latest is None:
+        return {"name": None, "lat": None, "lon": None}
     # query is the phrasing that resolved it — what someone actually typed.
     # It is nullable for rows written before it was recorded, so name is the
     # last resort rather than the default.
-    return row["query"] or row["name"]
+    return {"name": latest["query"] or latest["name"],
+            "lat": latest["lat"], "lon": latest["lon"]}
 
 
 async def event_status(pool, session_id) -> dict:
@@ -195,14 +213,15 @@ async def event_status(pool, session_id) -> dict:
     if session_row is None:
         return {"status": "unknown_session"}
 
-    place = await _current_place(pool, session_id)
+    place = await current_place(pool, session_id)
     participants = await core_tools.get_participants(pool, session_id)
     listing = await core_tools.list_show(pool, session_id)
     reminders = await core_tools.reminder_list(pool, session_id)
 
     event_date = session_row["event_date"].strftime("%d/%m") if session_row["event_date"] else None
     report = status_render.render_status(
-        place=place,
+        place=place["name"],
+        place_link=maps_links.maps_link(place["lat"], place["lon"]),
         event_date=event_date,
         participants_rendered=participants["rendered"],
         list_rendered=listing["rendered"],

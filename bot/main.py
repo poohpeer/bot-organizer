@@ -124,6 +124,11 @@ async def route_update(pool, telegram_bot, message, bot_id, bot_username, *, upd
         await router.handle_dormant_message(pool, telegram_bot, message, bot_id, bot_username)
     else:
         log.debug("update %s: active session %s", update_id, active["id"])
+        # A location carries no text, so the ordinary path would classify it
+        # as an empty message and forget the pin.
+        if await router.handle_shared_location(pool, active, message, bot_id, bot_username):
+            log.debug("update %s: handled as a shared location", update_id)
+            return
         await router.handle_active_message(pool, telegram_bot, active, message, bot_id, bot_username)
 
 
