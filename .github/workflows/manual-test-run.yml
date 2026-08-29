@@ -1,0 +1,73 @@
+name: Manual test run
+
+# Opens a run issue whose checklist is generated from docs/manual-tests.md,
+# so the list a person ticks is whatever the file said at that moment. A
+# second copy of the cases — an issue template, a project board, a
+# spreadsheet — drifts as soon as someone edits a handler, and a stale manual
+# test is worse than none: it sends a person to check behaviour that no
+# longer exists.
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: 'What this run is for, e.g. "after #73"'
+        required: false
+        type: string
+      sections:
+        description: 'Only these sections, e.g. "3,4". Blank means all of them.'
+        required: false
+        type: string
+
+jobs:
+  open-run:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the checklist
+        id: checklist
+        run: |
+          set -euo pipefail
+          ARGS=()
+          if [ -n "${{ inputs.sections }}" ]; then
+            ARGS+=(--sections "${{ inputs.sections }}")
+          fi
+          # No uv and no install: the generator is stdlib-only on purpose, so
+          # opening a run never waits on a dependency resolve.
+          python scripts/manual_test_checklist.py "${ARGS[@]}" > checklist.md
+          echo "count=$(grep -c '^- \[ \]' checklist.md)" >> "$GITHUB_OUTPUT"
+
+      - name: Open the run issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTE: ${{ inputs.note }}
+          COUNT: ${{ steps.checklist.outputs.count }}
+        run: |
+          set -euo pipefail
+          # Idempotent: the label may or may not exist yet, and a missing one
+          # makes `gh issue create --label` fail outright.
+          gh label create manual-test \
+            --description "A run of docs/manual-tests.md" --color BFD4F2 \
+            --force
+          TITLE="Manual test run — $(date -u +%Y-%m-%d)"
+          if [ -n "$NOTE" ]; then TITLE="$TITLE — $NOTE"; fi
+          {
+            echo "$COUNT checks that the automated suite cannot make."
+            echo
+            echo "Generated from [\`docs/manual-tests.md\`](../blob/${{ github.sha }}/docs/manual-tests.md)"
+            echo "at \`${{ github.sha }}\`. The document is the source: fix a case there,"
+            echo "not here, or the next run will disagree with this one."
+            echo
+            echo "Tick as you go. Anything that fails gets its own issue, linked from"
+            echo "the line below."
+            echo
+            cat checklist.md
+          } > body.md
+          gh issue create \
+            --title "$TITLE" \
+            --label manual-test \
+            --body-file body.md \
+            --repo "${{ github.repository }}"
