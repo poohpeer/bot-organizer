@@ -140,7 +140,7 @@ async def test_an_ordinary_message_still_falls_through_to_the_text_path(monkeypa
     active_handler.assert_awaited_once()
 
 
-def test_the_status_command_is_registered():
+def test_the_read_only_commands_are_registered():
     """A handler that exists and is never wired up is the failure mode the
     shared-location branch already had: every other test stays green while
     the feature is unreachable."""
@@ -148,6 +148,8 @@ def test_the_status_command_is_registered():
 
     source = inspect.getsource(main.main)
     assert 'CommandHandler("status", on_status)' in source
+    assert 'CommandHandler("list", on_list)' in source
+    assert 'on_pick_chat, pattern=r"^dm:"' in source
 
 
 # --- new_chat_members -------------------------------------------------------

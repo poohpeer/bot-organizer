@@ -178,7 +178,23 @@ async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
     await status_command.handle_command(
-        context.bot_data["pool"], context.bot, update.message
+        context.bot_data["pool"], context.bot, update.message, "status"
+    )
+
+
+async def on_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    await status_command.handle_command(
+        context.bot_data["pool"], context.bot, update.message, "list"
+    )
+
+
+async def on_pick_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None:
+        return
+    await status_command.handle_pick(
+        context.bot_data["pool"], context.bot, update.callback_query
     )
 
 
@@ -242,8 +258,10 @@ def main() -> None:
         .build()
     )
     app.add_handler(CommandHandler("status", on_status))
+    app.add_handler(CommandHandler("list", on_list))
     app.add_handler(CommandHandler("admin", on_admin))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^adm:"))
+    app.add_handler(CallbackQueryHandler(on_pick_chat, pattern=r"^dm:"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_message))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     log.info("Starting bot (long polling)")
