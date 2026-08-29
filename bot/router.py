@@ -22,6 +22,7 @@ import bot.history as history
 import bot.list_render as list_render
 import bot.places as places
 import bot.session as session
+import bot.telegram_text as telegram_text
 import bot.timezones as timezones
 import bot.tools.composed as composed_tools
 import bot.tools.core as core_tools
@@ -865,10 +866,14 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
 
     await decision_log.log_decision(
         pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="tool_call",
-        decision={"session_id": session_id, "reply": reply_text},
+        # Without the markers: the log is read by people, and history.py
+        # feeds it back to the model, which should not learn to write them.
+        decision={"session_id": session_id, "reply": telegram_text.strip_links(reply_text)},
     )
     if _has_visible_text(reply_text):
-        await telegram_bot.send_message(chat_id=chat_id, text=reply_text)
+        # The other place a report leaves the process — the model relaying
+        # event_status verbatim, map link and all.
+        await telegram_text.send_text(telegram_bot, chat_id, reply_text)
 
 
 _DM_REPLY_INSTRUCTION = (

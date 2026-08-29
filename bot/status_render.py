@@ -10,8 +10,15 @@ fixed shape; bot.router tells the model to relay it character-for-character,
 the same contract bot.list_render and bot.participant_render already have.
 """
 
+import bot.telegram_text as telegram_text
+
 _TITLE = "Вот текущая информация по организации встречи:"
 _NO_REMINDERS = "Нет запланированных напоминаний"
+
+
+# The label on the map link. A word rather than the URL: the coordinates are
+# unreadable and the raw link is three lines long on a phone.
+MAP_LABEL = "🔗 Map"
 
 
 def _place_and_date(
@@ -22,14 +29,12 @@ def _place_and_date(
     # line at all.
     lines = []
     if place:
-        # The link goes after the name, never instead of it: the group's own
-        # wording is what this report exists to repeat back to them, and a
-        # URL alone answers "where" while losing "what it is called".
-        lines.append(f"📍 Место: {place}" + (f" — {place_link}" if place_link else ""))
-    elif place_link:
-        # A pin shared before anyone named the place. Knowing where without
-        # knowing what it is called is still worth showing.
-        lines.append(f"📍 Место: {place_link}")
+        lines.append(f"📍 Место: {place}")
+    if place_link:
+        # Its own line, under the name. Beside it the two ran together and
+        # the name stopped being readable at a glance, which is the one job
+        # this line has.
+        lines.append(telegram_text.link(place_link, MAP_LABEL))
     if event_date:
         lines.append(f"📅 Дата: {event_date}")
     return "\n".join(lines) if lines else None
