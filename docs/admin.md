@@ -1,21 +1,51 @@
 # Commands
 
-## `/status`
+## `/status` and `/list`
 
-The full organizing report — place, date, participants, shopping list,
-reminders — posted into the chat. Any member may use it.
+`/status` posts the full organizing report — place, date, participants,
+shopping list, reminders. `/list` posts just the shopping list. Any member
+may use either.
 
-It is the same fixed block `bot.tools.composed.event_status` builds, so the
-command and the model's answer can never drift apart. It spends **no model
-call**: asking "как дела с организацией" costs a turn of the primary chain
-and depends on the model relaying the report verbatim — `bot/turn_outcome.py`
-exists to force that, which is itself evidence it does not always happen.
+They are the same fixed blocks `bot.tools.composed.event_status` and
+`bot.tools.core.list_show` build, so a command and the model's answer can
+never drift apart. They spend **no model call**: asking "как дела с
+организацией" costs a turn of the primary chain and depends on the model
+relaying the report verbatim — `bot/turn_outcome.py` exists to force that,
+which is itself evidence it does not always happen.
 
-No admin check, unlike `/admin` below: this only reads, and every member can
+No admin check, unlike `/admin` below: these only read, and every member can
 already see all of it in the chat.
 
-A chat with nothing being tracked is told so rather than shown an empty
-report.
+### In a private chat
+
+Both work in a DM, so someone can check the list without posting anything to
+the group — the whole reason for asking privately.
+
+**Read-only, deliberately.** Every change made in the group is visible to
+everyone there, and that visibility is most of what makes a shared list
+trustworthy: "добавь пива" from a private chat would move the group's list
+with nobody able to see who did it or when. Looking disturbs no one, so
+looking is what a DM allows.
+
+A private chat has no session of its own, so `bot/dm.py` decides which event
+the question is about:
+
+| this person's active events | what happens |
+|---|---|
+| exactly one | answered straight away |
+| several | a button per event; the choice carries which command was asked |
+| none | told so |
+
+**Membership is the gate, asked of Telegram every time.** Candidate events
+come from `participants` and `decision_log` — the two places a user id is
+recorded against a chat, since the Bot API cannot list a group's members. But
+being in `decision_log` is not permission; being in the chat *now* is. Any
+failure to check answers no: someone who has left must stop seeing the list
+immediately, and a private read is the wrong place to fail open.
+
+The session id in a button's callback data is re-checked on press for the
+same reason — the keyboard stays live in the private chat, and membership can
+end after it was drawn.
 
 ## `/admin`
 
