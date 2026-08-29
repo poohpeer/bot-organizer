@@ -37,7 +37,16 @@ def _json_schema_of(schema) -> dict:
             rendered["properties"] = properties
             # Groq/OpenAI strict JSON schema requires every declared property
             # to be present in `required`. Optional fields are represented by
-            # empty strings/arrays at the prompt-contract level instead.
+            # empty strings/arrays at the prompt-contract level instead —
+            # which means a field description that tells the model to *omit*
+            # the field contradicts this line, and the model obeying the
+            # description is what breaks the request. Live: asked to omit an
+            # unstated activity, the model answered
+            # {"event_date": "2026-08-31", "place": "Маленькая прага"} —
+            # exactly right — and Groq rejected its own generation with
+            # `json_validate_failed: missing properties: 'activity_type'`.
+            # tests/test_classify_schema_contract.py holds the two ends
+            # together.
             rendered["required"] = list(properties)
             rendered["additionalProperties"] = False
         return rendered

@@ -452,7 +452,8 @@ async def test_sync_chat_info_saves_place_and_date_from_the_title(db_pool, monke
     telegram_bot.get_chat_member_count.return_value = 4
     monkeypatch.setattr(
         composed.group_info, "extract",
-        AsyncMock(return_value={"activity_type": "поездка", "event_date": "2026-11-20", "place": "Море"}),
+        AsyncMock(return_value={"activity_type": "поездка", "event_date": "2026-11-20",
+                                "place": "Море", "place_kind": "природа"}),
     )
 
     result = await composed.sync_chat_info(db_pool, telegram_bot, session_id)
@@ -575,3 +576,58 @@ async def test_no_place_anywhere_omits_the_line(db_pool):
     result = await composed.event_status(db_pool, session_id)
 
     assert "📍" not in result["report"]
+
+
+async def test_sync_chat_info_says_found_when_the_value_is_already_current(db_pool, monkeypatch):
+    """found_nothing is about the text, not about the write. Answering
+    "в названии ничего нет" because the place was already recorded would tell
+    the group the opposite of what their own title says."""
+    session_id = await _new_session(db_pool, chat_id=43)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.return_value = SimpleNamespace(title="Море 20/11", description=None)
+    telegram_bot.get_chat_member_count.return_value = 4
+    monkeypatch.setattr(
+        composed.group_info, "extract",
+        AsyncMock(return_value={"activity_type": "", "event_date": "2026-11-20",
+                                "place": "Море", "place_kind": "природа"}),
+    )
+
+    await composed.sync_chat_info(db_pool, telegram_bot, session_id)
+    result = await composed.sync_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result["found_nothing"] is False
+    assert result["place"] == "Море"
+    assert result["already_current"] is True
+    assert result["changed"] == {}
+
+
+async def test_sync_chat_info_does_not_claim_nothing_when_the_classifier_failed(db_pool, monkeypatch):
+    """extract() fails closed to {}. Reporting that as "the title says
+    nothing" is a lie about the group's own text."""
+    session_id = await _new_session(db_pool, chat_id=44)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.return_value = SimpleNamespace(title="Море 20/11", description=None)
+    telegram_bot.get_chat_member_count.return_value = 4
+    monkeypatch.setattr(composed.group_info, "extract", AsyncMock(return_value={}))
+
+    result = await composed.sync_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result["status"] == "unavailable"
+    assert "found_nothing" not in result
+
+
+async def test_sync_chat_info_ignores_a_title_that_is_not_a_place(db_pool, monkeypatch):
+    session_id = await _new_session(db_pool, chat_id=45)
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat.return_value = SimpleNamespace(title="Друзья", description=None)
+    telegram_bot.get_chat_member_count.return_value = 4
+    monkeypatch.setattr(
+        composed.group_info, "extract",
+        AsyncMock(return_value={"activity_type": "", "event_date": "",
+                                "place": "Друзья", "place_kind": "нет"}),
+    )
+
+    result = await composed.sync_chat_info(db_pool, telegram_bot, session_id)
+
+    assert result["found_nothing"] is True
+    assert "place" not in result

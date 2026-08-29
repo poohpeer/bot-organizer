@@ -1,5 +1,5 @@
 """The worker's third duty (see worker.main.poll_once): notice when a group's
-own title/description change, and say so once — never once per poll.
+own title/description change, and bring the event into line with them.
 
 Only chats with an active session are touched at all. A dormant chat is not
 being tracked (R5 from 0001), so even fetching its info would be the bot
@@ -13,7 +13,6 @@ from datetime import date
 
 import bot.group_info as group_info
 import bot.timezones as timezones
-import bot.tools.core as core_tools
 
 log = logging.getLogger(__name__)
 
@@ -25,31 +24,15 @@ log = logging.getLogger(__name__)
 GROUP_SYNC_INTERVAL_SECONDS = int(os.environ.get("GROUP_SYNC_INTERVAL_SECONDS", "60"))
 
 
-def _parse_iso_date(value) -> date | None:
-    # Mirrors bot.router._parse_event_date: the classifier is asked for
-    # ISO-8601 but isn't guaranteed to comply, and a malformed date here must
-    # not crash the whole sync pass for every other chat.
-    if not isinstance(value, str):
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def _describe_change(changes: dict, info: dict) -> str:
-    sentences = []
-    if changes["title_changed"]:
-        sentences.append(f"Название чата теперь «{info.get('title') or ''}».")
-    if changes["description_changed"]:
-        sentences.append(f"Описание чата теперь: «{info.get('description') or ''}».")
-    return " ".join(sentences)
-
-
 async def sync_group_info(pool, telegram_bot) -> dict:
     """Check every chat with an active session for a title/description
-    change, announce each one exactly once, and refresh chats.member_count
-    along the way.
+    change, apply whatever it says about the event, and refresh
+    chats.member_count along the way.
+
+    Nothing is posted to the chat. A group renaming its own chat can see
+    that it did; being told about it is noise, and the announcement was
+    landing even when the extraction behind it had failed and nothing was
+    actually applied.
 
     Each chat is isolated in its own try/except, the same discipline
     worker.closing follows: one chat the bot has been kicked from must not
@@ -67,7 +50,7 @@ async def sync_group_info(pool, telegram_bot) -> dict:
         GROUP_SYNC_INTERVAL_SECONDS,
     )
 
-    announced = []
+    updated = []
     for row in rows:
         chat_id, session_id = row["chat_id"], row["session_id"]
         try:
@@ -85,29 +68,42 @@ async def sync_group_info(pool, telegram_bot) -> dict:
                     chat_id, info["member_count"],
                 )
 
-            # Compares against, and stores, the new values in one call — the
-            # single most important line in this function. Splitting compare
-            # and store into two steps is what would turn one real change
-            # into the same announcement on every poll thereafter.
-            changes = await group_info.changes_since_last_seen(pool, chat_id, info)
-            if not (changes["title_changed"] or changes["description_changed"]):
+            # Read before the change is recorded as seen, so a failed
+            # extraction leaves the change unconsumed and the next pass tries
+            # again. It used to be the other way round: the title was stored
+            # as seen, the classifier chain then 400ed, and the change was
+            # gone forever — live, "Маленькая прага 31/8" was announced to
+            # the chat and never reached the event at all.
+            changed = await group_info.changed_fields(pool, chat_id, info)
+            if not changed:
+                # A first sighting lands here too, and still has to be
+                # recorded — that is what turns comparison on for this chat.
+                await group_info.record_as_seen(pool, chat_id, info)
                 continue
 
             tz = await timezones.chat_timezone(pool, chat_id)
             event = await group_info.extract_event(
                 info.get("title"), info.get("description"), timezones.local_date(tz)
             )
-            parsed_date = _parse_iso_date(event.get("event_date"))
-            if parsed_date is not None:
-                await pool.execute(
-                    "UPDATE sessions SET event_date = $2 WHERE id = $1", session_id, parsed_date
-                )
-            if event.get("place"):
-                await core_tools.remember_fact(pool, session_id, "place", event["place"])
+            if not event["answered"]:
+                # Nobody in the chain could read it. Leaving the change
+                # unrecorded is the whole point: the next pass tries again
+                # instead of the new title being lost because one classifier
+                # call happened to fail.
+                log.warning("Chat %s changed %s but the classifier did not answer; "
+                            "leaving it for the next pass", chat_id, sorted(changed))
+                continue
 
-            await telegram_bot.send_message(chat_id=chat_id, text=_describe_change(changes, info))
-            announced.append(chat_id)
+            applied = await group_info.apply_event(pool, session_id, event)
+            # After the work, not before. A title that simply says nothing
+            # about an event is recorded too, so a chat called "Друзья" is
+            # not re-read every minute forever.
+            await group_info.record_as_seen(pool, chat_id, info)
+            if applied:
+                log.info("Chat %s: applied %s from its own title/description",
+                         chat_id, applied)
+                updated.append({"chat_id": chat_id, **applied})
         except Exception:
             log.warning("Group sync failed for chat %s", chat_id, exc_info=True)
 
-    return {"announced": announced}
+    return {"updated": updated}

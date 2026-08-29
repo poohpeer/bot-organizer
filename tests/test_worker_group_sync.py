@@ -34,33 +34,47 @@ async def _mark_already_seen(db_pool, chat_id, title, description, checked_secon
     )
 
 
-async def test_changed_description_produces_one_message_and_next_poll_produces_none(db_pool, monkeypatch):
-    session_id = await _active_session(db_pool)
+async def test_a_change_is_never_posted_to_the_chat(db_pool, monkeypatch):
+    """A group renaming its own chat can see that it did. Being told about it
+    is noise — and the announcement was landing even when the extraction
+    behind it had failed and nothing had actually been applied."""
+    await _active_session(db_pool)
     await _mark_already_seen(db_pool, 1, "Chat", "Original description")
-    telegram_bot = _telegram_bot(description="New description")
+    telegram_bot = _telegram_bot(description="Едем на Море 20/11")
     monkeypatch.setattr(
         group_sync.group_info, "extract_event",
-        AsyncMock(return_value={"activity_type": None, "event_date": None, "place": None}),
+        AsyncMock(return_value={"answered": True, "activity_type": None,
+                                "event_date": "2026-11-20", "place": "Море"}),
+    )
+
+    await group_sync.sync_group_info(db_pool, telegram_bot)
+
+    telegram_bot.send_message.assert_not_awaited()
+
+
+async def test_a_change_is_applied_once_and_not_again(db_pool, monkeypatch):
+    session_id = await _active_session(db_pool)
+    await _mark_already_seen(db_pool, 1, "Chat", "Original description")
+    telegram_bot = _telegram_bot(description="Едем на Море 20/11")
+    monkeypatch.setattr(
+        group_sync.group_info, "extract_event",
+        AsyncMock(return_value={"answered": True, "activity_type": None,
+                                "event_date": "2026-11-20", "place": "Море"}),
     )
 
     result = await group_sync.sync_group_info(db_pool, telegram_bot)
 
-    assert result == {"announced": [1]}
-    telegram_bot.send_message.assert_awaited_once()
-    assert "New description" in telegram_bot.send_message.await_args.kwargs["text"]
+    assert result == {"updated": [{"chat_id": 1, "event_date": "2026-11-20", "place": "Море"}]}
 
-    # Re-open the interval gate (as if 60s had passed) without changing the
-    # info Telegram reports — the description is now what was last seen, so
-    # this poll must announce nothing.
+    # Re-open the interval gate without changing what Telegram reports.
     await db_pool.execute(
         "UPDATE chats SET info_checked_at = now() - interval '120 seconds' WHERE chat_id = 1"
     )
-    telegram_bot.send_message.reset_mock()
 
-    result2 = await group_sync.sync_group_info(db_pool, telegram_bot)
-
-    assert result2 == {"announced": []}
-    telegram_bot.send_message.assert_not_awaited()
+    assert await group_sync.sync_group_info(db_pool, telegram_bot) == {"updated": []}
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM facts WHERE session_id = $1 AND key = 'place'", session_id
+    ) == 1
 
 
 async def test_unchanged_chat_produces_nothing(db_pool):
@@ -71,7 +85,7 @@ async def test_unchanged_chat_produces_nothing(db_pool):
 
     result = await group_sync.sync_group_info(db_pool, telegram_bot)
 
-    assert result == {"announced": []}
+    assert result == {"updated": []}
     telegram_bot.send_message.assert_not_awaited()
 
 
@@ -83,7 +97,7 @@ async def test_dormant_chat_is_never_fetched_at_all(db_pool):
 
     result = await group_sync.sync_group_info(db_pool, telegram_bot)
 
-    assert result == {"announced": []}
+    assert result == {"updated": []}
     telegram_bot.get_chat.assert_not_awaited()
     telegram_bot.send_message.assert_not_awaited()
 
@@ -95,7 +109,7 @@ async def test_one_chats_get_chat_failing_does_not_stop_the_others(db_pool, monk
     await _mark_already_seen(db_pool, 2, "Chat", "Original")
     monkeypatch.setattr(
         group_sync.group_info, "extract_event",
-        AsyncMock(return_value={"activity_type": None, "event_date": None, "place": None}),
+        AsyncMock(return_value={"answered": True, "activity_type": None, "event_date": None, "place": None}),
     )
 
     telegram_bot = AsyncMock()
@@ -110,23 +124,55 @@ async def test_one_chats_get_chat_failing_does_not_stop_the_others(db_pool, monk
 
     result = await group_sync.sync_group_info(db_pool, telegram_bot)
 
-    assert result == {"announced": [2]}
+    assert result == {"updated": []}, "chat 2 says nothing about an event"
+    telegram_bot.get_chat.assert_awaited()
 
 
-async def test_the_announcement_names_what_actually_changed(db_pool, monkeypatch):
-    await _active_session(db_pool)
-    await _mark_already_seen(db_pool, 1, "Old title", "Same description")
-    telegram_bot = _telegram_bot(title="New title", description="Same description")
+async def test_a_classifier_that_did_not_answer_leaves_the_change_for_next_time(db_pool, monkeypatch):
+    """The live loss. The title moved to "Маленькая прага 31/8", the old code
+    marked it seen straight away, the classifier chain then answered 400, and
+    the change was gone: the next pass saw no difference and the event never
+    learnt the new place."""
+    session_id = await _active_session(db_pool)
+    await _mark_already_seen(db_pool, 1, "Chat", "Old")
+    telegram_bot = _telegram_bot(title="Маленькая прага 31/8", description="Old")
+    failed = AsyncMock(return_value={"answered": False, "activity_type": None,
+                                     "event_date": None, "place": None})
+    monkeypatch.setattr(group_sync.group_info, "extract_event", failed)
+
+    assert await group_sync.sync_group_info(db_pool, telegram_bot) == {"updated": []}
+    assert await db_pool.fetchval(
+        "SELECT title_seen FROM chats WHERE chat_id = 1"
+    ) == "Chat", "an unread change must not be recorded as handled"
+
+    # The next pass, with the classifier working again.
+    await db_pool.execute(
+        "UPDATE chats SET info_checked_at = now() - interval '120 seconds' WHERE chat_id = 1"
+    )
     monkeypatch.setattr(
         group_sync.group_info, "extract_event",
-        AsyncMock(return_value={"activity_type": None, "event_date": None, "place": None}),
+        AsyncMock(return_value={"answered": True, "activity_type": None,
+                                "event_date": "2026-08-31", "place": "Маленькая прага"}),
     )
 
     await group_sync.sync_group_info(db_pool, telegram_bot)
 
-    text = telegram_bot.send_message.await_args.kwargs["text"]
-    assert "New title" in text
-    assert "Same description" not in text
+    assert await db_pool.fetchval(
+        "SELECT value FROM facts WHERE session_id = $1 AND key = 'place'", session_id
+    ) == "Маленькая прага"
+
+
+async def test_a_title_that_says_nothing_is_still_marked_seen(db_pool, monkeypatch):
+    """Otherwise a chat called "Друзья" is re-read, and a classifier call
+    spent on it, every single minute forever."""
+    await _active_session(db_pool)
+    await _mark_already_seen(db_pool, 1, "Chat", "Old")
+    telegram_bot = _telegram_bot(title="Друзья", description="Old")
+    monkeypatch.setattr(group_sync.group_info, "extract_event", AsyncMock(return_value={"answered": True, "activity_type": None, "event_date": None, "place": None}))
+
+    await group_sync.sync_group_info(db_pool, telegram_bot)
+
+    assert await db_pool.fetchval("SELECT title_seen FROM chats WHERE chat_id = 1") == "Друзья"
 
 
 async def test_recently_checked_chat_is_skipped_until_the_interval_elapses(db_pool, monkeypatch):
@@ -141,7 +187,7 @@ async def test_recently_checked_chat_is_skipped_until_the_interval_elapses(db_po
 
     result = await group_sync.sync_group_info(db_pool, telegram_bot)
 
-    assert result == {"announced": []}
+    assert result == {"updated": []}
     telegram_bot.get_chat.assert_not_awaited()
 
 
@@ -162,7 +208,8 @@ async def test_changed_info_updates_the_sessions_event_date_and_place_fact(db_po
     monkeypatch.setattr(
         group_sync.group_info, "extract_event",
         AsyncMock(return_value={
-            "activity_type": "пикник", "event_date": "2026-10-20", "place": "поляна Ханания",
+            "answered": True, "activity_type": "пикник",
+            "event_date": "2026-10-20", "place": "поляна Ханания",
         }),
     )
 

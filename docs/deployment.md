@@ -188,6 +188,45 @@ which the bot may start a conversation on its own.
 description. The worker's own poll runs every 60s regardless; this is a
 separate, per-chat gate on top of that, not a second poll loop.
 
+**Nothing is posted to the chat.** A group renaming its own chat can see that
+it did. What the sync does is bring the event into line with the new text:
+
+- **A date is taken from the title or description** whenever one is stated,
+  a bare `20/11` included — group titles are commonly a place and a date
+  together ("Море 20/11", "Маленькая прага 31/8").
+- **A place is taken only when the text names somewhere the group could
+  actually go.** The classifier answers a `place_kind` out of a fixed set —
+  `город`, `адрес`, `заведение`, `природа`, `нет` — and the code stores a
+  place only on a positive, known answer. A chat called "Друзья" or
+  "Отдыхаем" has no place in it, and an unrecognised answer counts as `нет`.
+  It has to be the model's judgement: resolving the text through maps would
+  look like enforcement and is not, because maps returns a result for almost
+  any string.
+- **A value is written only when it differs** from what the session already
+  holds. `facts` rows are append-only and `get_facts` takes the newest per
+  key, so re-recording an unchanged place on every touch of the title would
+  grow a pile of identical rows.
+
+### Why a change is recorded last, not first
+
+`changed_fields` compares; `record_as_seen` stores; the worker calls the
+second only after the first has been acted on. They used to be one call, so a
+change was consumed the instant it was noticed.
+
+Live: the title moved to "Маленькая прага 31/8", the old code marked it seen,
+the classifier chain then answered 400, and the change was gone — the next
+pass saw no difference and the event never learnt the new place. The chat got
+an announcement about a change that had been applied to nothing.
+
+A classifier that could not answer at all (`event["answered"] is False`)
+leaves the change unrecorded so the next pass retries. A classifier that
+answered and found nothing does record it — otherwise a chat called "Друзья"
+is re-read, and a model call spent on it, every minute forever.
+
+`bot.tools.composed.sync_chat_info` — the same job on demand, when someone
+asks the bot to read the group's title — goes through the same
+`group_info.apply_event`, so all of the above holds there too.
+
 ## Logs and troubleshooting
 
 ```bash
