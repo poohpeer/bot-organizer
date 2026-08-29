@@ -94,3 +94,24 @@ kubectl exec deployment/bot-organizer-bot -- \
 
 Without a valid token this answers `403` and says nothing else — a caller
 with a bad token learns only that it is bad.
+
+## What it buys
+
+`codex:` and `claude:sonnet` sit at the end of `AI_PROXY_MODELS`, behind
+Groq and Gemini. They are the reserve, not the front:
+
+| provider | one tool-calling turn |
+|---|---|
+| groq gpt-oss-20b | 152 in / 32 out |
+| claude | 6 in / 150 out, 39 958 cached |
+| codex | 5 546 in uncached / 143 out |
+
+Measured on the same task with the same single tool. The reason to keep them
+anyway is that they are separate accounts with separate quotas, and this
+chain has spent whole evenings against Groq's 429s. codex comes before claude
+because it is on a free account — tokens that cost nothing outrank a token
+count.
+
+**They only work when `MCP_BASE_URL` is set.** Without it the bot sends no
+address, ai-proxy refuses the request with `unsupported_tool_use`, and the
+chain moves on — which is the right behaviour, just not a useful one.

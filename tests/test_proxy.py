@@ -111,16 +111,16 @@ async def test_a_genuinely_bad_request_stays_non_retryable(monkeypatch):
         raise AssertionError("expected proxy error")
 
 
-def test_the_default_chain_excludes_providers_that_drop_tools():
-    """ai-proxy's codex and claude_code adapters accept a tools array and
-    silently ignore it — live: "start provider=codex tools=26" then
-    "complete ... tool_calls=0". Almost every turn here needs a tool call, so
-    such a provider does not degrade, it fabricates: asked to show the list,
-    codex answered "доступ к данным организатора сейчас недоступен" rather
-    than reading the database. Neither may sit in the default chain.
-    """
+def test_a_cli_entry_routes_to_its_provider_with_no_model_of_its_own():
+    """The CLIs were out of this chain while their adapters accepted a tools
+    array and ignored it — live: "start provider=codex tools=26" then
+    "complete ... tool_calls=0", and an answer invented rather than read.
+    They are back now that they reach the bot's tools over MCP, and the bare
+    "codex:" prefix still means "this provider, no model": a ChatGPT-
+    authenticated CLI only runs its account's default."""
     import bot.ai.client as client
 
-    assert "codex:" not in client.DEFAULT_PROXY_MODELS
-    assert "claude:" not in client.DEFAULT_PROXY_MODELS
     assert client.DEFAULT_PROXY_MODELS.startswith("openai/gpt-oss-120b")
+    assert "codex:" in client.DEFAULT_PROXY_MODELS
+    assert ProxyProvider("http://ai-proxy")._route_model("codex:") == ("codex", None)
+    assert ProxyProvider("http://ai-proxy")._route_model("claude:sonnet") == ("claude_code", "sonnet")

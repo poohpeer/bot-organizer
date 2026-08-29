@@ -137,13 +137,29 @@ async def test_the_switch_is_sticky():
     assert provider.started == ["b"], "should not have re-tried the rate-limited model"
 
 
-def test_the_default_chain_puts_the_two_gpt_oss_models_first():
+def test_the_chain_runs_http_providers_first_and_the_clis_as_reserve():
+    """Order is the whole design. Groq first — a separate account from
+    Gemini, so one provider's rate limit does not stop the bot. The CLIs
+    last, because they reach tools over MCP and cost far more per turn:
+    measured on one task, codex spent 5 546 uncached input tokens against
+    Groq's 152. They are here for the evenings Groq spends returning 429."""
     from bot.ai.client import DEFAULT_PROXY_MODELS
 
     models = DEFAULT_PROXY_MODELS.split(",")
 
     assert models[:2] == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
-    assert all(m.startswith(("gemma-", "gemini-")) for m in models[2:])
+    assert all(m.startswith(("gemma-", "gemini-")) for m in models[2:-2])
+    assert models[-2:] == ["codex:", "claude:sonnet"], "the CLIs are the reserve, not the front"
+
+
+def test_codex_comes_before_claude():
+    """Not a token-count decision: codex is on a free account, and tokens
+    that cost nothing outrank a token count."""
+    from bot.ai.client import DEFAULT_PROXY_MODELS
+
+    models = DEFAULT_PROXY_MODELS.split(",")
+
+    assert models.index("codex:") < models.index("claude:sonnet")
 
 
 def test_the_bot_holds_no_model_credentials_or_endpoints():
