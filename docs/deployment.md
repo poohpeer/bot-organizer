@@ -252,6 +252,34 @@ strips a trailing coordinate pair from the place key, where the value is
 written rather than where it is read — several callers write it and only one
 of them is the model.
 
+### A navigator link is taken as given
+
+A Waze, Google Maps, Yandex, Apple Maps or similar link in the chat sets the
+event's place link — **not resolved, not expanded, not checked**. Live, the
+model tried to look one up and answered:
+
+> Не смог открыть эту короткую ссылку — карты её не раскрывают. Пришли,
+> пожалуйста, название места или точку, которая открывается…
+
+The link opens perfectly well on the phone of whoever receives it. Whether
+maps can expand a short link says nothing about whether it works, so the
+lookup — and the question after it — turned a working link into a
+conversation.
+
+Handled in `bot/router.py::handle_shared_map_link`, before the model, because
+there is nothing to decide. Recognised by host, plus any URL carrying a
+coordinate pair — that is the catch-all for a navigator nobody listed.
+
+It is **additive**: only the link is set. The place keeps whatever the group
+called it; a link is not a rename. A name is taken only when there is none at
+all *and* the message said something besides the URL.
+
+Stored in `sessions.place_url`, kept byte-for-byte. Not in `places`: that
+table's `lat`/`lon` are `NOT NULL` and a short link carries neither —
+expanding one to find out is exactly what this exists to stop. A link
+somebody sent wins over one built from coordinates, since a short link often
+points at a pin no lookup would have found.
+
 ### The link needs entities
 
 `parse_mode` is set nowhere else in `bot/` on purpose: Telegram drops a whole

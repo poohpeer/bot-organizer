@@ -176,6 +176,10 @@ async def current_place(pool, session_id) -> dict:
     end up linked beside the picnic's own place.
     """
     fact = (await core_tools.get_facts(pool, session_id, key="place"))["facts"].get("place")
+    # A link somebody sent wins over one built from coordinates: they took
+    # the trouble to send that exact link, and a short link often points at a
+    # pin no lookup would have found.
+    sent_url = await pool.fetchval("SELECT place_url FROM sessions WHERE id = $1", session_id)
     latest = await pool.fetchrow(
         "SELECT query, name, lat, lon FROM places WHERE session_id = $1 "
         "ORDER BY resolved_at DESC LIMIT 1",
@@ -189,16 +193,16 @@ async def current_place(pool, session_id) -> dict:
         # canonical name or the phrasing that resolved it, which is how a
         # group's "Море" finds the row it saved.
         row = await pool.fetchrow(_PLACE_MATCH, session_id, fact)
-        return {"name": fact,
+        return {"name": fact, "url": sent_url,
                 "lat": row["lat"] if row else None,
                 "lon": row["lon"] if row else None}
 
     if latest is None:
-        return {"name": None, "lat": None, "lon": None}
+        return {"name": None, "url": sent_url, "lat": None, "lon": None}
     # query is the phrasing that resolved it — what someone actually typed.
     # It is nullable for rows written before it was recorded, so name is the
     # last resort rather than the default.
-    return {"name": latest["query"] or latest["name"],
+    return {"name": latest["query"] or latest["name"], "url": sent_url,
             "lat": latest["lat"], "lon": latest["lon"]}
 
 
@@ -221,7 +225,7 @@ async def event_status(pool, session_id) -> dict:
     event_date = session_row["event_date"].strftime("%d/%m") if session_row["event_date"] else None
     report = status_render.render_status(
         place=place["name"],
-        place_link=maps_links.maps_link(place["lat"], place["lon"]),
+        place_link=place["url"] or maps_links.maps_link(place["lat"], place["lon"]),
         event_date=event_date,
         participants_rendered=participants["rendered"],
         list_rendered=listing["rendered"],

@@ -130,6 +130,11 @@ async def route_update(pool, telegram_bot, message, bot_id, bot_username, *, upd
         if await router.handle_shared_location(pool, active, message, bot_id, bot_username):
             log.debug("update %s: handled as a shared location", update_id)
             return
+        # A navigator link is taken as given — no lookup, no question. See
+        # router.handle_shared_map_link.
+        if await router.handle_shared_map_link(pool, telegram_bot, active, message):
+            log.debug("update %s: handled as a shared map link", update_id)
+            return
         await router.handle_active_message(pool, telegram_bot, active, message, bot_id, bot_username)
 
 
