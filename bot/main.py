@@ -7,8 +7,12 @@ import os
 
 from telegram import Update
 from telegram.constants import ChatMemberStatus
-from telegram.ext import Application, ChatMemberHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler,
+    ContextTypes, MessageHandler, filters,
+)
 
+import bot.admin as admin
 import bot.dedup as dedup
 import bot.mcp_server as mcp_server
 import bot.router as router
@@ -164,6 +168,20 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+async def on_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    await admin.handle_command(context.bot_data["pool"], context.bot, update.message)
+
+
+async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None:
+        return
+    await admin.handle_callback(
+        context.bot_data["pool"], context.bot, update.callback_query
+    )
+
+
 async def post_init(app: Application) -> None:
     pool = await db_pool_module.create_pool(os.environ["DATABASE_URL"])
     await db_pool_module.init_db(pool)
@@ -209,6 +227,8 @@ def main() -> None:
         .post_shutdown(post_shutdown)
         .build()
     )
+    app.add_handler(CommandHandler("admin", on_admin))
+    app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^adm:"))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_message))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     log.info("Starting bot (long polling)")

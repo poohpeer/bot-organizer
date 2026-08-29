@@ -27,7 +27,9 @@ import bot.tools.core as core_tools
 import bot.tools.external as external_tools
 from bot.addressing import addressed_to_bot, bot_was_added
 from bot.ai.classify import classify, extract
-from bot.ai.client import AllModelsUnavailable, fallback
+import bot.ai.client as ai_client
+import bot.settings as settings
+from bot.ai.client import AllModelsUnavailable
 from bot.ai.tool_loop import run_tool_loop
 from bot.formatting import to_plain_text
 from bot.session import SessionAlreadyActiveError, start_session
@@ -725,7 +727,8 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     mcp_token = grants.issue(session_id, message.from_user) if grants else None
     try:
         reply_text = await run_tool_loop(
-            fallback, text, registry,
+            ai_client.fallback_for(chat_id, await settings.get_provider_chain(pool, chat_id)),
+            text, registry,
             system_instruction=await _active_mode_instruction(
                 pool, chat_id, session_id, message.from_user
             ),
