@@ -236,18 +236,6 @@ async def get_chat_info(pool, telegram_bot, session_id) -> dict:
     return {"status": "ok", "title": info.get("title"), "description": info.get("description")}
 
 
-def _parse_iso_date(value) -> date | None:
-    # Mirrors bot.router._parse_event_date / worker.group_sync._parse_iso_date:
-    # the classifier is asked for ISO-8601 but isn't guaranteed to comply, and
-    # a malformed date here must not raise out of a tool call.
-    if not isinstance(value, str):
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
-
-
 async def sync_chat_info(pool, telegram_bot, session_id) -> dict:
     """Read the group's title/description live and actually record whatever
     event info they state — place and/or date — in one atomic call.
@@ -281,24 +269,30 @@ async def sync_chat_info(pool, telegram_bot, session_id) -> dict:
         info.get("title"), info.get("description"), timezones.local_date(tz)
     )
 
-    saved = {}
-    if event.get("place"):
-        await core_tools.remember_fact(pool, session_id, "place", event["place"])
-        saved["place"] = event["place"]
+    if not event["answered"]:
+        # Nobody in the model chain could read the title. Saying "в названии
+        # ничего нет" here would be a lie about the group's own text.
+        return {"status": "unavailable",
+                "title": info.get("title"), "description": info.get("description")}
 
-    parsed_date = _parse_iso_date(event.get("event_date"))
-    if parsed_date is not None:
-        await pool.execute(
-            "UPDATE sessions SET event_date = $2 WHERE id = $1", session_id, parsed_date
-        )
-        saved["event_date"] = parsed_date.isoformat()
+    # Same rules as the timer pass: a place only when the text names somewhere
+    # the group could actually go, and a write only when the value differs
+    # from what the session already holds.
+    changed = await group_info.apply_event(pool, session_id, event)
 
+    # found_nothing is about the text, not about the write. An unchanged
+    # value was still found: answering "в названии ничего нет" because the
+    # place was already recorded would tell the group the opposite of what
+    # their own title says.
+    found = {key: event[key] for key in ("event_date", "place") if event.get(key)}
     return {
         "status": "ok",
         "title": info.get("title"),
         "description": info.get("description"),
-        "found_nothing": not saved,
-        **saved,
+        "found_nothing": not found,
+        "already_current": bool(found) and not changed,
+        **found,
+        "changed": changed,
     }
 
 

@@ -124,7 +124,8 @@ _START_SCHEMA = types.Schema(
         "event_date": types.Schema(
             type=types.Type.STRING,
             description="ISO-8601 date (YYYY-MM-DD) if a date is stated anywhere in the "
-            "message or chat title, otherwise omitted.",
+            "message or chat title — including a bare '20/11', which is day/month. "
+            "Empty string if no date is stated.",
         ),
         "event_date_raw": types.Schema(
             type=types.Type.STRING,
