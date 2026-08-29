@@ -23,6 +23,11 @@ data:
   QUIET_FROM_HOUR: "21"
   REMINDER_MIN_INTERVAL_HOURS: "6"
   REMINDER_MIN_REPEAT_MINUTES: "5"
+  # Where a CLI-backed model reaches this bot's tools. Unset means MCP is not
+  # in use and no grant or address is issued at all. See docs/mcp.md.
+  MCP_BASE_URL: http://bot-organizer-bot:8081
+  MCP_PORT: "8081"
+  MCP_GRANT_TTL_SECONDS: "600"
   CONVERSATION_TURNS: "5"
   CONVERSATION_MAX_AGE_MINUTES: "30"
   GROUP_SYNC_INTERVAL_SECONDS: "60"

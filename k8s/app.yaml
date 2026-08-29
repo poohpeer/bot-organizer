@@ -27,6 +27,13 @@ spec:
                 name: bot-organizer-secrets
             - configMapRef:
                 name: bot-organizer-config
+          ports:
+            # The MCP endpoint. Declared so the Service below can find it by
+            # name; nothing routes to it from outside the cluster and nothing
+            # should — a caller reaching it holds tools that write to this
+            # bot's database. See docs/mcp.md.
+            - name: mcp
+              containerPort: 8081
           # Measured: 73 MiB just to import the app, before any connections.
           # The request is set above that so scheduling reflects reality; the
           # limit is deliberate headroom, so only a genuine leak is killed.
@@ -39,6 +46,21 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bot-organizer-bot
+spec:
+  # ClusterIP, deliberately: this exists so ai-proxy can tell a CLI where the
+  # bot's tools are, and for no other reason. Never a NodePort or an Ingress.
+  type: ClusterIP
+  selector:
+    app: bot-organizer-bot
+  ports:
+    - name: mcp
+      port: 8081
+      targetPort: mcp
 ---
 apiVersion: apps/v1
 kind: Deployment

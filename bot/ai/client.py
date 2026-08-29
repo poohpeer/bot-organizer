@@ -83,7 +83,7 @@ class ModelFallback:
     def model(self) -> str:
         return self.current[1]
 
-    async def start(self, prompt, *, tools=None, system_instruction=None, history=None):
+    async def start(self, prompt, *, tools=None, system_instruction=None, history=None, mcp_url=None):
         """Open a conversation on the best model that will accept it.
 
         Raises AllModelsUnavailable once every remaining entry has refused.
@@ -95,6 +95,7 @@ class ModelFallback:
                 chat = await provider.start(
                     model, prompt, tools=tools,
                     system_instruction=system_instruction, history=history,
+                    mcp_url=mcp_url,
                 )
                 return provider, model, chat
             except Exception as e:

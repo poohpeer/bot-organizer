@@ -15,7 +15,7 @@ class ProxyProvider:
         self.endpoint = endpoint.rstrip("/")
         self.backend_provider = backend_provider
 
-    async def _request(self, model, prompt, *, tools=None, system_instruction=None, history=None, output_format="text", schema=None):
+    async def _request(self, model, prompt, *, tools=None, system_instruction=None, history=None, output_format="text", schema=None, mcp_url=None):
         provider, upstream_model = self._route_model(model)
         body = {
             "provider": provider,
@@ -27,6 +27,11 @@ class ProxyProvider:
             "output_format": output_format,
             "json_schema": schema,
         }
+        if mcp_url:
+            # Only a CLI-backed provider can use this; the HTTP ones ignore
+            # it. Omitted entirely when absent so a proxy that predates the
+            # field sees no change at all.
+            body["mcp_url"] = mcp_url
         async with httpx.AsyncClient(timeout=float(os.environ.get("AI_PROXY_TIMEOUT_S", "600")) + 5) as client:
             response = await client.post(f"{self.endpoint}/v1/complete", json=body)
             try:
@@ -73,8 +78,8 @@ class ProxyProvider:
             return "groq", model
         return self.backend_provider if self.backend_provider != "groq" else "gemini", model
 
-    async def start(self, model, prompt, *, tools=None, system_instruction=None, history=None):
-        chat = _ProxyChat(self, model, list(history or []), tools, system_instruction)
+    async def start(self, model, prompt, *, tools=None, system_instruction=None, history=None, mcp_url=None):
+        chat = _ProxyChat(self, model, list(history or []), tools, system_instruction, mcp_url)
         if system_instruction and not any(m.get("role") == "system" for m in chat.messages):
             chat.messages.insert(0, {"role": "system", "content": system_instruction})
         if prompt is not None:
@@ -84,12 +89,15 @@ class ProxyProvider:
 
 
 class _ProxyChat:
-    def __init__(self, provider, model, messages, tools, system_instruction):
+    def __init__(self, provider, model, messages, tools, system_instruction, mcp_url=None):
         self.provider = provider
         self.model = model
         self.messages = messages
         self.tools = tools
         self.system_instruction = system_instruction
+        # Carried on the chat, not just the opening call: a CLI reaches
+        # for tools on every turn, so every turn needs somewhere to call.
+        self.mcp_url = mcp_url
         self.reply = None
 
     async def complete(self):
@@ -97,7 +105,7 @@ class _ProxyChat:
         history = self.messages[:-1] if self.messages and self.messages[-1]["role"] == "user" else self.messages
         data = await self.provider._request(
             self.model, prompt, tools=self.tools, history=history,
-            system_instruction=self.system_instruction,
+            system_instruction=self.system_instruction, mcp_url=self.mcp_url,
         )
         calls = [ToolCall(name=c["name"], args=c.get("arguments", {}), id=c.get("id")) for c in data.get("tool_calls", [])]
         assistant = {"role": "assistant", "content": data.get("result") or ""}
