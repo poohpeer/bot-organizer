@@ -99,7 +99,12 @@ jobs:
     # replaces built and pushed its own image with no test gate at all, so a
     # commit that broke the suite still reached the cluster.
     needs: build-and-push
-    if: github.event_name != 'pull_request'
+    # !cancelled() here too, not only on build-and-push. A skip propagates
+    # down the whole `needs` chain, not one level: with `test` deliberately
+    # skipped on a push to main, overriding it for build-and-push alone left
+    # deploy skipped anyway — the image was built and pushed and nothing
+    # rolled it out. Cost four merges that never reached the cluster.
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.build-and-push.result == 'success' }}
     runs-on: self-hosted
     steps:
       # The manifests are applied from the workspace, so this job needs the
