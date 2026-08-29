@@ -1,4 +1,23 @@
-# `/admin`
+# Commands
+
+## `/status`
+
+The full organizing report — place, date, participants, shopping list,
+reminders — posted into the chat. Any member may use it.
+
+It is the same fixed block `bot.tools.composed.event_status` builds, so the
+command and the model's answer can never drift apart. It spends **no model
+call**: asking "как дела с организацией" costs a turn of the primary chain
+and depends on the model relaying the report verbatim — `bot/turn_outcome.py`
+exists to force that, which is itself evidence it does not always happen.
+
+No admin check, unlike `/admin` below: this only reads, and every member can
+already see all of it in the chat.
+
+A chat with nothing being tracked is told so rather than shown an empty
+report.
+
+## `/admin`
 
 The configuration menu. One setting so far: which models this chat tries,
 and in what order.
