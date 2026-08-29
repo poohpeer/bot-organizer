@@ -15,13 +15,20 @@ log = logging.getLogger(__name__)
 # account, separate quota, separate outage — ahead of the Gemini models means
 # a Gemini rate limit no longer takes the bot down.
 #
-# No codex: or claude: entries. Both are CLI-backed adapters in ai-proxy that
-# accept a tools array and silently ignore it — observed live as "start
-# provider=codex tools=26" followed by "complete ... tool_calls=0". Almost
-# every turn here needs a tool call, so such a provider does not degrade, it
-# fabricates: asked to show the list, codex could not reach the database and
-# answered "доступ к данным организатора сейчас недоступен". ai-proxy now
-# refuses those requests outright with unsupported_tool_use.
+# codex and claude sit behind the HTTP providers, not in front of them. They
+# reach this bot's tools over MCP (see docs/mcp.md) rather than taking
+# declarations, which is why they were out of this chain until now — an
+# adapter that accepted a tools array and ignored it did not degrade, it
+# fabricated.
+#
+# Behind, because they are the reserve. Groq and Gemini answer a tool turn in
+# a few hundred tokens; measured on one task, codex spent 5 546 uncached
+# input tokens against Groq's 152. The reason to keep them is that they are
+# separate accounts with separate quotas, and this chain has spent whole
+# evenings against Groq's 429s.
+#
+# codex ahead of claude because it is on a free account: tokens that cost
+# nothing outrank a token count.
 #
 # The gemini names are the ones ai-proxy's gemini adapter actually
 # accepts. Its /v1/models catalogue used to advertise three others
@@ -36,6 +43,8 @@ DEFAULT_PROXY_MODELS = ",".join([
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemma-4-31b-it",
+    "codex:",
+    "claude:sonnet",
 ])
 PROXY_MODELS = [m.strip() for m in os.environ.get(
     "AI_PROXY_MODELS",
