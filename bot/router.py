@@ -32,6 +32,7 @@ import bot.settings as settings
 from bot.ai.client import AllModelsUnavailable
 from bot.ai.tool_loop import run_tool_loop
 from bot.formatting import to_plain_text
+from bot.turn_outcome import ACKNOWLEDGEMENT, TurnRecord, honour_verbatim
 from bot.session import SessionAlreadyActiveError, start_session
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,26 @@ _MEANT_TO_BE_SILENT = frozenset({
     _SILENT, "silent", "empty string", "empty", "(empty string)", "\"\"", "''",
     "пустая строка", "пустая строка.", "empty_string", "none", "null",
 })
+
+
+def _break_the_silence(reply_text: str, record: TurnRecord) -> str:
+    """A turn that changed something has to say so.
+
+    "<silent>" exists for a message that only gives the bot something to
+    record and needs no reply. Answering the bot's own question is not that:
+    live, asked how many bottles of beer there should be in total, the person
+    said "Две бутылки пива", the update was written, and the model answered
+    "<silent>". The list was right and the chat saw nothing — indistinguishable
+    from the bot being broken.
+
+    The rendered block first, because it says what the list now holds; a bare
+    acknowledgement only when no renderer produced one.
+    """
+    if _has_visible_text(reply_text) or not record.changed_something():
+        return reply_text
+    log.warning("Model went silent after changing something (%s); acknowledging instead",
+                ", ".join(record.tools_called))
+    return record.verbatim or ACKNOWLEDGEMENT
 
 
 def _has_visible_text(text: str) -> bool:
@@ -370,7 +391,11 @@ _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "anything.\n"
     "If a message only gives you something to record and needs no reply, "
     f"answer with exactly {_SILENT!r} and nothing else — do not narrate what "
-    "you just recorded. Never write the words \"empty string\".\n"
+    "you just recorded. Never write the words \"empty string\". This does not "
+    "cover a message that answers a question you asked: say what the answer "
+    "changed. Someone who told you the new amount you asked for and got "
+    "nothing back cannot tell you apart from a bot that has stopped "
+    "working.\n"
     "When someone asks to be reminded repeatedly, ask how long to keep "
     "reminding before scheduling anything — \"следующие 3 часа\", \"до "
     "завтра до 17:00\" — and pass it as repeat_until. If reminder_set "
@@ -725,6 +750,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     # it — the field is simply not sent.
     grants = _mcp_grants()
     mcp_token = grants.issue(session_id, message.from_user) if grants else None
+    spent_grant = None
     try:
         reply_text = await run_tool_loop(
             ai_client.fallback_for(chat_id, await settings.get_provider_chain(pool, chat_id)),
@@ -751,8 +777,18 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     finally:
         if grants is not None and mcp_token is not None:
             # In a finally so a failed turn does not leave a live token
-            # behind: the TTL is a backstop, not the plan.
-            grants.revoke(mcp_token)
+            # behind: the TTL is a backstop, not the plan. The revoked grant
+            # is kept because its record of the turn is what the two guards
+            # below read.
+            spent_grant = grants.revoke(mcp_token)
+
+    # The tool loop applies both of these to a turn it ran itself. A turn a
+    # CLI ran over MCP never passes through it, so they are applied here from
+    # what the grant recorded — otherwise the CLI providers are the one path
+    # with no guard on either failure.
+    if spent_grant is not None:
+        reply_text = honour_verbatim(reply_text, spent_grant.record.verbatim)
+        reply_text = _break_the_silence(reply_text, spent_grant.record)
 
     # Converted before the silence check below: a model that answers with
     # "**<silent>**" instead of the bare sentinel must still be silenced, and

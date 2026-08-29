@@ -221,3 +221,71 @@ async def test_a_notification_gets_no_body(client):
                               json={"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     assert response.status == 202
+
+
+# --- what the turn did ----------------------------------------------------
+
+async def test_a_call_is_recorded_on_the_grant(client):
+    """The router reads this after the turn to decide whether silence is
+    allowed. Nothing else can see what a CLI did — it calls its tools here,
+    not through bot/ai/tool_loop.py."""
+    grants = mcp.GrantStore()
+    token = grants.issue(1, _User())
+    cli = await client(grants)
+
+    await _rpc(cli, token, "tools/call",
+               {"name": "list_add", "arguments": {"name": "пиво"}})
+
+    grant = grants.resolve(token)
+    assert grant.record.tools_called == ["list_add"]
+    assert grant.record.changed_something() is True
+
+
+async def test_a_rendered_block_is_kept_from_the_result(client, aiohttp_client):
+    grants = mcp.GrantStore()
+    token = grants.issue(1, _User())
+
+    def build(session_id, current_user):
+        async def tool(**kwargs):
+            return {"rendered": "◻️ пиво, 2 бут."}
+        return {"list_add": tool}
+
+    cli = await aiohttp_client(mcp.build_app(build, ALL_TOOLS.function_declarations, grants))
+
+    await _rpc(cli, token, "tools/call", {"name": "list_add", "arguments": {"name": "пиво"}})
+
+    assert grants.resolve(token).record.verbatim == "◻️ пиво, 2 бут."
+
+
+async def test_a_tool_that_raised_did_not_change_anything(aiohttp_client):
+    """Recorded after the call returns, not before: announcing a change that
+    failed is worse than the silence it replaces."""
+    grants = mcp.GrantStore()
+    token = grants.issue(1, _User())
+
+    def build(session_id, current_user):
+        async def tool(**kwargs):
+            raise RuntimeError("the database said no")
+        return {"list_add": tool}
+
+    cli = await aiohttp_client(mcp.build_app(build, ALL_TOOLS.function_declarations, grants))
+
+    resp = await _rpc(cli, token, "tools/call", {"name": "list_add", "arguments": {"name": "пиво"}})
+
+    assert (await resp.json())["result"]["isError"] is True
+    assert grants.resolve(token).record.tools_called == []
+
+
+async def test_revoking_hands_back_the_grant_that_was_removed(client):
+    """The router revokes in a finally, before it decides what to send, so
+    the record has to come back out of revoke or it is unreachable."""
+    grants = mcp.GrantStore()
+    token = grants.issue(1, _User())
+    cli = await client(grants)
+    await _rpc(cli, token, "tools/call", {"name": "list_add", "arguments": {"name": "пиво"}})
+
+    spent = grants.revoke(token)
+
+    assert spent is not None and spent.record.tools_called == ["list_add"]
+    assert grants.resolve(token) is None
+    assert grants.revoke(token) is None, "revoking twice must not raise"

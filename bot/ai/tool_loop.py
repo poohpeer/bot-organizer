@@ -5,6 +5,7 @@ from bot.ai.client import AllModelsUnavailable
 from bot.ai.proxy import is_retryable
 from bot.ai.tool_schema_openai import openai_tools
 from bot.logging_setup import truncate
+from bot.turn_outcome import honour_verbatim as _honour_verbatim, verbatim_block as _verbatim_block
 
 log = logging.getLogger(__name__)
 
@@ -36,52 +37,6 @@ async def _call_tool(registry: dict, call) -> dict:
               (time.perf_counter() - started) * 1000, truncate(result))
     return result
 
-
-
-# Fields whose value is already the finished, human-facing block of text —
-# produced by a deterministic renderer (bot/list_render.py,
-# bot/participant_render.py, bot/status_render.py), not by the model.
-_VERBATIM_FIELDS = ("report", "rendered")
-
-
-def _verbatim_block(result: dict) -> str | None:
-    """The finished block a result carries, if relaying it is the answer.
-
-    A result that also carries ask_user is asking the model to say something
-    the block cannot say. Live: told an amount was already set, the model
-    answered "На списке уже есть 1 кг бананов; добавить нельзя. Скажите,
-    какое общее количество нужно" — correct, and the guard below threw it
-    away and sent the bare list instead, because the list was in the result.
-    Refusals come with an explanation or they are not refusals.
-    """
-    if result.get("ask_user"):
-        return None
-    for field in _VERBATIM_FIELDS:
-        value = result.get(field)
-        if isinstance(value, str) and value.strip():
-            return value
-    return None
-
-
-def _honour_verbatim(reply_text: str, block: str | None) -> str:
-    """Make "relay the rendered block character-for-character" true in code.
-
-    The instruction says it, and the model does not reliably obey: asked
-    "покажи список" it called list_show, received the rendered list, called
-    event_status, received the full report — and answered "Больше нет
-    элементов в списке. Что ещё нужно?", discarding both while the data sat
-    in front of it. That is the same failure the renderers exist to prevent,
-    one layer up.
-
-    Substitution only when the block is *entirely* absent from the reply. A
-    model that included it and added something — the roster-gap remark, a
-    short lead-in — has complied, and overwriting that would throw away real
-    information to satisfy a rule about formatting.
-    """
-    if not block or block in reply_text:
-        return reply_text
-    log.warning("Model dropped a rendered block from its reply; sending the block instead")
-    return block
 
 
 async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, system_instruction=None, mcp_url=None) -> str:

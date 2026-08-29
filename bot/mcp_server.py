@@ -32,9 +32,11 @@ import logging
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aiohttp import web
+
+from bot.turn_outcome import TurnRecord
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +59,11 @@ class Grant:
     user_id: int | None
     display_name: str | None
     expires_at: float
+    # What the CLI did while holding this token. The tool loop watches its
+    # own tool results and enforces two rules on them; a CLI runs its tools
+    # through here instead, so without this the router has no idea whether
+    # the turn changed anything or what any renderer produced.
+    record: TurnRecord = field(default_factory=TurnRecord, compare=False)
 
 
 class GrantStore:
@@ -86,10 +93,15 @@ class GrantStore:
         self._drop_expired()
         return self._grants.get(token)
 
-    def revoke(self, token: str) -> None:
+    def revoke(self, token: str) -> Grant | None:
         """Called when a turn ends, so a token outlives its use by as little
-        as possible rather than sitting until its TTL."""
-        self._grants.pop(token, None)
+        as possible rather than sitting until its TTL.
+
+        Returns the grant it removed, because its record of what the turn did
+        is only readable here — the caller revokes in a finally, before it
+        decides what to send.
+        """
+        return self._grants.pop(token, None)
 
     def _drop_expired(self) -> None:
         now = time.monotonic()
@@ -233,6 +245,10 @@ def build_app(build_registry, declarations, grants: GrantStore) -> web.Applicati
             return _result(msg_id, {
                 "content": [{"type": "text", "text": f"error: {e}"}], "isError": True,
             })
+
+        # After the call, not before: a tool that raised changed nothing the
+        # router should announce.
+        grant.record.record(name, result)
 
         return _result(msg_id, {
             "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, default=str)}]
