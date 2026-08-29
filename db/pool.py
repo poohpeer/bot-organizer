@@ -246,6 +246,18 @@ CREATE TABLE IF NOT EXISTS seen_updates (
     seen_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Per chat, not global: the model chain is a routing decision, and one group
+-- changing it for every other group is not a setting, it is a surprise. A
+-- chat with no row uses the deployment default.
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id     BIGINT NOT NULL,
+    key         TEXT NOT NULL,
+    value       JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by  BIGINT,
+    PRIMARY KEY (chat_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS decision_log (
     id          BIGSERIAL PRIMARY KEY,
     chat_id     BIGINT NOT NULL,

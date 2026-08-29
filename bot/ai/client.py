@@ -119,3 +119,27 @@ class ModelFallback:
 
 
 fallback = ModelFallback()
+
+# One ModelFallback per chat, because the switch is sticky: having learned a
+# model is rate limited, the chain stays past it rather than spending another
+# call to be told again. A single shared object made that knowledge global,
+# so one busy chat pushed every other chat down the chain with it — and it
+# left no way to give a chat its own order at all.
+_per_chat: dict[int, ModelFallback] = {}
+
+
+def fallback_for(chat_id: int, models: list[str]) -> ModelFallback:
+    """The chain this chat is on. Rebuilt when its order changes, which also
+    resets the stickiness — the right moment for it, since the reason to stay
+    past a model no longer applies to a chain it may no longer be in."""
+    wanted = list(models) if proxy else []
+    existing = _per_chat.get(chat_id)
+    if existing is None or [m for _p, m in existing.chain] != wanted:
+        _per_chat[chat_id] = ModelFallback([(proxy, m) for m in wanted])
+    return _per_chat[chat_id]
+
+
+def forget_chat(chat_id: int) -> None:
+    """Drop a chat's chain so the next turn rebuilds it. Called when its
+    settings change."""
+    _per_chat.pop(chat_id, None)
