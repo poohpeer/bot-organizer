@@ -16,21 +16,33 @@ log = logging.getLogger(__name__)
 PROVIDER_CHAIN = "provider_chain"
 
 
-async def get_provider_chain(pool, chat_id: int) -> list[str]:
-    """The models this chat tries, in order. The deployment default when the
-    chat has never chosen, and again when its choice has gone stale."""
+async def get_stored_chain(pool, chat_id: int) -> list[str] | None:
+    """What this chat actually chose, or None if it never has.
+
+    Distinct from get_provider_chain, which answers "what will be tried" and
+    so cannot tell a chat that picked nothing from one that picked the
+    default. The settings menu needs the difference: it shows an empty
+    selection as empty, and says which default is standing in.
+    """
     stored = await pool.fetchval(
         "SELECT value FROM chat_settings WHERE chat_id = $1 AND key = $2",
         chat_id, PROVIDER_CHAIN,
     )
     if stored is None:
-        return list(ai_client.PROXY_MODELS)
-
+        return None
     chosen = json.loads(stored) if isinstance(stored, str) else stored
     # Anything the deployment no longer offers is dropped rather than tried:
     # a model removed from AI_PROXY_MODELS is one ai-proxy will refuse, and a
     # chat that picked it a month ago should not be stuck on a dead chain.
-    kept = [m for m in chosen if m in ai_client.PROXY_MODELS]
+    return [m for m in chosen if m in ai_client.PROXY_MODELS]
+
+
+async def get_provider_chain(pool, chat_id: int) -> list[str]:
+    """The models this chat tries, in order. The deployment default when the
+    chat has never chosen, and again when its choice has gone stale."""
+    kept = await get_stored_chain(pool, chat_id)
+    if kept is None:
+        return list(ai_client.PROXY_MODELS)
     if not kept:
         log.warning("Chat %s has a stored chain with nothing usable left; using the default", chat_id)
         return list(ai_client.PROXY_MODELS)

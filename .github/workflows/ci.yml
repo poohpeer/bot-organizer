@@ -19,6 +19,13 @@ env:
 
 jobs:
   test:
+    # Not on a push to main. A push to main is the squash of a branch whose
+    # tests already ran here, against the same tree; running them again only
+    # delays the deploy, and this suite spends over a minute on a real
+    # database. What that trades away is the case where main moved between
+    # the branch's last run and the merge — GitHub's "Require branches to be
+    # up to date before merging" closes it if it ever bites.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
 
     # Unlike the sibling project, almost every test here talks to a real
@@ -56,9 +63,11 @@ jobs:
 
   build-and-push:
     needs: test
-    # Pushes only. A pull request cannot push to the registry anyway, and
-    # building the image twice per change buys nothing.
-    if: github.event_name == 'push'
+    # Everything except a pull request, which cannot push to the registry
+    # anyway, and building the image twice per change buys nothing.
+    # !cancelled() because `test` is deliberately skipped on a push to main
+    # and a skipped dependency would otherwise skip this too.
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.test.result != 'failure' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -90,7 +99,7 @@ jobs:
     # replaces built and pushed its own image with no test gate at all, so a
     # commit that broke the suite still reached the cluster.
     needs: build-and-push
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: self-hosted
     steps:
       # The manifests are applied from the workspace, so this job needs the

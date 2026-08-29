@@ -15,23 +15,54 @@ answer is no. A settings menu is the wrong place to fail open.
 
 ## The chain
 
+Press the models in the order the bot should try them. The first press takes
+number one, the second number two. Pressing a model already in the chain
+takes it out, and everything after it moves up.
+
 ```
-Порядок моделей. Бот идёт по списку сверху вниз и переходит к следующей,
-когда предыдущая недоступна.
+Порядок моделей. Нажимайте их в том порядке, в каком бот должен их
+звать: первое нажатие — первый номер. Нажать ещё раз — убрать.
 
-1. openai/gpt-oss-120b        [▲] [▼] [✅]
-2. openai/gpt-oss-20b         [▲] [▼] [✅]
-...
-— codex:          (выключена)  [▲] [▼] [◻️]
+┌────────────────────────────────┐
+│ 1️⃣  codex:                     │
+│ 2️⃣  claude:sonnet              │
+│ ◻️  openai/gpt-oss-120b        │
+│ ◻️  gemini-3.7-flash           │
+│ …                              │
+├────────────────────────────────┤
+│  Очистить      │     Назад     │
+└────────────────────────────────┘
 ```
 
-Every model the deployment offers is listed, enabled or not, so turning one
-back on is possible from the same screen that turned it off — a menu that
-hides what you disabled cannot undo itself. Disabled ones sort below the
-enabled ones and show no position.
+One button per model, full width: the names run to `openai/gpt-oss-120b` and
+the three-button rows this replaced left no room to read them.
 
-**Сбросить** deletes the chat's row rather than storing today's default, so
-the chat follows the deployment again if the deployment changes.
+It replaced a ▲ ▼ ✅ pair per row, where every position was one press and one
+round trip — lifting the last model to the front took seven. Now any order
+costs one press per model you actually want, and models you do not want you
+simply never press.
+
+Every model the deployment offers stays listed, chosen or not: a menu that
+hides what you did not pick cannot undo itself. Chosen ones sort to the top
+so the chain reads down the screen.
+
+**Очистить** deletes the chat's row. That is both "clear the selection" and
+"back to the deployment default" — with the fallback below they are the same
+state, so the menu offers one button rather than two that look different and
+are not.
+
+### Choosing nothing is allowed
+
+An empty selection is not a broken bot: the chat falls back to
+`AI_PROXY_MODELS`, and the menu says which chain that is instead of warning.
+It is also how you start over — under the old menu, starting over meant
+disabling eight models one at a time.
+
+This is why `bot/settings.py` has both `get_stored_chain` and
+`get_provider_chain`. The second answers "what will be tried" and substitutes
+the default, so it cannot tell a chat that picked nothing from one that
+picked the whole default; the menu needs that difference, because one draws
+eight numbered models and the other draws none.
 
 ## Scope
 

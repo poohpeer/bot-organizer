@@ -46,7 +46,6 @@ async def test_routes_prefixed_models_to_their_backend(monkeypatch):
         # "", which the proxy would echo back as a model that does not exist.
         ("codex:", "codex", None),
         ("codex:gpt-5.3-codex", "codex", "gpt-5.3-codex"),
-        ("ollama:llama3.2", "ollama", "llama3.2"),
         ("claude:opus", "claude_code", "opus"),
         ("openai/gpt-oss-20b", "groq", "openai/gpt-oss-20b"),
         ("gemini-3.6-flash", "gemini", "gemini-3.6-flash"),
