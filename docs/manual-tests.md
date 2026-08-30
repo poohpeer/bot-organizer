@@ -19,234 +19,447 @@ Three things put a check on this list.
 Run the whole list after a change that touches routing, rendering, or the
 model chain. Run the section for whatever changed otherwise.
 
-**Two accounts are needed** — several cases turn on being a member or an
-administrator, and you cannot be both people at once. A second Telegram
-account in the same group is the cheapest way.
+Every case is written the same way: **Given** the state it needs, **When**
+the steps to take, **Then** what must be true afterwards. A case fails if any
+part of Then is false — not only the part that looks important.
 
 ---
 
 ## 0. Before you start
 
+Not cases. The state every case below assumes.
+
 | | |
 |---|---|
-| A group with the bot in it, with an **active session** | `@bot организуем пикник` |
-| A **second account** in the same group, not an admin | for the permission cases |
-| A private chat with the bot, `/start` pressed | a bot cannot DM someone who never started it |
+| **G** | a group with the bot in it, with an active session — `@bot организуем пикник` |
+| **G2** | a second group with its own active session, for the multi-event cases |
+| **A2** | a second Telegram account in **G**, not an administrator |
+| **DM** | a private chat with the bot, `/start` pressed — a bot cannot write first to someone who never started it |
+| **admin** | you are an administrator of **G** |
 
 ---
 
 ## 1. Commands and permissions
 
-Telegram's `get_chat_member` behaves differently in a group, a supergroup and
-a channel, and every test mocks it. This section is the only thing that
-exercises the real answer.
+`get_chat_member` answers differently in a group, a supergroup and a channel,
+and every automated test mocks it. This section is the only thing that
+exercises Telegram's real answer.
 
-**1.1 `/admin` as an administrator** — the menu opens.
+### 1.1 An administrator opens the settings menu
 
-**1.2 `/admin` as an ordinary member** (second account) — «Настройки доступны
-администраторам чата», and no keyboard.
+- **Given** you are an administrator of **G**
+- **When** you send `/admin` in **G**
+- **Then** a menu appears with the buttons «Порядок моделей» and «Закрыть»
 
-**1.3 A member presses a button on a menu an admin opened.** The keyboard
-stays live in the chat, so anyone can press it. Expected: an alert saying
-it is for administrators, and nothing changes.
-*Why not automatable:* the test mocks `get_chat_member`, so it asserts our
-branch, not Telegram's answer.
+### 1.2 An ordinary member is refused
 
-**1.4 Demote yourself, then press a button on a menu you opened while admin.**
-Expected: refused. This is the case the "asked every time, never cached"
-rule exists for.
+- **Given** **A2** is a member of **G** and not an administrator
+- **When** **A2** sends `/admin` in **G**
+- **Then** the reply is «Настройки доступны администраторам чата», with no
+  buttons attached
 
-**1.5 `/status` and `/list` in the group** — the report and the list, posted
-in the chat, any member.
+### 1.3 A member cannot press an administrator's menu
 
-**1.6 Upgrade the group to a supergroup** (add ~200 members, or convert in
-settings). **The chat_id changes.** Expected: the session does not follow.
-*Why it matters:* this is unrecoverable and silent. Decide what should
-happen before it happens to a real event.
+- **Given** you opened `/admin` in **G** and the menu is still on screen
+- **When** **A2** presses any button on it
+- **Then** **A2** sees an alert saying settings are for administrators, the
+  menu does not change, and nothing is saved
+- **Why not automatable** the test mocks `get_chat_member`, so it asserts our
+  branch rather than Telegram's answer
+
+### 1.4 Losing admin rights takes effect at once
+
+- **Given** you opened `/admin` while an administrator
+- **When** you demote yourself in **G**, then press a button on that same
+  open menu
+- **Then** you are refused
+- **Why not automatable** the rule being checked is "asked of Telegram every
+  time, never cached", and only Telegram can change its answer mid-menu
+
+### 1.5 Closing the menu leaves nothing behind
+
+- **Given** an open `/admin` menu in **G**
+- **When** you press «Закрыть»
+- **Then** the menu message disappears from the chat entirely — no «Закрыто.»
+  and no empty message where it was
+
+### 1.6 Any member may read the status
+
+- **Given** **A2** is an ordinary member of **G**
+- **When** **A2** sends `/status`, then `/list`
+- **Then** both answer in the chat: `/status` with place, date, participants,
+  list and reminders; `/list` with the shopping list alone
+
+### 1.7 A group promoted to a supergroup
+
+- **Given** **G** has an active session
+- **When** you convert **G** to a supergroup (Telegram does this by itself
+  past ~200 members)
+- **Then** note what happens to the session and record it here
+- **Why not automatable** the chat_id changes, and no test can make Telegram
+  reissue one. **This is destructive and silent** — decide what should happen
+  before it happens to a real event
 
 ---
 
 ## 2. Private chat
 
-**2.1 `/status` in a DM, one active event** — the report arrives privately
-and **nothing appears in the group**. Check the group.
+### 2.1 The status arrives privately
 
-**2.2 `/list` in a DM** — the list only, no participants, no reminders.
+- **Given** exactly one active event you belong to, and **DM** open
+- **When** you send `/status` in **DM**
+- **Then** the full report arrives in **DM**, and **nothing appears in G** —
+  check **G** to confirm
 
-**2.3 Two active events** (a second group with a session) — buttons appear,
-labelled with the chat titles. Press one: the right event's report.
+### 2.2 The list arrives privately
 
-**2.4 Press a `/list` button and confirm you get the list, not the report.**
-The verb rides in the callback data; a person who asked for the list must not
-get the whole report.
+- **Given** the same
+- **When** you send `/list` in **DM**
+- **Then** the shopping list arrives alone: no participants section, no
+  reminders section
 
-**2.5 Leave the group, then `/status` in the DM.** Expected: «Я не нашёл
-активных мероприятий». `decision_log` still remembers you spoke there —
-being in it is not permission.
-*Why not automatable:* the membership answer is Telegram's.
+### 2.3 Several events offer a choice
 
-**2.6 A person who never pressed `/start` in the DM.** Ask the bot in the
-group to nudge participants. Expected: the bot cannot DM them, and this does
-not break the nudge for everyone else. Watch the log for `Forbidden`.
+- **Given** **G** and **G2** both have active sessions you belong to
+- **When** you send `/status` in **DM**
+- **Then** a button appears per event, labelled with the chat titles; pressing
+  one answers about that event only
+
+### 2.4 The choice remembers which command was asked
+
+- **Given** the same two events
+- **When** you send `/list` in **DM** and press one of the buttons
+- **Then** you get the shopping list — not the full status report
+
+### 2.5 Leaving the group ends private access
+
+- **Given** you have used `/status` in **DM** for **G**
+- **When** you leave **G**, then send `/status` in **DM** again
+- **Then** the reply is «Я не нашёл активных мероприятий», and no part of
+  **G**'s data appears
+- **Why not automatable** `decision_log` still remembers you spoke in **G**;
+  only Telegram can say whether you are still a member
+
+### 2.6 A person the bot cannot write to
+
+- **Given** a participant in **G** who has never pressed `/start` in **DM**
+- **When** you ask the bot in **G** to check who is coming
+- **Then** the others are still messaged, the run does not fail, and the log
+  carries a `Forbidden` line for that person
 
 ---
 
 ## 3. Location and links
 
-**3.1 Drop a pin** (attach → location → send this location). Expected: place
-set, no reply, `/status` shows `🔗 Map` under the name, and the link opens
-the right spot.
+### 3.1 A pin becomes the place
 
-**3.2 Share a place from Telegram's picker** (a named venue). Expected: the
-name becomes the place.
+- **Given** **G** has an active session with no place recorded
+- **When** you send a location pin (attach → location → send this location),
+  then send `/status`
+- **Then** the bot says nothing in reply to the pin; `/status` shows
+  «📍 Место: …» with «🔗 Map» on the line below; tapping it opens that spot
 
-**3.3 A pin when a place is already named, not addressed to the bot.**
-Expected: **ignored**, place unchanged. Check the log says so.
+### 3.2 A shared venue names the place
 
-**3.4 The same, but reply to the bot with the pin.** Expected: taken.
+- **Given** **G** has an active session
+- **When** you share a place from Telegram's picker (one with a name), then
+  send `/status`
+- **Then** the place is the venue's own name, with «🔗 Map» below it
 
-**3.5 Live location.** Not handled distinctly today: it arrives as an
-ordinary pin and is taken once. The updates that follow arrive as
-`edited_message`, which the bot does not read at all.
-*Decide whether that is acceptable.* If it is, say so here; if not, it is a
-change, not a test.
+### 3.3 A stray pin does not replace a known place
 
-**3.6 A forwarded location** from another chat. Expected: same as a pin —
-confirm that is what you want.
+- **Given** **G** has a place recorded, e.g. «Бен шемен»
+- **When** you send a bare pin somewhere else, without mentioning the bot or
+  replying to it, then send `/status`
+- **Then** the place is still «Бен шемен»; the bot said nothing; the log says
+  it ignored an unaddressed pin
+- **Why not automatable** the point is that a shop someone shared does not
+  silently become the venue, which only a real chat produces
 
-**3.7 Send a Waze link.** Expected: «Добавил ссылку на место», no question
-asked, and no delay for a maps lookup.
+### 3.4 An addressed pin is taken
 
-**3.8 Send a short Google Maps link** (`maps.app.goo.gl/…`) — the case that
-produced «Не смог открыть эту короткую ссылку». Expected: taken silently.
+- **Given** the same place is recorded
+- **When** you send a pin **as a reply to a bot message**, then send `/status`
+- **Then** the place keeps its name and «🔗 Map» now points at the new pin
 
-**3.9 Send a link with text: «давайте лучше сюда <link>».** Expected: the
-link is stored, the place **keeps its name**.
+### 3.5 A live location
 
-**3.10 Tap `🔗 Map` in `/status`** on both iOS and Android. Expected: opens
-the map app, points at the right place.
-*Why not automatable:* a test asserts the anchor's HTML; whether Telegram
-renders it as a tappable link is Telegram's business.
+- **Given** **G** has an active session
+- **When** you share a live location and then move
+- **Then** record what happens. Today it is taken **once**, as an ordinary
+  pin; the updates that follow arrive as `edited_message`, which the bot does
+  not read at all
+- **Why not automatable** this is a decision, not a defect — if once is
+  enough, say so here; if not, it is a change
 
-**3.11 A place name containing `<` or `&`** — set it, then `/status`.
-Expected: shown literally, message not dropped. This is what the escaping
-exists for, and a dropped message is exactly what it prevents.
+### 3.6 A forwarded location
+
+- **Given** a location message in another chat
+- **When** you forward it into **G**
+- **Then** it behaves as a pin (3.1/3.3). Confirm that is what you want
+
+### 3.7 A Waze link
+
+- **Given** **G** has an active session
+- **When** you send a Waze link
+- **Then** the bot answers «Добавил ссылку на место.» within a second, asks
+  nothing, and `/status` links that URL
+
+### 3.8 A short Google Maps link
+
+- **Given** the same
+- **When** you send a `maps.app.goo.gl/…` link
+- **Then** same as 3.7. **This is the case that used to fail** with «Не смог
+  открыть эту короткую ссылку — карты её не раскрывают»
+
+### 3.9 A link alongside words
+
+- **Given** **G** has a place recorded
+- **When** you send «давайте лучше сюда <ссылка>»
+- **Then** the link is stored and the place **keeps its name** — it does not
+  become «давайте лучше сюда»
+
+### 3.10 The map link opens
+
+- **Given** a place with a link
+- **When** you tap «🔗 Map» in `/status`, on iOS and on Android
+- **Then** the map app opens at that place
+- **Why not automatable** a test asserts the anchor's HTML; whether Telegram
+  renders it as a tappable link is Telegram's business
+
+### 3.11 A place name containing HTML
+
+- **Given** **G** has an active session
+- **When** you tell the bot the place is `<b>Бен</b> & Co`, then send
+  `/status`
+- **Then** the name appears literally, brackets and all, and **the message
+  arrives** — a dropped message is the failure this escaping exists to prevent
 
 ---
 
 ## 4. What the model does
 
-Every test fakes the model's answer. Nothing below can be asserted, only
-observed.
+Every automated test fakes the model's answer. Nothing here can be asserted,
+only observed.
 
-**4.1 «добавь бутылку пива»** when the list has 2 бут. Expected: «пиво: было
-2 бут., стало 1 бут.» — *not* the whole list, and not silence. The number is
-wrong on purpose: the point is that a replacement announces itself.
+### 4.1 A stated total replaces the amount, out loud
 
-**4.2 «добавь ещё бутылку пива».** Expected: refused with the amount that is
-there and a request for the new total.
+- **Given** the list holds «хлеб, 2 шт.»
+- **When** you say «давайте возьмём четыре штуки хлеба»
+- **Then** the bot answers «Хлеб: было 2 шт., стало 4 шт.» — naming both
+  values, not showing the whole list and not staying silent
 
-**4.3 «должно быть две бутылки пива».** Expected: applied.
+### 4.2 A relative change is refused, without inventing options
 
-**4.4 «покажи список».** Expected: the rendered list, character for
-character — not the model's own summary.
+- **Given** the list holds «хлеб, 4 шт.»
+- **When** you say «добавь ещё одну булку»
+- **Then** the bot says what is there, says it can neither add nor subtract,
+  and asks what the total should be — **offering no numbers of its own**
+- **Why not automatable** the failure was the model copying example amounts
+  out of its own instruction
 
-**4.5 Ask a question, answer the bot's reply, check it understood.**
-"сколько всего?" → "две" must not produce "чего именно две?". This is what
-conversation history exists for, and it broke twice.
+### 4.3 The list is relayed as rendered
 
-**4.6 Rename the chat to `<место> <дата>`** — e.g. «Море 20/11». Expected:
-place and date updated within a minute, **no message in the chat**.
+- **Given** a list with several items
+- **When** you say «покажи список»
+- **Then** the reply is the rendered list character for character, not the
+  model's own summary of it
 
-**4.7 Rename the chat to something that is not a place** — «Друзья».
-Expected: nothing recorded, nothing said.
-*Why not automatable:* whether the model answers `place_kind: нет` is
-judgement.
+### 4.4 The bot understands the answer to its own question
 
-**4.8 A bare date in the title: `31/8`.** Expected: 31 August of the
-**next** occurrence, not a past year.
+- **Given** the bot has just asked how many there should be in total
+- **When** you answer with only «две»
+- **Then** it applies two — it does not ask «чего именно две?»
+- **Why not automatable** this is conversation history working end to end; it
+  has broken twice
 
-**4.9 Say something that needs no reply** — «ок, понял». Expected: silence,
-not «Записал.»
+### 4.5 A chat title that names a place and a date
+
+- **Given** **G** has an active session
+- **When** you rename the chat to «Море 20/11» and wait up to a minute
+- **Then** `/status` shows place «Море» and date 20/11, and **nothing is
+  posted in the chat** about the rename
+
+### 4.6 A chat title that is not a place
+
+- **Given** the same
+- **When** you rename the chat to «Друзья» and wait up to a minute
+- **Then** the place does not change and nothing is posted
+- **Why not automatable** whether the model classifies «Друзья» as "not a
+  place" is judgement
+
+### 4.7 A bare numeric date
+
+- **Given** the same
+- **When** you rename the chat to «Бен шемен 31/8»
+- **Then** the date is 31 August of the **next** occurrence — not a past year,
+  and not 8 March
+
+### 4.8 A message that needs no reply
+
+- **Given** an active session
+- **When** you write «ок, понял» addressed to the bot
+- **Then** the bot stays silent — no «Записал.», no acknowledgement
+
+### 4.9 A place name never carries coordinates
+
+- **Given** a pin has been shared and a place named
+- **When** you send `/status`
+- **Then** «📍 Место:» holds a name only — no digits, no «координаты …»
 
 ---
 
 ## 5. The model chain
 
-**5.1 Exhaust Groq** (send many messages quickly, or set the chain to
-`gemini` only in `/admin` and wait for a 429). Expected: the chain moves on
-and the answer still arrives.
+### 5.1 The chain moves past a rate limit
 
-**5.2 Put `codex:` first in `/admin`, then ask something needing a tool** —
-«покажи список». Expected: an answer built from the real list, within about
-ten seconds. This is the only way to see the CLI providers serving a tool
-turn over MCP; in normal traffic Groq answers first and they are never
-reached.
+- **Given** `/admin` shows the default order
+- **When** you send many messages quickly, until Groq answers 429
+- **Then** the answer still arrives, from a later model in the chain, and the
+  group sees no error
 
-**5.3 Turn every model off in `/admin`.** Expected: the chain falls back to
-the deployment default and the bot still answers — an empty selection is not
-a broken bot.
+### 5.2 A CLI provider serves a tool turn
 
-**5.4 Reorder the chain and watch the log.** Expected: the new order is used
-on the very next message.
+- **Given** you have put `codex:` first in `/admin` → «Порядок моделей»
+- **When** you say «покажи список»
+- **Then** the real list comes back, within roughly ten seconds
+- **Why not automatable** this is the only way to exercise codex/claude
+  fetching tools over MCP — in normal traffic Groq answers first and they are
+  never reached
+
+### 5.3 An empty selection still answers
+
+- **Given** `/admin` → «Порядок моделей»
+- **When** you press «По умолчанию» so nothing is selected, then ask the bot
+  something
+- **Then** the bot answers normally, using the deployment's default order —
+  an empty selection is not a broken bot
+
+### 5.4 The chosen order survives a restart
+
+- **Given** you have set a non-default order in **G**
+- **When** the bot is redeployed or its pod restarts, and you reopen `/admin`
+- **Then** the same order is still shown and still used
+- **Why not automatable** the storage is real; only a real restart proves it
+
+### 5.5 An order is per chat
+
+- **Given** a non-default order in **G**
+- **When** you open `/admin` in **G2**
+- **Then** **G2** shows the deployment default — one group's choice does not
+  move another's
+
+### 5.6 Every model refusing says so
+
+- **Given** `/admin` with a single model selected
+- **When** that model is rate limited and you address the bot
+- **Then** the reply is «Мне временно снесло крышу. Попробуйте позже.» — not
+  «Не понял, переформулируй», which means a bug rather than an outage
 
 ---
 
 ## 6. Time
 
-Nothing here can be faked; the clock has to actually pass.
+Nothing here can be faked; the clock has to pass.
 
-**6.1 Set a reminder for two minutes from now.** Expected: it arrives, once,
-at the right local time.
+### 6.1 A one-off reminder arrives
 
-**6.2 A repeating reminder with an end** — «каждые 2 минуты до <время>».
-Expected: repeats, then stops **exactly** at that time.
+- **Given** the group's timezone is known
+- **When** you ask for a reminder two minutes from now
+- **Then** it arrives once, at that local time
 
-**6.3 Cancel a repeating reminder** — expected: no further occurrences.
+### 6.2 A repeating reminder stops when told
 
-**6.4 A reminder before the group's timezone is known.** Expected: the bot
-says it assumed a zone and asks; after `set_timezone`, already-scheduled
-reminders are corrected.
+- **Given** the same
+- **When** you ask to be reminded every two minutes until a time six minutes
+  away
+- **Then** it repeats and stops **exactly** at that time — no extra delivery
 
-**6.5 Leave the chat silent past the auto-close window.** Expected: the
-closing question, then the session closes with a summary.
+### 6.3 Cancelling stops all future occurrences
+
+- **Given** a repeating reminder is running
+- **When** you ask to cancel it
+- **Then** nothing further arrives
+
+### 6.4 A reminder before the timezone is known
+
+- **Given** a chat with no timezone recorded
+- **When** you ask for a reminder at a clock time
+- **Then** the bot says which zone it assumed and asks where you are; after
+  you answer, the already-scheduled reminder is corrected
+
+### 6.5 A silent chat closes itself
+
+- **Given** an active session
+- **When** the chat stays silent past the auto-close window
+- **Then** the bot asks whether the event is over, and on no answer closes the
+  session with a summary
 
 ---
 
 ## 7. Rendering on a real client
 
-**7.1 A list of 40+ items.** Expected: readable, and **the message actually
-arrives**.
-*Known gap:* nothing splits a message at Telegram's 4096-character limit. A
-long enough report will be rejected by the API and the group sees nothing.
-This case is here to find out where that line falls in practice.
+### 7.1 A long list still arrives
 
-**7.2 Item names with emoji, brackets, quotes.** Expected: shown as typed.
+- **Given** a list of 40+ items
+- **When** you send `/status`
+- **Then** the message **arrives** and is readable
+- **Why not automatable** **known gap**: nothing splits a message at
+  Telegram's 4096-character limit, so a long enough report is rejected by the
+  API and the group sees nothing at all. This case exists to find where that
+  line falls in practice
 
-**7.3 A reply where the model wrote Markdown** — `**жирный**`. Expected:
-plain text, no stray asterisks.
+### 7.2 Item names survive as typed
 
-**7.4 The full `/status` on a narrow phone screen.** Expected: the place name
-readable at a glance, the `🔗 Map` line not wrapping into it.
+- **Given** an active session
+- **When** you add items with emoji, brackets and quotes in their names
+- **Then** `/list` shows them exactly as typed
+
+### 7.3 Markdown from the model is not shown raw
+
+- **Given** an active session
+- **When** the bot writes something emphatic
+- **Then** no `**` or `__` appears in the chat
+
+### 7.4 The status report on a phone
+
+- **Given** a place with a link, a date, participants and a list
+- **When** you read `/status` on a phone
+- **Then** the place name is readable at a glance and the «🔗 Map» line does
+  not wrap into it
 
 ---
 
 ## 8. Cluster
 
-**8.1 Restart the bot pod.** Expected: the session, list and settings survive
-— they are in Postgres, not memory.
+### 8.1 The bot pod restarts
 
-**8.2 Restart the Postgres pod.** Expected: same. The PVC is the thing being
-checked.
+- **Given** an active session with a list and settings
+- **When** the bot pod is restarted
+- **Then** session, list and model order are all unchanged
 
-**8.3 Redeploy after a codex/claude login.** Expected: the CLIs are still
-logged in. Their credentials live on a mounted volume precisely because
-`/root` is wiped on every redeploy.
+### 8.2 The database pod restarts
 
-**8.4 Stop and start the Docker Desktop cluster.** Expected: data survives.
-*Not the same as 8.2:* `local-path` PVC data lives inside the kind node
-container, so it survives a stop/start and is **lost if that container is
-recreated**. Worth knowing before it happens.
+- **Given** the same
+- **When** the Postgres pod is restarted
+- **Then** the same — this is what the PVC is for
+
+### 8.3 A redeploy keeps the CLI logins
+
+- **Given** codex and claude are logged in
+- **When** the proxy is redeployed
+- **Then** they are still logged in
+- **Why not automatable** their credentials live on a mounted volume
+  precisely because `/root` is wiped on every redeploy
+
+### 8.4 The whole cluster stops and starts
+
+- **Given** data in the database
+- **When** Docker Desktop's cluster is stopped and started
+- **Then** the data is there
+- **Why not automatable** `local-path` PVC data lives inside the kind node
+  container: it survives a stop/start and is **lost if that container is
+  recreated**. Worth knowing before it happens
 
 ---
 
@@ -254,24 +467,21 @@ recreated**. Worth knowing before it happens.
 
 **Actions → Manual test run → Run workflow.** It opens an issue whose
 checklist is generated from this file, one checkbox per case, grouped by
-section. Two optional inputs: a note for the title ("after #73") and a
-section filter ("3,4") when only part of it is worth running.
+section. Two optional inputs: a note for the title ("after #73") and a section
+filter ("3,4") when only part of it is worth running.
 
-Tick as you go. Anything that fails gets its own issue, linked from the line.
+Tick as you go. When a case fails, open an ordinary issue with the case
+number at the front of the title — `3.5 Live location: обновления не
+читаются`. Searching `3.5` then finds every time it has failed, without any
+extra machinery.
 
 The checklist is generated, never copied, so it is always whatever this file
 said at the moment the run was opened. Add a case in a PR and the next run
 has it.
 
 **Why the cases live here and not in a test-management tool.** They change
-with the code — case 3.5 exists because live location is unhandled *today* —
-so they belong in the same commit and the same review as the change that
-moves them. A copy in Drive or TestRail drifts the moment someone edits a
-handler, and a stale manual test is worse than none: it sends a person to
-check behaviour that no longer exists.
-
-Run *results* are a different thing and can live wherever is convenient. A
-GitHub issue per run costs nothing and needs no new account. If you ever want
-real run history — pass/fail per case over time, who ran it, on which build —
-Qase or Testomat have free tiers that do that properly. That is worth adding
-when there is a second person running these, and not before.
+with the code — 3.5 exists because live location is unhandled *today* — so
+they belong in the same commit and the same review as the change that moves
+them. A copy in Drive or TestRail drifts the moment someone edits a handler,
+and a stale manual test is worse than none: it sends a person to check
+behaviour that no longer exists.

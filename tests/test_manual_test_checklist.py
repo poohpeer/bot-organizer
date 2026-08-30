@@ -28,15 +28,27 @@ Preamble that mentions **bold text** and is not a case.
 
 ## 1. Commands and permissions
 
-**1.1 `/admin` as an administrator** — the menu opens.
+### 1.1 An administrator opens the menu
 
-**1.2 A member presses a button** — Expected: an alert, and
-nothing changes.
-*Why not automatable:* the test mocks it, so it asserts our branch.
+- **Given** you are an administrator
+- **When** you send `/admin`
+- **Then** the menu opens
+
+### 1.2 A member presses a button
+
+- **Given** an open menu
+- **When** a member presses it
+- **Then** an alert appears, and
+  nothing changes
+- **Why not automatable** the test mocks it, so it asserts our branch
 
 ## 2. Private chat
 
-**2.1 `/status` in a DM** — the report arrives privately.
+### 2.1 The status arrives privately
+
+- **Given** one active event
+- **When** you send `/status` in a DM
+- **Then** the report arrives privately
 
 ## Recording a run
 
@@ -65,7 +77,19 @@ def test_an_expectation_wrapped_over_two_lines_survives_whole():
     cut half the expectations mid-sentence."""
     checklist = render(parse(SAMPLE))
 
-    assert "Expected: an alert, and nothing changes" in checklist
+    assert "an alert appears, and nothing changes" in checklist
+
+
+def test_only_the_then_reaches_the_checkbox():
+    """Given and When are instructions you follow with the document open.
+    Then is the thing you are deciding about, so it is what a one-line
+    reminder has to carry — and putting all three on one line made every
+    checkbox unreadable."""
+    checklist = render(parse(SAMPLE))
+
+    assert "the menu opens" in checklist
+    assert "you are an administrator" not in checklist
+    assert "you send `/admin`" not in checklist
 
 
 def test_the_maintainer_aside_is_left_out():
@@ -99,7 +123,7 @@ def test_a_document_with_no_cases_produces_nothing():
 
 
 def test_a_very_long_case_is_cut_rather_than_wrapped():
-    long_one = "## 1. S\n\n**1.1 T** — " + ("word " * 200) + ".\n"
+    long_one = "## 1. S\n\n### 1.1 T\n\n- **Then** " + ("word " * 200) + ".\n"
 
     line = render(parse(long_one)).splitlines()[1]
 
@@ -114,8 +138,10 @@ def test_the_real_plan_parses_into_cases():
     sections = parse(SOURCE.read_text(encoding="utf-8"))
     cases = [case for section in sections for case in section.cases]
 
-    assert len(cases) >= 40, "the plan has ~49 cases; far fewer means the parser stopped seeing them"
+    assert len(cases) >= 40, "the plan has ~52 cases; far fewer means the parser stopped seeing them"
     assert all(case.title for case in cases), "a checkbox with no text is unusable"
+    assert all(case.detail for case in cases), \
+        "every case needs a Then — a checkbox with no expectation cannot be judged"
 
 
 def test_every_case_id_is_unique_in_the_real_plan():
