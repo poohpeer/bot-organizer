@@ -1,4 +1,4 @@
-"""/status and /list — the organizing state on demand, read-only.
+"""/status, /list and /reminders — the organizing state on demand, read-only.
 
 The same fixed blocks bot.tools.composed.event_status and
 bot.tools.core.list_show build for the model, delivered without a model call
@@ -18,6 +18,7 @@ import logging
 
 import bot.dm as dm
 import bot.session as session
+import bot.status_render as status_render
 import bot.telegram_text as telegram_text
 import bot.tools.composed as composed_tools
 import bot.tools.core as core_tools
@@ -45,10 +46,22 @@ async def _list_text(pool, session_id: int) -> str | None:
     return (await core_tools.list_show(pool, session_id)).get("rendered")
 
 
+async def _reminders_text(pool, session_id: int) -> str | None:
+    """The same block /status carries under ⏰, on its own.
+
+    Rendered here rather than returned by reminder_list, which answers the
+    model with structured rows. status_render is the one place that decides
+    how a reminder reads, so the command and the report cannot drift.
+    """
+    reminders = (await core_tools.reminder_list(pool, session_id))["reminders"]
+    return status_render.render_reminders(reminders)
+
+
 # The two things a person can ask for, by the verb that rides in the
 # keyboard's callback data. Adding a third means adding it here and nowhere
 # else.
-ANSWERS = {"status": _status_text, "list": _list_text}
+ANSWERS = {"status": _status_text, "list": _list_text,
+           "reminders": _reminders_text}
 
 
 async def _answer(pool, telegram_bot, chat_id: int, session_id: int, verb: str) -> None:

@@ -187,12 +187,28 @@ def test_the_slash_menu_offers_exactly_the_commands_that_exist():
     import inspect
     import re
 
-    registered = {c.command for c in main.BOT_COMMANDS}
+    registered = {c.command for _scope, cmds in main.COMMAND_SCOPES for c in cmds}
     handled = set(re.findall(r'CommandHandler\("(\w+)"', inspect.getsource(main.main)))
 
     assert registered == handled, "the slash menu and the handlers must be the same set"
-    assert all(c.description for c in main.BOT_COMMANDS), \
+    assert all(c.description for _s, cmds in main.COMMAND_SCOPES for c in cmds), \
         "a command with no description is a blank line in the menu"
+
+
+def test_admin_is_offered_to_administrators_only():
+    """The menu, not the gate: admin.is_chat_admin still asks Telegram on the
+    command and again on every button press, because a command absent from
+    the menu can still be typed. Hiding it stops it being suggested to ten
+    people who cannot use it."""
+    from telegram import BotCommandScopeAllChatAdministrators, BotCommandScopeDefault
+
+    by_scope = {type(scope): {c.command for c in cmds}
+                for scope, cmds in main.COMMAND_SCOPES}
+
+    assert "admin" not in by_scope[BotCommandScopeDefault]
+    assert "admin" in by_scope[BotCommandScopeAllChatAdministrators]
+    # Everything an ordinary member gets, an administrator gets too.
+    assert by_scope[BotCommandScopeDefault] <= by_scope[BotCommandScopeAllChatAdministrators]
 
 
 async def test_startup_actually_sends_the_command_list(monkeypatch):
@@ -211,8 +227,16 @@ async def test_startup_actually_sends_the_command_list(monkeypatch):
 
     await main.post_init(app)
 
-    sent = app.bot.set_my_commands.await_args.args[0]
-    assert [c.command for c in sent] == ["status", "list", "admin"]
+    calls = app.bot.set_my_commands.await_args_list
+    assert len(calls) == len(main.COMMAND_SCOPES), "every scope has to be sent"
+    by_scope = {type(c.kwargs["scope"]): [b.command for b in c.args[0]] for c in calls}
+
+    from telegram import BotCommandScopeAllChatAdministrators, BotCommandScopeDefault
+
+    assert by_scope[BotCommandScopeDefault] == ["status", "list", "reminders"]
+    assert by_scope[BotCommandScopeAllChatAdministrators] == [
+        "status", "list", "reminders", "admin",
+    ]
 
 
 async def test_a_failed_registration_does_not_stop_the_bot(monkeypatch):

@@ -96,3 +96,54 @@ async def test_one_chats_status_is_not_anothers(db_pool):
     await status_command.handle_command(db_pool, telegram_bot, _message(chat_id=-200))
 
     assert "Маленькая прага" not in telegram_bot.send_message.await_args.kwargs["text"]
+
+
+async def test_reminders_answers_with_the_schedule_alone(db_pool):
+    """The same block /status carries under ⏰, without the rest of it."""
+    import datetime as dt
+
+    active = await _active(db_pool)
+    await core_tools.remember_fact(db_pool, active["id"], "place", "Маленькая прага")
+    await core_tools.reminder_set(
+        db_pool, active["id"],
+        message="взять мангал",
+        remind_at=(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2)).isoformat(),
+    )
+    telegram_bot = AsyncMock()
+
+    await status_command.handle_command(db_pool, telegram_bot, _message(), "reminders")
+
+    text = telegram_bot.send_message.await_args.kwargs["text"]
+    assert "взять мангал" in text
+    assert "Маленькая прага" not in text, "the schedule alone, not the whole report"
+    assert "🛒" not in text
+
+
+async def test_reminders_says_plainly_when_there_are_none(db_pool):
+    """"Nothing scheduled" is an answer. Saying nothing, or claiming it cannot
+    check, is what this whole area exists to stop."""
+    await _active(db_pool)
+    telegram_bot = AsyncMock()
+
+    await status_command.handle_command(db_pool, telegram_bot, _message(), "reminders")
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] == "Нет запланированных напоминаний"
+
+
+async def test_the_schedule_reads_the_same_here_as_in_the_status(db_pool):
+    """One renderer, so the command and the report cannot drift apart."""
+    import datetime as dt
+    import bot.tools.composed as composed
+
+    active = await _active(db_pool)
+    await core_tools.reminder_set(
+        db_pool, active["id"],
+        message="выехать",
+        remind_at=(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=3)).isoformat(),
+    )
+    telegram_bot = AsyncMock()
+
+    await status_command.handle_command(db_pool, telegram_bot, _message(), "reminders")
+
+    schedule = telegram_bot.send_message.await_args.kwargs["text"]
+    assert schedule in (await composed.event_status(db_pool, active["id"]))["report"]
