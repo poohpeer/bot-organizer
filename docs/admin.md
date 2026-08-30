@@ -1,5 +1,14 @@
 # Commands
 
+The slash menu is registered from `bot/main.py::BOT_COMMANDS` on every
+startup, not from BotFather. Telegram keeps whatever was set last, forever
+and invisibly: the only command it offered was `/ask_everyone`, typed into
+BotFather at some point and backed by nothing in this repository — so the
+menu advertised a command that did nothing and hid three that work.
+`set_my_commands` replaces the whole list, which is what makes the code the
+single source. A test asserts the list and the handlers are the same set.
+
+
 ## `/status` and `/list`
 
 `/status` posts the full organizing report — place, date, participants,

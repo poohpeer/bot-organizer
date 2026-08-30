@@ -5,7 +5,7 @@ turns every incoming update into a call into `bot.router`.
 import logging
 import os
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler,
@@ -163,6 +163,16 @@ async def route_membership(pool, telegram_bot, chat_member_updated, bot_id, bot_
             await session.close_session(pool, active["id"], reason="explicit_stop")
 
 
+# What the slash menu offers, in the order it shows them. Descriptions are
+# what a person sees while typing, so they say what they get rather than
+# naming the machinery.
+BOT_COMMANDS = [
+    BotCommand("status", "Что известно о встрече"),
+    BotCommand("list", "Список покупок"),
+    BotCommand("admin", "Настройки бота"),
+]
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bot_data = context.bot_data
     await route_update(
@@ -228,6 +238,20 @@ async def post_init(app: Application) -> None:
     app.bot_data["bot_id"] = me.id
     app.bot_data["bot_username"] = me.username
     log.info("Resolved bot identity: id=%s username=%s", me.id, me.username)
+
+    # Registered from code, not from BotFather. Telegram keeps whatever was
+    # set last, forever and invisibly: the only command it was offering was
+    # /ask_everyone, typed into BotFather at some point and backed by nothing
+    # in this repository — so the slash menu advertised a command that did
+    # nothing and hid three that work. set_my_commands replaces the whole
+    # list, which is what makes this the single source.
+    try:
+        await app.bot.set_my_commands(BOT_COMMANDS)
+        log.info("Registered %d commands with Telegram", len(BOT_COMMANDS))
+    except Exception:
+        # A failure here costs autocomplete, not the bot. Starting anyway
+        # beats refusing to run because a cosmetic call was rate limited.
+        log.warning("Could not register the command list", exc_info=True)
 
     # Started here rather than as its own process: the endpoint dispatches
     # into the same registry and the same pool this one already holds, and a
