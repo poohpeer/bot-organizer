@@ -41,6 +41,12 @@ uv sync
 TEST_DATABASE_URL=postgresql://postgres:test@localhost:5432/postgres uv run pytest -q
 ```
 
+`postgres:16` and not `postgres:16-alpine`: the Alpine build reads the
+system tzdata and so accepts every zone Python does, while the Debian one CI
+and the cluster run knows 487 of the 599. The test that checks a
+Postgres-unknown zone is refused has nothing to refuse on Alpine and skips,
+which hides a guard that matters in production.
+
 No API keys are needed and no live API is called: `tests/conftest.py` supplies
 fake values. AI requests are sent through the shared `ai-proxy`; configure its
 URL with `AI_PROXY_URL` (for Kubernetes this is `http://ai-proxy:8787`).
