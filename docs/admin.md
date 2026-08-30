@@ -79,6 +79,21 @@ been demoted.
 If the check itself fails — Telegram unreachable, an unexpected reply — the
 answer is no. A settings menu is the wrong place to fail open.
 
+**The bot's owner is the exception.** `BOT_OWNER_ID` names one Telegram user
+who counts as an administrator in every chat the bot was added to, whether or
+not they run that chat: the models it calls are spent from their account, so
+the provider chain is a decision about their money and their rate limits.
+
+It is checked **before** Telegram, so that answer does not depend on a call
+that can fail — the one rule here that must never be lost to an outage.
+Unset in a deployment nobody owns personally, and then only a chat's own
+administrators qualify; a malformed value is treated as unset rather than
+crashing every permission check on a typo in a ConfigMap.
+
+The slash menu still shows `/admin` by chat role, so an owner who is not an
+administrator of a group will not see it suggested there. Typed by hand it
+works.
+
 ## The chain
 
 Press the models in the order the bot should try them. The first press takes

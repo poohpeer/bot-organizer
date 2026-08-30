@@ -31,3 +31,9 @@ data:
   CONVERSATION_TURNS: "5"
   CONVERSATION_MAX_AGE_MINUTES: "30"
   GROUP_SYNC_INTERVAL_SECONDS: "60"
+  # Whoever runs this bot. They can open /admin in every chat it was added
+  # to, whether or not they administer that chat: the models it calls are
+  # spent from their account, so the provider chain is a decision about their
+  # money. Leave unset in a deployment nobody owns personally — then only a
+  # chat's own administrators qualify.
+  BOT_OWNER_ID: "91237884"

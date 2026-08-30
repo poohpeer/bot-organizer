@@ -8,6 +8,7 @@ change the bot's behaviour for everyone else without their knowing.
 """
 
 import logging
+import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -51,6 +52,19 @@ _RESET = "adm:reset"
 _CLOSE = "adm:close"
 
 
+# Whoever runs this bot. Their groups' administrators configure the bot in
+# their own chats; the owner can configure it anywhere it was added, because
+# the models it calls are spent from their account and the chain is a
+# decision about their money and their rate limits.
+#
+# Unset in a deployment nobody owns personally, and then only chat
+# administrators qualify — which is why this reads the environment rather
+# than defaulting to somebody.
+def _owner_id() -> int | None:
+    raw = os.environ.get("BOT_OWNER_ID", "").strip()
+    return int(raw) if raw.lstrip("-").isdigit() else None
+
+
 async def is_chat_admin(telegram_bot, chat_id: int, user_id: int | None) -> bool:
     """Whether this person may change the chat's settings.
 
@@ -58,9 +72,16 @@ async def is_chat_admin(telegram_bot, chat_id: int, user_id: int | None) -> bool
     been demoted should stop being one immediately, and a cache would decide
     otherwise. Any failure answers no — a settings menu is the wrong place to
     fail open.
+
+    The bot's owner is the one exception, and it is checked first: they
+    qualify in every chat the bot was added to, whether or not they run that
+    chat. Telegram is not asked at all in that case, so the answer does not
+    depend on a call that can fail.
     """
     if user_id is None:
         return False
+    if user_id == _owner_id():
+        return True
     try:
         member = await telegram_bot.get_chat_member(chat_id, user_id)
     except Exception:
