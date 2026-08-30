@@ -310,6 +310,21 @@ a picture of the map with the coordinates as its title — half a phone screen
 of it, pushed under a report whose whole point is being read at a glance. The
 link is already a link.
 
+A message too long for one send goes as several, cut at line boundaries.
+Telegram refuses anything past 4096 characters with 400 "message is too
+long", and nothing caught that: the exception left the handler and the group
+saw nothing at all.
+
+Lines are the seam because everything long here is a list, and a cut mid-line
+splits an item in half — or, with HTML, an entity, which loses the whole
+message rather than making it ugly. Every anchor lives inside one line, so a
+line boundary is always safe. A single line longer than the limit is cut by
+characters; that needs somebody to have typed a 4000-character item name, and
+the alternative is sending nothing.
+
+Truncation is not on offer: a list exists to be complete, and a report that
+silently stops halfway is worse than two messages.
+
 `send_text` is used at the two places a report can leave the process: the
 `/status` and `/list` commands, and the model relaying `event_status`
 verbatim. `strip_links` reduces a marker to its label for everywhere else —
