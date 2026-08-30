@@ -317,6 +317,18 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS closing_question_snoozed_until TIM
 -- expanding one to find out is the thing this column exists to stop the bot
 -- doing. One event has one place, so one column rather than a table.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS place_url TEXT;
+-- Where chats.timezone came from: 'stated' when a human said it, 'lookup'
+-- when it was guessed from a place's coordinates. NULL for rows written
+-- before this column existed, which are treated as guesses — the safe
+-- reading, since a guess is what most of them were.
+--
+-- Without it a guess could never be corrected: the rule was "never
+-- overwrite", written to protect a human's word, and it protected one bad
+-- lookup just as firmly. Live, a place called "Бен & Co" resolved to a
+-- jeweller in Pretoria, the chat became Africa/Johannesburg, and saying "мы
+-- в Тель-Авиве" afterwards changed the place but not the zone.
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS timezone_source TEXT
+    CHECK (timezone_source IN ('stated', 'lookup'));
 ALTER TABLE places ADD COLUMN IF NOT EXISTS query TEXT;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS timezone TEXT;

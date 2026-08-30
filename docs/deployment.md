@@ -192,6 +192,26 @@ Checked before Telegram, so it cannot be lost to a failed `get_chat_member`.
 Leave it unset in a deployment nobody owns personally: then only a chat's own
 administrators qualify. A malformed value is treated as unset.
 
+## Timezones
+
+`chats.timezone` is set two ways, and `chats.timezone_source` records which:
+
+- **`stated`** — a human said where they are, and `set_timezone` recorded it.
+  Nothing overrides this: someone saying "мы по Москве" knows better than the
+  coordinates of a restaurant they looked up.
+- **`lookup`** — guessed from a resolved place's coordinates. A later lookup
+  replaces an earlier one, because the newer one was made with more of the
+  conversation behind it.
+
+A row with no source predates the column and counts as a guess — that is what
+most of them were, and the alternative is a chat stuck on one forever.
+
+The distinction exists because "never overwrite" protected a bad guess as
+firmly as a human's word. Live: a place typed as «Бен & Co» resolved to a
+jeweller in Pretoria, the chat became `Africa/Johannesburg`, and the group
+saying "мы в Тель-Авиве" afterwards moved the place but not the zone —
+leaving every reminder an hour out.
+
 ## Group title/description sync
 
 `GROUP_SYNC_INTERVAL_SECONDS` (default `60`) caps how often the worker calls

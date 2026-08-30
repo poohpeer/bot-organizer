@@ -418,6 +418,18 @@ Nothing here can be faked; the clock has to pass.
 - **Then** the bot asks whether the event is over, and on no answer closes the
   session with a summary
 
+### 6.6 A guessed timezone can still be corrected
+
+- **Given** a chat whose zone was learned from a resolved place — check
+  `chats.timezone` and `chats.timezone_source = 'lookup'`
+- **When** somebody names the city the event is actually in and the bot
+  resolves it
+- **Then** the zone follows the new place
+- **Why not automatable** it takes a real maps lookup landing somewhere
+  unexpected. Live: a place typed as «Бен & Co» resolved to a jeweller in
+  Pretoria, the chat became `Africa/Johannesburg`, and every reminder would
+  have fired an hour out with nothing on screen to explain it
+
 ---
 
 ## 7. Rendering on a real client

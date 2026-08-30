@@ -106,30 +106,54 @@ async def known_to_postgres(pool, name: str) -> bool:
     return await pool.fetchval("SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = $1)", name)
 
 
-async def set_chat_timezone(pool, chat_id: int, name: str) -> bool:
+async def set_chat_timezone(pool, chat_id: int, name: str, *, source: str = "stated") -> bool:
     """Record a chat's zone. Returns False for anything not a real IANA name,
     so a hallucinated "MSK" or "UTC+3" is refused rather than stored — and for
-    anything Postgres would later choke on."""
+    anything Postgres would later choke on.
+
+    `source` is how it was arrived at: 'stated' when a human said where they
+    are, 'lookup' when it was guessed from coordinates. It decides what a
+    later guess is allowed to replace — see learn_timezone_from_coordinates.
+    """
     if not is_valid_timezone(name) or not await known_to_postgres(pool, name):
         return False
-    await pool.execute("UPDATE chats SET timezone = $2 WHERE chat_id = $1", chat_id, name)
+    await pool.execute(
+        "UPDATE chats SET timezone = $2, timezone_source = $3 WHERE chat_id = $1",
+        chat_id, name, source,
+    )
     return True
 
 
 async def learn_timezone_from_coordinates(pool, chat_id: int, lat: float, lon: float) -> str | None:
-    """Fill in a chat's zone from a resolved place, if it has none yet.
+    """Set a chat's zone from a resolved place, unless a human already said it.
 
     Deliberately called from code on place resolution rather than left to the
     model: piggybacking on `weather_lookup` would only work when the model
     happened to check the weather, which is neither guaranteed nor predictable.
 
-    Never overwrites an existing value — an explicit human statement or an
-    earlier resolution outranks this — and never raises: failing to learn a
-    zone must not fail the place lookup that triggered it.
+    Never overwrites what a human stated: someone saying "мы по Москве" knows
+    better than the coordinates of a restaurant they looked up.
+
+    An earlier *guess* is a different matter, and it used to be protected
+    just as firmly. Live: a place typed as "Бен & Co" resolved to a jeweller
+    in Pretoria, the chat became Africa/Johannesburg, and the group saying
+    "мы в Тель-Авиве" afterwards moved the place but not the zone — leaving
+    every reminder an hour out, with nothing on screen to explain it. A later
+    lookup now replaces an earlier one, because the newer one was made with
+    more of the conversation behind it.
+
+    A row with no recorded source predates the column and is treated as a
+    guess: that is what most of them were, and the alternative is a chat
+    stuck on a guess forever.
+
+    Never raises: failing to learn a zone must not fail the place lookup that
+    triggered it.
     """
-    existing = await pool.fetchval("SELECT timezone FROM chats WHERE chat_id = $1", chat_id)
-    if existing is not None:
-        return existing
+    row = await pool.fetchrow(
+        "SELECT timezone, timezone_source FROM chats WHERE chat_id = $1", chat_id
+    )
+    if row is not None and row["timezone"] is not None and row["timezone_source"] == "stated":
+        return row["timezone"]
 
     try:
         async with httpx.AsyncClient(timeout=_LOOKUP_TIMEOUT) as client:
@@ -145,7 +169,10 @@ async def learn_timezone_from_coordinates(pool, chat_id: int, lat: float, lon: f
 
     if not is_valid_timezone(name) or not await known_to_postgres(pool, name):
         return None
-    await pool.execute("UPDATE chats SET timezone = $2 WHERE chat_id = $1", chat_id, name)
+    await pool.execute(
+        "UPDATE chats SET timezone = $2, timezone_source = 'lookup' WHERE chat_id = $1",
+        chat_id, name,
+    )
     return name
 
 
