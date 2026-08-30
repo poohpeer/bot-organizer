@@ -430,6 +430,37 @@ Nothing here can be faked; the clock has to pass.
   Pretoria, the chat became `Africa/Johannesburg`, and every reminder would
   have fired an hour out with nothing on screen to explain it
 
+### 6.7 The creator's zone stands in for the group's
+
+- **Given** a chat whose `chats.creator_user_id` is filled in (it is learned on
+  the first sync after the bot is added — check the column, don't assume) and
+  whose zone was only ever guessed
+- **When** the creator says «я в Москве»
+- **Then** `users.timezone` records them, and the chat now reads in
+  `Europe/Moscow` — but a group that had said «мы в Тель-Авиве» keeps its own
+- **Why not automatable** it needs a real group with a real owner, and
+  `getChatAdministrators` against a group the bot was actually added to
+
+### 6.8 A personal reminder keeps its owner's clock
+
+- **Given** two people in one chat, one of whom has said they are in a
+  different timezone
+- **When** somebody asks the bot to remind that person at a wall-clock time
+- **Then** the reminder arrives at that hour where *they* are, `/reminders`
+  shows the line with their zone in brackets, and setting the group's zone
+  afterwards does not move it
+- **Why not automatable** it needs two real accounts in different zones and a
+  reminder that actually fires
+
+### 6.9 An interval means the same instant for everyone
+
+- **Given** a person whose stated zone differs from the chat's
+- **When** they ask for a reminder «через 5 минут»
+- **Then** it arrives five minutes later — not five minutes plus the offset
+- **Why not automatable** it depends on what the model actually sends for
+  `remind_at`; the guard is the system instruction, and only a live turn
+  proves the model followed it
+
 ---
 
 ## 7. Rendering on a real client

@@ -80,7 +80,7 @@ ALL_TOOLS = types.Tool(function_declarations=[
         "Pass repeat_every_minutes and repeat_until to make it repeat until that time.",
         {"session_id": _S(Type.INTEGER), "message": _S(Type.STRING),
          "remind_at": _S(Type.STRING, "ISO-8601 datetime."),
-         "target_user_id": _S(Type.INTEGER, "Telegram user id, or omit to post in the group chat."),
+         "target_user_id": _S(Type.INTEGER, "Telegram user id, or omit to post in the group chat. A time given for one person is read in that person's own timezone if they have stated one."),
          "repeat_every_minutes": _S(Type.INTEGER, "Repeat interval in minutes, or omit for a one-off reminder."),
          "repeat_until": _S(Type.STRING, "ISO-8601 datetime the repeats stop at. Required if repeat_every_minutes is given.")},
         ["session_id", "message", "remind_at"]),
@@ -92,9 +92,12 @@ ALL_TOOLS = types.Tool(function_declarations=[
     _fn("broadcast_message", "Send an arbitrary message to the whole chat outside of a normal reply. Destructive — requires human confirmation before it takes effect.",
         {"session_id": _S(Type.INTEGER), "text": _S(Type.STRING)},
         ["session_id", "text"]),
-    _fn("set_timezone", "Record which timezone this group is in, so reminders land at the right local time. Call this whenever someone names their city, region or timezone. If reminder_set reports timezone_assumed, ask the group roughly where they are and then call this — already-scheduled reminders are corrected automatically.",
+    # current_user_id is bound by the router here too, for whose='me': a
+    # model-supplied id would let it move a bystander to another continent.
+    _fn("set_timezone", "Record which timezone the group, or the person speaking, is in, so reminders land at the right local time. Call this whenever someone names their city, region or timezone. If reminder_set reports timezone_assumed, ask roughly where they are and then call this — already-scheduled reminders are corrected automatically.",
         {"session_id": _S(Type.INTEGER),
-         "timezone_name": _S(Type.STRING, "IANA zone name, e.g. 'Europe/Moscow' or 'Asia/Jerusalem'.")},
+         "timezone_name": _S(Type.STRING, "IANA zone name, e.g. 'Europe/Moscow' or 'Asia/Jerusalem'."),
+         "whose": _S(Type.STRING, "'chat' when they said where the group is (\"мы в Москве\"), 'me' when they said where they personally are (\"я в Москве\"). Defaults to 'chat'.")},
         ["session_id", "timezone_name"]),
     # session_id and current_user_id are deliberately NOT parameters here: the
     # router binds both from who actually sent the message, the same way

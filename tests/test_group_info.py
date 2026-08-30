@@ -277,3 +277,70 @@ async def test_nothing_found_writes_nothing(db_pool):
     })
 
     assert applied == {}
+
+
+# --- Who created the group --------------------------------------------------
+
+
+def _admins(*members):
+    telegram_bot = AsyncMock()
+    telegram_bot.get_chat_administrators.return_value = list(members)
+    return telegram_bot
+
+
+def _member(status, user_id):
+    return SimpleNamespace(status=status, user=SimpleNamespace(id=user_id))
+
+
+async def test_the_creator_is_learned_and_remembered(db_pool):
+    """Telegram has no field for it on the chat and no notification when it
+    changes — getChatAdministrators is the only way to find out, and the
+    creator's own timezone is what the chat falls back to."""
+    await db_pool.execute("INSERT INTO chats (chat_id, title) VALUES (-1, 'Chat')")
+    telegram_bot = _admins(_member("administrator", 5), _member("creator", 77))
+
+    assert await group_info.ensure_creator_known(db_pool, telegram_bot, -1) == 77
+
+    assert await db_pool.fetchval("SELECT creator_user_id FROM chats WHERE chat_id = -1") == 77
+
+
+async def test_the_creator_is_asked_for_only_once(db_pool):
+    """This runs on a timer for every chat with an active session. An owner
+    change is rare enough not to be worth an API call every single sync."""
+    await db_pool.execute("INSERT INTO chats (chat_id, title) VALUES (-1, 'Chat')")
+    telegram_bot = _admins(_member("creator", 77))
+
+    await group_info.ensure_creator_known(db_pool, telegram_bot, -1)
+    await group_info.ensure_creator_known(db_pool, telegram_bot, -1)
+
+    assert telegram_bot.get_chat_administrators.await_count == 1
+
+
+async def test_a_chat_the_bot_has_never_written_down_still_records_its_creator(db_pool):
+    """The bot learns this the moment it is added, which can be before the
+    chat has a row at all."""
+    telegram_bot = _admins(_member("creator", 77))
+
+    assert await group_info.ensure_creator_known(db_pool, telegram_bot, -1) == 77
+
+    assert await db_pool.fetchval("SELECT creator_user_id FROM chats WHERE chat_id = -1") == 77
+
+
+async def test_a_private_chat_is_never_asked_about_administrators(db_pool):
+    telegram_bot = _admins(_member("creator", 77))
+
+    assert await group_info.ensure_creator_known(db_pool, telegram_bot, 42) is None
+
+    telegram_bot.get_chat_administrators.assert_not_awaited()
+
+
+async def test_a_group_with_no_reachable_owner_is_not_an_error(db_pool):
+    """The creator can have left a supergroup. Nothing to record, nothing to
+    fail — the chat simply keeps whatever zone it had."""
+    await db_pool.execute("INSERT INTO chats (chat_id, title) VALUES (-1, 'Chat')")
+
+    assert await group_info.ensure_creator_known(db_pool, _admins(_member("administrator", 5)), -1) is None
+
+    failing = AsyncMock()
+    failing.get_chat_administrators.side_effect = RuntimeError("kicked")
+    assert await group_info.ensure_creator_known(db_pool, failing, -1) is None

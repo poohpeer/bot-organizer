@@ -221,3 +221,18 @@ async def test_changed_info_updates_the_sessions_event_date_and_place_fact(db_po
         "SELECT value FROM facts WHERE session_id = $1 AND key = 'place'", session_id
     )
     assert facts["value"] == "поляна Ханания"
+
+
+async def test_the_sync_learns_who_created_the_chat(db_pool, monkeypatch):
+    """The only path that fills this in for a group the bot was already in
+    when the feature shipped. Without it, "часовой пояс из создателя" would
+    only ever work for chats added afterwards."""
+    await _active_session(db_pool, chat_id=-1)
+    telegram_bot = _telegram_bot()
+    telegram_bot.get_chat_administrators.return_value = [
+        SimpleNamespace(status="creator", user=SimpleNamespace(id=77)),
+    ]
+
+    await group_sync.sync_group_info(db_pool, telegram_bot)
+
+    assert await db_pool.fetchval("SELECT creator_user_id FROM chats WHERE chat_id = -1") == 77

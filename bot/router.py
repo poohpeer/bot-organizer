@@ -13,6 +13,7 @@ import unicodedata
 
 from bot.logging_setup import truncate
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from google.genai import types
 
@@ -202,6 +203,7 @@ async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_
     if not bot_was_added(chat_member_updated, bot_id):
         return
     chat = chat_member_updated.chat
+    await group_info.ensure_creator_known(pool, telegram_bot, chat.id)
     info = await group_info.fetch(telegram_bot, chat.id)
     tz = await timezones.chat_timezone(pool, chat.id)
     event = await group_info.extract_event(
@@ -505,7 +507,7 @@ _SESSION_BOUND_TOOLS = frozenset({
 # model-supplied id (R5) — the same reasoning that keeps session_id off the
 # model for _SESSION_BOUND_TOOLS above. Every one of these is also in
 # _SESSION_BOUND_TOOLS, since current_user_id is bound in the same wrapper.
-_CURRENT_USER_BOUND_TOOLS = frozenset({"send_private_message"})
+_CURRENT_USER_BOUND_TOOLS = frozenset({"send_private_message", "set_timezone"})
 
 _SELF_DISPLAY_NAMES = frozenset({
     "i", "me", "myself", "user", "я", "меня", "мне", "сам", "сама",
@@ -540,6 +542,19 @@ async def _active_mode_instruction(pool, chat_id: int, session_id: int, current_
         f"Current sender: {display_name} (telegram user_id={user_id}). "
         if user_id is not None and display_name else ""
     )
+    # Only when the sender keeps a different clock from the chat. Said always,
+    # it would be a line of noise on every turn; left unsaid in the one case
+    # it matters, the model works "через полчаса" out from the wrong now.
+    personal = await timezones.user_timezone(pool, user_id)
+    if personal is not None and personal != str(tz):
+        their_now = datetime.now(ZoneInfo(personal))
+        sender_clock = (
+            f"\nThe sender is in {personal}, where it is {their_now:%Y-%m-%d %H:%M}. "
+            "A time they give for themselves is on that clock; reminder_set reads it "
+            "that way automatically when target_user_id is theirs."
+        )
+    else:
+        sender_clock = ""
     return (
         _ACTIVE_MODE_SYSTEM_INSTRUCTION
         + "\nCurrent session_id is "
@@ -551,6 +566,11 @@ async def _active_mode_instruction(pool, chat_id: int, session_id: int, current_
         + f"\nRight now it is {now:%Y-%m-%d %H:%M} ({tz}), a {now:%A}. "
         + "Work out every date and time from that, and pass reminder_set an "
         + "ISO-8601 local time — never a date you assumed from memory."
+        + sender_clock
+        + "\nFor an interval rather than a clock time (\"через 20 минут\", \"через час\"), "
+        + f"pass the instant with its offset, as {now:%Y-%m-%dT%H:%M%z} is written here — "
+        + "an interval means that many minutes from now for everyone, and a bare local "
+        + "time would be re-read in the target's own timezone."
     )
 
 

@@ -82,6 +82,24 @@ async def test_bind_session_context_binds_current_user_id_none_when_no_sender():
     assert seen["current_user_id"] is None
 
 
+async def test_bind_session_context_forces_current_user_id_for_set_timezone():
+    """whose='me' relocates a person. If the model chose the id it could move
+    a bystander to another continent and every reminder addressed to them
+    with it — the same reasoning that keeps the recipient off
+    send_private_message."""
+    seen = {}
+
+    async def set_timezone(**kwargs):
+        seen.update(kwargs)
+        return {"status": "ok"}
+
+    registry = router._bind_session_context({"set_timezone": set_timezone}, 1, _HUMAN)
+
+    await registry["set_timezone"](timezone_name="Europe/Moscow", whose="me", current_user_id=999)
+
+    assert seen["current_user_id"] == 7
+
+
 def test_has_visible_text_rejects_zero_width_only_reply():
     assert router._has_visible_text("\u200b\u200b") is False
     assert router._has_visible_text("  \u200b\n") is False

@@ -48,6 +48,11 @@ def render_reminders(reminders: list[dict]) -> str:
 
 def _reminder_line(reminder: dict) -> str:
     line = f"{reminder['message']} — {reminder['next_at']}"
+    if reminder.get("timezone_differs") and reminder.get("timezone"):
+        # Only when it is not the chat's own clock. Stamping every line with
+        # the zone would be noise; leaving it off the one line that keeps a
+        # different clock would make the time simply wrong to read.
+        line += f" ({reminder['timezone']})"
     if reminder.get("repeats_every_minutes"):
         line += f" (каждые {reminder['repeats_every_minutes']} мин до {reminder['repeats_until']})"
     if reminder.get("target") and reminder["target"] != "группа":

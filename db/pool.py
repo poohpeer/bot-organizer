@@ -102,7 +102,21 @@ CREATE TABLE IF NOT EXISTS chats (
     -- never tells us this, so it is learned from a resolved place or stated by
     -- a human; see bot/timezones.py.
     timezone   TEXT,
+    -- Whoever created the group, from get_chat_administrators. Their own
+    -- stated zone stands in for the chat's when nobody has stated the
+    -- chat's -- see bot/timezones.py.
+    creator_user_id BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- What a person told us about themselves, independent of any one chat.
+-- Telegram exposes no timezone for a user any more than it does for a chat,
+-- so the only row here is one somebody actually stated out loud.
+CREATE TABLE IF NOT EXISTS users (
+    user_id    BIGINT PRIMARY KEY,
+    -- IANA name, or NULL when this person has never said where they are.
+    timezone   TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -329,6 +343,10 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS place_url TEXT;
 -- в Тель-Авиве" afterwards changed the place but not the zone.
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS timezone_source TEXT
     CHECK (timezone_source IN ('stated', 'lookup'));
+-- Learned lazily from get_chat_administrators: the API has no notification
+-- for it, so it is filled in the first time a chat is synced and left alone
+-- afterwards. NULL means "not looked up yet", not "no creator".
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS creator_user_id BIGINT;
 ALTER TABLE places ADD COLUMN IF NOT EXISTS query TEXT;
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS timezone TEXT;

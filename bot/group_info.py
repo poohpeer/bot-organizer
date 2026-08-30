@@ -12,6 +12,7 @@ from datetime import date
 
 from google.genai import types
 
+import bot.timezones as timezones
 import bot.tools.core as core_tools
 from bot.ai.classify import extract
 
@@ -36,6 +37,41 @@ async def fetch(telegram_bot, chat_id: int) -> dict:
     except Exception:
         log.warning("group_info.fetch failed for chat %s", chat_id, exc_info=True)
         return {}
+
+
+async def ensure_creator_known(pool, telegram_bot, chat_id: int) -> int | None:
+    """Learn who created this group, once, and remember it.
+
+    Their own stated zone stands in for the chat's when nobody has stated the
+    chat's (bot/timezones.py), so this is what makes "часовой пояс из
+    создателя группы" possible at all — Telegram has no notification for it
+    and no field on the chat, only getChatAdministrators.
+
+    Looked up only while unknown: an owner change is rare enough not to be
+    worth an extra API call on every sync, and a group with no owner at all
+    (the creator left a supergroup) would otherwise be re-asked forever.
+
+    Never raises, for the same reason fetch does not: this runs on a timer
+    for every chat with an active session.
+    """
+    if chat_id >= 0:
+        # A private chat has no administrators to ask about.
+        return None
+    known = await pool.fetchval("SELECT creator_user_id FROM chats WHERE chat_id = $1", chat_id)
+    if known is not None:
+        return known
+    try:
+        admins = await telegram_bot.get_chat_administrators(chat_id)
+    except Exception:
+        log.warning("Could not read administrators of chat %s", chat_id, exc_info=True)
+        return None
+    for member in admins or ():
+        if getattr(member, "status", None) == "creator":
+            user_id = getattr(getattr(member, "user", None), "id", None)
+            if user_id is not None:
+                await timezones.set_chat_creator(pool, chat_id, user_id)
+                return user_id
+    return None
 
 
 async def changed_fields(pool, chat_id: int, info: dict) -> set[str]:
