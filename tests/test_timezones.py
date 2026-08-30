@@ -268,16 +268,54 @@ async def test_the_question_goes_out_once_the_group_is_awake(db_pool, monkeypatc
     assert would_speak is True, f"bot stayed silent at 10:00 in {zone}"
 
 
+async def _a_zone_postgres_does_not_know(db_pool) -> str:
+    """A name Python accepts and *this* Postgres does not.
+
+    Asked of the running server rather than hardcoded, because which names
+    those are is a property of the build, not of our code. The Debian
+    `postgres:16` that CI, compose and the cluster all run ships its own
+    tzdata and knows 487 zones to Python's 599; the Alpine variant reads the
+    system tzdata and knows all 599. A name written in here passes on one and
+    fails on the other, which is how `US/Hawaii` came to fail locally while
+    CI stayed green.
+    """
+    known = {r["name"] for r in await db_pool.fetch("SELECT name FROM pg_timezone_names")}
+    # `localtime` and `Factory` are in tzdata but are not places: the first is
+    # whatever this machine is set to, the second a placeholder. Neither is a
+    # name a model would ever offer, so neither stands in for the legacy alias
+    # this guard exists to refuse.
+    unknown = sorted(available_timezones() - known - {"localtime", "Factory"})
+    if not unknown:
+        pytest.skip(
+            "this Postgres knows every zone Python does, so the mismatch cannot "
+            "be reproduced here — run against postgres:16, as the README says"
+        )
+    return unknown[0]
+
+
 async def test_a_zone_postgres_cannot_use_is_refused(db_pool):
     """zoneinfo knows 599 zones, Postgres 487. Storing one of the 113 legacy
     aliases would make the closing-question query raise for the whole batch —
     one chat's bad zone silencing the bot in every chat."""
+    name = await _a_zone_postgres_does_not_know(db_pool)
     await _chat(db_pool, chat_id=1)
 
-    assert timezones.is_valid_timezone("US/Hawaii") is True, "Python accepts it"
-    assert await timezones.known_to_postgres(db_pool, "US/Hawaii") is False
-    assert await timezones.set_chat_timezone(db_pool, 1, "US/Hawaii") is False
+    assert timezones.is_valid_timezone(name) is True, "Python accepts it"
+    assert await timezones.known_to_postgres(db_pool, name) is False
+    assert await timezones.set_chat_timezone(db_pool, 1, name) is False
     assert await db_pool.fetchval("SELECT timezone FROM chats WHERE chat_id = 1") is None
+
+
+async def test_a_user_zone_postgres_cannot_use_is_refused(db_pool):
+    """The same guard on the personal zone: `set_user_timezone` writes a name
+    the closing-question query will later read, so it has to refuse exactly
+    what `set_chat_timezone` refuses."""
+    name = await _a_zone_postgres_does_not_know(db_pool)
+
+    assert await timezones.set_user_timezone(db_pool, 7, name) is False
+    # No row at all, not a row with a NULL zone: a refused name must leave
+    # nothing behind for effective_timezone to join against.
+    assert await db_pool.fetchval("SELECT count(*) FROM users WHERE user_id = 7") == 0
 
 
 async def test_a_zone_both_agree_on_is_stored(db_pool):
