@@ -588,3 +588,51 @@ async def test_a_listed_reminder_is_shown_on_the_clock_it_will_keep(db_pool):
     assert personal["timezone_differs"] is True
     assert group["next_at"] == "2026-08-26T09:00:00" and group["timezone"] == "Europe/London"
     assert group["timezone_differs"] is False
+
+
+async def test_an_instant_sent_with_an_offset_is_kept_as_that_instant(db_pool):
+    """"через 5 минут" is an instant, not a wall-clock time.
+
+    The system instruction tells the model to send an interval with its
+    offset, precisely so it is not re-read in the target's zone. Here the
+    target is in Moscow and the chat in London: a bare 09:00 would be stored
+    as 06:00 UTC (see the test above), so storing 09:00 UTC proves the offset
+    was honoured rather than reinterpreted.
+    """
+    session_id = await _chat(db_pool, chat_id=1, tz="Europe/London")
+    await timezones.set_user_timezone(db_pool, 77, "Europe/Moscow")
+
+    created = await core.reminder_set(
+        db_pool, session_id, "спросить Свету", "2026-08-26T09:00:00+00:00", target_user_id=77
+    )
+
+    stored = await db_pool.fetchval(
+        "SELECT remind_at FROM reminders WHERE id = $1", created["reminder_id"]
+    )
+    assert stored == dt.datetime(2026, 8, 26, 9, 0, tzinfo=dt.timezone.utc)
+
+
+async def test_an_instant_survives_the_owner_later_saying_where_they_are(db_pool):
+    """The other half of the same guard, and the one that bites later.
+
+    An instant has no wall clock to re-read, so `local_time` is left NULL and
+    the re-anchoring queries skip it. Without that, somebody stating their
+    zone an hour after asking for "через 5 минут" would shove that reminder
+    hours away — the reminder having already been correct is exactly why the
+    move would go unnoticed.
+    """
+    session_id = await _chat(db_pool, chat_id=1, tz="Europe/London")
+    created = await core.reminder_set(
+        db_pool, session_id, "спросить Свету", "2026-08-26T09:00:00+00:00", target_user_id=77
+    )
+    reminder_id = created["reminder_id"]
+    assert await db_pool.fetchval(
+        "SELECT local_time FROM reminders WHERE id = $1", reminder_id
+    ) is None, "an instant has no wall clock to store"
+
+    moved = await timezones.reanchor_user_reminders(db_pool, 77, "Europe/Moscow")
+    moved += await timezones.reanchor_pending_reminders(db_pool, 1, "Europe/Moscow")
+
+    assert moved == 0
+    stored = await db_pool.fetchval("SELECT remind_at FROM reminders WHERE id = $1", reminder_id)
+    assert stored == dt.datetime(2026, 8, 26, 9, 0, tzinfo=dt.timezone.utc)
