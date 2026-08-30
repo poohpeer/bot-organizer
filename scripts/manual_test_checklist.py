@@ -28,17 +28,21 @@ DEFAULT_SOURCE = Path("docs/manual-tests.md")
 # section without one (## Recording a run) is not a section of cases.
 _SECTION = re.compile(r"^##\s+(\d+)\.\s+(.*?)\s*$")
 
-# "**3.1 Drop a pin** (attach → location → send this location). Expected: …"
-# The id and the title are inside the bold run; everything after it, up to
-# the blank line, is what the person actually checks.
-_CASE = re.compile(r"^\*\*(\d+\.\d+)\s+(.*?)\*\*(.*)$")
+# "### 3.1 A pin becomes the place" — one case, one heading. The body under
+# it is Given/When/Then; the checkbox carries the title and the Then, which
+# is what a person ticks against.
+_CASE = re.compile(r"^###\s+(\d+\.\d+)\s+(.+?)\s*$")
 
-# An aside to whoever maintains the list ("*Why not automatable:* …"), not an
-# instruction to whoever runs it. It opens with an italic label and then runs
-# on in plain prose to the end of the paragraph, so the label is a terminator
-# rather than something to cut out: stripping only the label left the
-# explanation dangling on the end of the checkbox.
-_ASIDE_OPENER = re.compile(r"^\s*\*(?:Why|Known gap|Not the same as|Decide)\b", re.IGNORECASE)
+# The only line of a case that belongs on the checkbox. Given and When are
+# instructions you follow with the document open; Then is the thing you are
+# deciding about, so it is what a one-line reminder has to carry.
+_THEN = re.compile(r"^\s*-\s+\*\*Then\*\*\s+(.*)$")
+
+# An aside to whoever maintains the list, not an instruction to whoever runs
+# it: why a case cannot be automated. It ends the case's Then, so it is a
+# terminator rather than something to cut out — stripping only the label left
+# the explanation dangling on the end of the checkbox.
+_ASIDE_OPENER = re.compile(r"^\s*-\s+\*\*Why not automatable\*\*", re.IGNORECASE)
 
 # Section 0 is setup, not cases. Excluded by default rather than deleted from
 # the document, where it belongs.
@@ -75,9 +79,10 @@ def _tidy(text: str) -> str:
 def parse(markdown: str) -> list[Section]:
     """Every numbered case, grouped by the section it sits in.
 
-    A case's text runs to the next blank line, so an expectation split over
-    two lines survives — people wrap prose, and a checklist that stopped at
-    the first newline would cut half of them mid-sentence.
+    A case's Then runs to the next blank line or to the "why not automatable"
+    aside, so an expectation split over several lines survives whole — people
+    wrap prose, and a checklist that stopped at the first newline would cut
+    half of them mid-sentence.
     """
     sections: list[Section] = []
     pending: Case | None = None
@@ -103,14 +108,23 @@ def parse(markdown: str) -> list[Section]:
         if case and sections:
             flush()
             pending = Case(id=case.group(1), title=_tidy(case.group(2)))
-            collecting = [case.group(3)]
+            collecting = []
             continue
 
-        if pending is not None:
-            if not line.strip() or _ASIDE_OPENER.match(line):
-                flush()
-            else:
+        if pending is None:
+            continue
+        if _ASIDE_OPENER.match(line):
+            flush()
+        elif collecting:
+            # Already inside the Then; keep going until the paragraph ends.
+            if line.strip():
                 collecting.append(line)
+            else:
+                flush()
+        else:
+            then = _THEN.match(line)
+            if then:
+                collecting.append(then.group(1))
 
     flush()
     return sections
