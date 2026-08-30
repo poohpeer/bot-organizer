@@ -5,7 +5,11 @@ from bot.ai.client import AllModelsUnavailable
 from bot.ai.proxy import is_retryable
 from bot.ai.tool_schema_openai import openai_tools
 from bot.logging_setup import truncate
-from bot.turn_outcome import honour_verbatim as _honour_verbatim, verbatim_block as _verbatim_block
+from bot.turn_outcome import (
+    READ_ONLY_TOOLS,
+    honour_verbatim as _honour_verbatim,
+    verbatim_block as _verbatim_block,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +66,9 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
     # reflects the freshest state, and it is the last thing the model itself
     # chose to go and fetch.
     verbatim = None
+    # A sentence a tool wrote about what it just changed. Outranks the block:
+    # see the repeat guard below.
+    said = None
     previous_request = None
 
     for turn in range(1, MAX_TOOL_ITERATIONS + 1):
@@ -79,14 +86,26 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
         # spent ~15s doing it, while every call returned the same report. Stop
         # at the repeat and answer with what came back.
         requested = [(call.name, call.args or {}) for call in reply.tool_calls]
-        if requested == previous_request and verbatim:
+        # `say` first: a tool that changed something wrote a sentence about
+        # the change, and a rendered block — if one survived — describes a
+        # list rather than what just happened to it.
+        answer = said or verbatim
+        if requested == previous_request and answer:
             log.warning("Model repeated %s with the same arguments; answering with the result",
                         ", ".join(name for name, _ in requested))
-            return verbatim
+            return answer
         previous_request = requested
         results = [(call, await _call_tool(registry, call)) for call in reply.tool_calls]
         for call, result in results:
-            verbatim = _verbatim_block(result) or verbatim
+            block = _verbatim_block(result)
+            if block:
+                verbatim = block
+            elif call.name not in READ_ONLY_TOOLS:
+                # Changed something and rendered nothing: the block being
+                # held predates the change. See TurnRecord.record.
+                verbatim = None
+            if isinstance(result, dict) and result.get("say"):
+                said = result["say"]
             # The same record a CLI's own tool calls write to through
             # bot/mcp_server.py, so the router sees one turn either way.
             if record is not None:

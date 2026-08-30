@@ -403,8 +403,11 @@ async def test_an_http_providers_tool_calls_are_recorded():
     assert result == "Готово: ◻️ хлеб"
     assert record.tools_called == ["list_show", "list_add"]
     assert record.changed_something() is True
-    assert record.verbatim == "◻️ хлеб"
     assert record.say == "хлеб: было 2, стало 4"
+    # And the block is gone: list_add changed the list and rendered nothing,
+    # so "◻️ хлеб" describes the state before the change. This assertion used
+    # to expect the block, which is exactly the bug case 4.1 caught.
+    assert record.verbatim is None
 
 
 async def test_no_record_is_still_allowed():
@@ -422,3 +425,92 @@ async def test_no_record_is_still_allowed():
     )
 
     assert result == "Готово."
+
+
+async def test_a_change_makes_an_earlier_rendered_block_stale():
+    """Found by running the manual plan, case 4.1.
+
+    Asked to make it four loaves, the model called list_show first — block:
+    "хлеб, 2 шт." — Groq then 429ed mid-turn, gemini picked it up and called
+    list_add, which updated the row to 4 and returns `say` rather than a
+    block. The held block still said two, and it is what the group was told.
+
+    A block describes the state at the moment it was rendered. Once something
+    changes it and renders nothing of its own, the block is a photograph of
+    the past.
+    """
+    from bot.turn_outcome import TurnRecord
+
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="list_show", args={}, id="c1")]),
+        Reply(text="", tool_calls=[ToolCall(name="list_add", args={"name": "хлеб"}, id="c2")]),
+        Reply(text="Готово."),
+    ])
+    provider = _ScriptedProvider("groq", [chat])
+    registry = {
+        "list_show": AsyncMock(return_value={"rendered": "◻️ хлеб, 2 шт."}),
+        "list_add": AsyncMock(return_value={
+            "status": "updated", "quantity": "4 шт.", "previous_quantity": "2 шт.",
+            "say": "хлеб: было 2 шт., стало 4 шт.",
+        }),
+    }
+    record = TurnRecord()
+
+    result = await run_tool_loop(
+        _fallback((provider, "m")), "пусть будет четыре", registry, record=record
+    )
+
+    assert "2 шт." not in result, "the group must not be told the amount it no longer has"
+    assert record.verbatim is None, "the block predates the change"
+
+
+async def test_a_repeated_call_answers_with_what_changed_not_a_stale_list():
+    """The repeat guard's own version of the same bug: it answered with the
+    held block, which had been rendered before the change."""
+    from bot.turn_outcome import TurnRecord
+
+    same = ToolCall(name="list_add", args={"name": "хлеб", "amount": 4}, id="c")
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="list_show", args={}, id="c0")]),
+        Reply(text="", tool_calls=[same]),
+        Reply(text="", tool_calls=[same]),
+        Reply(text="Готово."),
+    ])
+    provider = _ScriptedProvider("groq", [chat])
+    registry = {
+        "list_show": AsyncMock(return_value={"rendered": "◻️ хлеб, 2 шт."}),
+        "list_add": AsyncMock(return_value={
+            "status": "updated", "say": "хлеб: было 2 шт., стало 4 шт.",
+        }),
+    }
+
+    result = await run_tool_loop(
+        _fallback((provider, "m")), "пусть будет четыре", registry, record=TurnRecord()
+    )
+
+    assert result == "хлеб: было 2 шт., стало 4 шт."
+
+
+async def test_a_read_only_tool_does_not_invalidate_the_block():
+    """Only a change makes a block stale. get_facts after list_show must not
+    throw away the list the person asked for."""
+    from bot.turn_outcome import TurnRecord
+
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="list_show", args={}, id="c1")]),
+        Reply(text="", tool_calls=[ToolCall(name="get_facts", args={}, id="c2")]),
+        Reply(text="Вот."),
+    ])
+    provider = _ScriptedProvider("groq", [chat])
+    registry = {
+        "list_show": AsyncMock(return_value={"rendered": "◻️ хлеб, 2 шт."}),
+        "get_facts": AsyncMock(return_value={"facts": {}}),
+    }
+    record = TurnRecord()
+
+    result = await run_tool_loop(
+        _fallback((provider, "m")), "покажи список", registry, record=record
+    )
+
+    assert result == "◻️ хлеб, 2 шт."
+    assert record.verbatim == "◻️ хлеб, 2 шт."

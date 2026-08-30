@@ -109,11 +109,23 @@ class TurnRecord:
 
     def record(self, name: str, result) -> None:
         self.tools_called.append(name)
-        # Latest wins: it reflects the freshest state, and it is the last
-        # thing the model itself chose to go and fetch.
         block = verbatim_block(result)
         if block:
+            # Latest wins: it reflects the freshest state, and it is the last
+            # thing the model itself chose to go and fetch.
             self.verbatim = block
+        elif name not in READ_ONLY_TOOLS:
+            # This changed something and rendered nothing, so whatever block
+            # was being held describes the state *before* the change. Sending
+            # it now shows the old state as if it were current.
+            #
+            # Live: asked to make it four loaves, the model called list_show
+            # first (block: "хлеб, 2 шт."), Groq then 429ed mid-turn, gemini
+            # picked it up and called list_add — which updated the row to 4
+            # and returns `say`, not a block. The repeat guard below then
+            # answered with the held block, and the group was told there were
+            # still two.
+            self.verbatim = None
         if isinstance(result, dict):
             said = result.get("say")
             if isinstance(said, str) and said.strip():
