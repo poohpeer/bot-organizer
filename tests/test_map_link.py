@@ -229,3 +229,104 @@ async def test_a_message_without_a_link_says_nothing_about_previews(db_pool):
     await status_command.handle_command(db_pool, telegram_bot, _message(), "status")
 
     assert "disable_web_page_preview" not in telegram_bot.send_message.await_args.kwargs
+
+
+
+def _many_names(count: int) -> list[str]:
+    """Distinct item names that survive bot/item_names.py untouched.
+
+    Two things collapse a long fixture into a short list: a bare numeral is
+    stripped out of a name, so "позиция 5" and "позиция 6" become the same
+    item; and a Cyrillic name is inflected to the nominative and matched by
+    lemma, so invented Russian-looking words merge into each other. A name
+    with no Cyrillic in it is left exactly as written.
+    """
+    return [f"item-{i:03d}-long-enough-to-fill-a-message" for i in range(count)]
+
+
+# --- messages too long for one send ---------------------------------------
+
+def test_a_short_message_is_not_split():
+    from bot.telegram_text import split_for_telegram
+
+    assert split_for_telegram("Ещё не разобрали:\n◻️ хлеб") == ["Ещё не разобрали:\n◻️ хлеб"]
+
+
+def test_a_long_list_is_split_and_nothing_is_lost():
+    """Truncation is not on offer. A list exists to be complete, and a report
+    that silently stops halfway is worse than two messages."""
+    from bot.telegram_text import MAX_MESSAGE_CHARS, split_for_telegram
+
+    listing = "\n".join(f"◻️ позиция номер {i}" for i in range(400))
+
+    chunks = split_for_telegram(listing)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) < MAX_MESSAGE_CHARS for chunk in chunks)
+    assert "\n".join(chunks) == listing
+
+
+def test_the_cut_lands_on_a_line_boundary():
+    """A cut mid-line splits an item in half — and, with HTML, could split an
+    entity, which loses the whole message rather than making it ugly."""
+    from bot.telegram_text import split_for_telegram
+
+    listing = "\n".join(f"◻️ позиция номер {i}" for i in range(400))
+
+    for chunk in split_for_telegram(listing):
+        for line in chunk.split("\n"):
+            assert line == "" or line.startswith("◻️ позиция номер ")
+
+
+def test_one_line_longer_than_a_message_is_cut_by_characters():
+    """Somebody would have to type a 4000-character item name. The
+    alternative is refusing to send anything at all."""
+    from bot.telegram_text import MAX_MESSAGE_CHARS, split_for_telegram
+
+    chunks = split_for_telegram("x" * 9000)
+
+    assert len(chunks) == 3
+    assert all(len(chunk) < MAX_MESSAGE_CHARS for chunk in chunks)
+    assert "".join(chunks) == "x" * 9000
+
+
+async def test_a_long_report_arrives_as_several_messages(db_pool):
+    """Live, this failed with 400 "message is too long", the exception left
+    the handler, and the group saw nothing — the same shape as a bot that
+    quietly says nothing at all."""
+    from bot.telegram_text import MAX_MESSAGE_CHARS
+
+    await db_pool.execute(
+        "INSERT INTO chats (chat_id, title) VALUES (-100, 'Chat') ON CONFLICT DO NOTHING"
+    )
+    active = await session.start_session(db_pool, chat_id=-100, activity_type="picnic")
+    names = _many_names(200)
+    for name in names:
+        await core_tools.list_add(db_pool, active["id"], name)
+    telegram_bot = AsyncMock()
+
+    await status_command.handle_command(db_pool, telegram_bot, _message(), "status")
+
+    calls = telegram_bot.send_message.await_args_list
+    assert len(calls) > 1, "one send would have been refused"
+    assert all(len(c.kwargs["text"]) < MAX_MESSAGE_CHARS for c in calls)
+    assert all(c.kwargs["chat_id"] == -100 for c in calls)
+    # Every item is somewhere in what was sent.
+    everything = "".join(c.kwargs["text"] for c in calls)
+    assert all(name in everything for name in names), "nothing may be dropped"
+
+
+async def test_a_split_message_keeps_its_html_settings(db_pool):
+    """Each part is its own message, so each needs the mode the whole one
+    would have had — a chunk sent as plain text shows raw tags."""
+    active = await _with_place(db_pool)
+    for name in _many_names(200):
+        await core_tools.list_add(db_pool, active["id"], name)
+    telegram_bot = AsyncMock()
+
+    await status_command.handle_command(db_pool, telegram_bot, _message(), "status")
+
+    calls = telegram_bot.send_message.await_args_list
+    assert len(calls) > 1
+    assert all(c.kwargs["parse_mode"] == "HTML" for c in calls)
+    assert all(c.kwargs["disable_web_page_preview"] is True for c in calls)

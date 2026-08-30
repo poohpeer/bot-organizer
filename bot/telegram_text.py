@@ -76,6 +76,57 @@ def strip_links(text: str) -> str:
     return _MARKER.sub(lambda m: m.group(2), text)
 
 
+# Telegram refuses a message longer than this with 400 "message is too long".
+# Nothing caught that: the exception left the handler, the group saw nothing,
+# and the only trace was a line in the log — the same shape as a bot that
+# quietly says nothing at all.
+MAX_MESSAGE_CHARS = 4096
+
+# Measured on the escaped text, since "&" becomes "&amp;" on the way out and
+# a report full of ampersands would otherwise sail past the check and be
+# refused anyway. A little headroom rather than exactly 4096: an entity
+# straddling the boundary is worth avoiding, and nobody misses 96 characters.
+_SPLIT_AT = MAX_MESSAGE_CHARS - 96
+
+
+def split_for_telegram(text: str, limit: int = _SPLIT_AT) -> list[str]:
+    """One message per chunk, cut at line boundaries.
+
+    Lines are the seam because everything long here is a list: the shopping
+    list, the roster, the status report. A cut mid-line splits an item in
+    half, and — with HTML — could split an entity, which loses the whole
+    message rather than making it ugly. Every anchor this module writes lives
+    inside one line, so a line boundary is always safe.
+
+    A single line longer than the limit is cut by characters. That case needs
+    somebody to have typed a 4000-character item name; the alternative is
+    refusing to send anything at all.
+
+    Truncation is not on offer. A list exists to be complete, and a report
+    that silently stops halfway is worse than two messages.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 async def send_text(telegram_bot, chat_id: int, text: str, **kwargs):
     """send_message, with HTML only when the text actually needs it.
 
@@ -85,10 +136,17 @@ async def send_text(telegram_bot, chat_id: int, text: str, **kwargs):
     screen of it, pushed under a status report whose whole point is to be
     read at a glance. The link is already a link; the card adds a second,
     larger copy of it.
+
+    Too long for one message and it goes as several, in order. Returns the
+    last one sent, which is what a single-message caller expects back.
     """
-    if has_link(text):
-        return await telegram_bot.send_message(
-            chat_id=chat_id, text=to_html(text), parse_mode="HTML",
-            disable_web_page_preview=True, **kwargs
+    html = has_link(text)
+    body = to_html(text) if html else text
+    extra = {"parse_mode": "HTML", "disable_web_page_preview": True} if html else {}
+
+    sent = None
+    for chunk in split_for_telegram(body):
+        sent = await telegram_bot.send_message(
+            chat_id=chat_id, text=chunk, **extra, **kwargs
         )
-    return await telegram_bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    return sent

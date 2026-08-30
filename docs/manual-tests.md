@@ -426,11 +426,12 @@ Nothing here can be faked; the clock has to pass.
 
 - **Given** a list of 40+ items
 - **When** you send `/status`
-- **Then** the message **arrives** and is readable
-- **Why not automatable** **known gap**: nothing splits a message at
-  Telegram's 4096-character limit, so a long enough report is rejected by the
-  API and the group sees nothing at all. This case exists to find where that
-  line falls in practice
+- **Then** the whole list arrives — as several messages if it does not fit
+  one — and no item is missing from the end
+- **Why not automatable** Telegram enforces the 4096-character limit, and
+  only Telegram can say whether a real message crossed it. Until #84 nothing
+  split at all: the send was refused with 400, the exception left the
+  handler, and the group saw nothing
 
 ### 7.2 Item names survive as typed
 
