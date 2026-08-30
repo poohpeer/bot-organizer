@@ -105,12 +105,69 @@ is required after changing them.
 ## Notes
 
 - PostgreSQL data lives on the `bot-organizer-postgres-data` PVC and survives
-  workload restarts. Deleting the PVC deletes the database.
+  workload restarts. Deleting the PVC deletes the database — see "Backing the
+  database up" below, which is the only copy there is.
 - `replicas: 1` and `strategy: Recreate` are intentional. Telegram long
   polling allows only one active bot process for the same token; two bot
   replicas cause `409 Conflict` errors.
 - No Service or Ingress is needed for the bot or worker. PostgreSQL is
   available inside the namespace as `bot-organizer-postgres:5432`.
+
+## Backing the database up
+
+There is one copy of this data and the PVC is the only thing holding it. A
+`local-path` volume lives inside the kind node container: it survives a pod
+restart and a cluster stop, and goes with the node container if that is ever
+recreated — a Docker Desktop reset or `kind delete cluster` takes the
+database with it. Take a dump before anything that touches the cluster
+itself.
+
+The dump is written inside the pod and then pulled out through base64. On
+this homelab `kubectl` does not run locally — it runs on the Windows box over
+SSH through PowerShell, which mangles a binary stream but leaves ASCII alone.
+Substitute whatever wrapper reaches your cluster for `kubectl` below.
+
+```bash
+DUMP=bot-organizer-$(date +%F).dump
+
+kubectl exec bot-organizer-postgres-0 -- \
+  sh -c "pg_dump -U \"\$POSTGRES_USER\" -d bot_organizer -Fc -f /tmp/$DUMP"
+
+mkdir -p ~/backups/bot-organizer
+kubectl exec bot-organizer-postgres-0 -- base64 /tmp/$DUMP \
+  | tr -d '\r\n ' | base64 -d > ~/backups/bot-organizer/$DUMP
+
+# Prove the copy is byte-identical before trusting it.
+kubectl exec bot-organizer-postgres-0 -- md5sum /tmp/$DUMP
+md5sum ~/backups/bot-organizer/$DUMP
+```
+
+The password never appears: `$POSTGRES_USER` is expanded inside the pod, the
+same way the probes do it.
+
+### Restoring
+
+An untested dump is not a backup. Restore it into a scratch database and
+compare, rather than assuming:
+
+```bash
+pg_restore -U postgres -d restore_check --no-owner ~/backups/bot-organizer/$DUMP
+```
+
+`--no-owner` matters when restoring anywhere but this cluster. The dump
+carries `ALTER TABLE ... OWNER TO bot_organizer`, and without that role the
+restore reports 20 errors — ownership only, no data lost, but alarming enough
+to look like a failed restore when it is not.
+
+Compare the restored copy against the live one. Row counts alone would miss
+mojibake, so checksum the text too — most of this database is Russian:
+
+```sql
+select md5(string_agg(key||value, chr(10) order by id)) from facts;
+```
+
+Verified 2026-08-30: a dump of the live database restored on an unrelated
+`postgres:16` with identical row counts and an identical checksum.
 
 ## Two deliberate choices
 
