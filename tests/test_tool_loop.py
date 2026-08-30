@@ -360,3 +360,65 @@ async def test_a_result_without_an_explanation_still_relays_the_block():
     )
 
     assert answer == rendered
+
+
+async def test_an_http_providers_tool_calls_are_recorded():
+    """The turn record is shared with bot/mcp_server.py, so the router sees
+    one turn whichever provider served it.
+
+    Every test above passes `record=None`, so the recording line was never
+    executed by any of them — and it referred to a name that does not exist.
+    Live, that made every tool-using turn on groq or gemini answer «Не понял,
+    переформулируй, пожалуйста»:
+
+        File "/app/bot/ai/tool_loop.py", line 93, in run_tool_loop
+          record.record(call.name, result)
+        NameError: name 'call' is not defined
+
+    It went unseen for a day because the chain kept landing on claude, whose
+    tool calls arrive over MCP and never reach this branch at all.
+    """
+    from bot.turn_outcome import TurnRecord
+
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[
+            ToolCall(name="list_show", args={"session_id": 1}, id="c1"),
+            ToolCall(name="list_add", args={"session_id": 1, "name": "хлеб"}, id="c2"),
+        ]),
+        # Carries the rendered block, so honour_verbatim stays out of the
+        # way and this test is about the record and nothing else.
+        Reply(text="Готово: ◻️ хлеб"),
+    ])
+    provider = _ScriptedProvider("groq", [chat])
+    registry = {
+        "list_show": AsyncMock(return_value={"rendered": "◻️ хлеб"}),
+        "list_add": AsyncMock(return_value={"status": "ok", "say": "хлеб: было 2, стало 4"}),
+    }
+    record = TurnRecord()
+
+    result = await run_tool_loop(
+        _fallback((provider, "m")), "добавь хлеб", registry, record=record
+    )
+
+    assert result == "Готово: ◻️ хлеб"
+    assert record.tools_called == ["list_show", "list_add"]
+    assert record.changed_something() is True
+    assert record.verbatim == "◻️ хлеб"
+    assert record.say == "хлеб: было 2, стало 4"
+
+
+async def test_no_record_is_still_allowed():
+    """The router always passes one, but the loop is called without it in
+    plenty of places — a missing record must not be an error."""
+    chat = _ScriptedChat([
+        Reply(text="", tool_calls=[ToolCall(name="list_show", args={}, id="c1")]),
+        Reply(text="Готово."),
+    ])
+    provider = _ScriptedProvider("groq", [chat])
+
+    result = await run_tool_loop(
+        _fallback((provider, "m")), "что в списке?",
+        {"list_show": AsyncMock(return_value={"items": []})},
+    )
+
+    assert result == "Готово."

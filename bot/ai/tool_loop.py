@@ -85,7 +85,7 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
             return verbatim
         previous_request = requested
         results = [(call, await _call_tool(registry, call)) for call in reply.tool_calls]
-        for _call, result in results:
+        for call, result in results:
             verbatim = _verbatim_block(result) or verbatim
             # The same record a CLI's own tool calls write to through
             # bot/mcp_server.py, so the router sees one turn either way.
