@@ -51,14 +51,25 @@ exercises Telegram's real answer.
 - **When** you send `/admin` in **G**
 - **Then** a menu appears with the buttons «Порядок моделей» and «Закрыть»
 
-### 1.2 An ordinary member is refused
+### 1.2 The slash menu offers /admin to administrators only
+
+- **Given** you are an administrator of **G** and **A2** is not
+- **When** each of you types `/` in **G** and reads the suggestions
+- **Then** you are offered `/status`, `/list`, `/reminders` and `/admin`;
+  **A2** is offered the first three only, and no `/ask_everyone` for either
+  of you
+- **Why not automatable** Telegram decides who matches which command scope,
+  and it caches the menu per client — the answer is only visible in a real
+  client
+
+### 1.3 An ordinary member is refused
 
 - **Given** **A2** is a member of **G** and not an administrator
 - **When** **A2** sends `/admin` in **G**
 - **Then** the reply is «Настройки доступны администраторам чата», with no
   buttons attached
 
-### 1.3 A member cannot press an administrator's menu
+### 1.4 A member cannot press an administrator's menu
 
 - **Given** you opened `/admin` in **G** and the menu is still on screen
 - **When** **A2** presses any button on it
@@ -67,7 +78,7 @@ exercises Telegram's real answer.
 - **Why not automatable** the test mocks `get_chat_member`, so it asserts our
   branch rather than Telegram's answer
 
-### 1.4 Losing admin rights takes effect at once
+### 1.5 Losing admin rights takes effect at once
 
 - **Given** you opened `/admin` while an administrator
 - **When** you demote yourself in **G**, then press a button on that same
@@ -76,21 +87,22 @@ exercises Telegram's real answer.
 - **Why not automatable** the rule being checked is "asked of Telegram every
   time, never cached", and only Telegram can change its answer mid-menu
 
-### 1.5 Closing the menu leaves nothing behind
+### 1.6 Closing the menu leaves nothing behind
 
 - **Given** an open `/admin` menu in **G**
 - **When** you press «Закрыть»
 - **Then** the menu message disappears from the chat entirely — no «Закрыто.»
   and no empty message where it was
 
-### 1.6 Any member may read the status
+### 1.7 Any member may read the state
 
-- **Given** **A2** is an ordinary member of **G**
-- **When** **A2** sends `/status`, then `/list`
-- **Then** both answer in the chat: `/status` with place, date, participants,
-  list and reminders; `/list` with the shopping list alone
+- **Given** **A2** is an ordinary member of **G**, and something is scheduled
+- **When** **A2** sends `/status`, then `/list`, then `/reminders`
+- **Then** all three answer in the chat: `/status` with place, date,
+  participants, list and reminders; `/list` with the shopping list alone;
+  `/reminders` with the schedule alone
 
-### 1.7 A group promoted to a supergroup
+### 1.8 A group promoted to a supergroup
 
 - **Given** **G** has an active session
 - **When** you convert **G** to a supergroup (Telegram does this by itself

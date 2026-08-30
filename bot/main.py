@@ -5,7 +5,10 @@ turns every incoming update into a call into `bot.router`.
 import logging
 import os
 
-from telegram import Update
+from telegram import (
+    BotCommand, BotCommandScopeAllChatAdministrators, BotCommandScopeDefault,
+    Update,
+)
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler,
@@ -163,6 +166,32 @@ async def route_membership(pool, telegram_bot, chat_member_updated, bot_id, bot_
             await session.close_session(pool, active["id"], reason="explicit_stop")
 
 
+# What the slash menu offers, in the order it shows them. Descriptions are
+# what a person sees while typing, so they say what they get rather than
+# naming the machinery.
+#
+# /admin is offered to administrators only. That is the menu, not the gate:
+# admin.is_chat_admin still asks Telegram on the command and again on every
+# button press, because a command absent from the menu can still be typed.
+# Hiding it stops it being suggested to ten people who cannot use it.
+PUBLIC_COMMANDS = [
+    BotCommand("status", "Что известно о встрече"),
+    BotCommand("list", "Список покупок"),
+    BotCommand("reminders", "Что запланировано"),
+]
+ADMIN_COMMANDS = PUBLIC_COMMANDS + [
+    BotCommand("admin", "Настройки бота"),
+]
+
+# Scope -> what that scope sees. Telegram falls back from the narrowest
+# matching scope outwards, so administrators get ADMIN_COMMANDS and everyone
+# else falls through to the default.
+COMMAND_SCOPES = (
+    (BotCommandScopeDefault(), PUBLIC_COMMANDS),
+    (BotCommandScopeAllChatAdministrators(), ADMIN_COMMANDS),
+)
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bot_data = context.bot_data
     await route_update(
@@ -192,6 +221,14 @@ async def on_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await status_command.handle_command(
         context.bot_data["pool"], context.bot, update.message, "list"
+    )
+
+
+async def on_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    await status_command.handle_command(
+        context.bot_data["pool"], context.bot, update.message, "reminders"
     )
 
 
@@ -229,6 +266,21 @@ async def post_init(app: Application) -> None:
     app.bot_data["bot_username"] = me.username
     log.info("Resolved bot identity: id=%s username=%s", me.id, me.username)
 
+    # Registered from code, not from BotFather. Telegram keeps whatever was
+    # set last, forever and invisibly: the only command it was offering was
+    # /ask_everyone, typed into BotFather at some point and backed by nothing
+    # in this repository — so the slash menu advertised a command that did
+    # nothing and hid three that work. set_my_commands replaces the whole
+    # list, which is what makes this the single source.
+    try:
+        for scope, commands in COMMAND_SCOPES:
+            await app.bot.set_my_commands(commands, scope=scope)
+        log.info("Registered the command list for %d scopes", len(COMMAND_SCOPES))
+    except Exception:
+        # A failure here costs autocomplete, not the bot. Starting anyway
+        # beats refusing to run because a cosmetic call was rate limited.
+        log.warning("Could not register the command list", exc_info=True)
+
     # Started here rather than as its own process: the endpoint dispatches
     # into the same registry and the same pool this one already holds, and a
     # second process would need its own copy of both. Kept on the runner so
@@ -264,6 +316,7 @@ def main() -> None:
     )
     app.add_handler(CommandHandler("status", on_status))
     app.add_handler(CommandHandler("list", on_list))
+    app.add_handler(CommandHandler("reminders", on_reminders))
     app.add_handler(CommandHandler("admin", on_admin))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^adm:"))
     app.add_handler(CallbackQueryHandler(on_pick_chat, pattern=r"^dm:"))

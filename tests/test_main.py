@@ -175,6 +175,89 @@ def test_the_read_only_commands_are_registered():
     assert 'on_pick_chat, pattern=r"^dm:"' in source
 
 
+def test_the_slash_menu_offers_exactly_the_commands_that_exist():
+    """Telegram keeps whatever was set last, forever and invisibly. The only
+    command it offered was /ask_everyone — typed into BotFather at some point,
+    backed by nothing here — so the menu advertised a command that did nothing
+    and hid three that work.
+
+    Asserted against the handlers rather than a second list, since a copy is
+    how the two drifted apart in the first place.
+    """
+    import inspect
+    import re
+
+    registered = {c.command for _scope, cmds in main.COMMAND_SCOPES for c in cmds}
+    handled = set(re.findall(r'CommandHandler\("(\w+)"', inspect.getsource(main.main)))
+
+    assert registered == handled, "the slash menu and the handlers must be the same set"
+    assert all(c.description for _s, cmds in main.COMMAND_SCOPES for c in cmds), \
+        "a command with no description is a blank line in the menu"
+
+
+def test_admin_is_offered_to_administrators_only():
+    """The menu, not the gate: admin.is_chat_admin still asks Telegram on the
+    command and again on every button press, because a command absent from
+    the menu can still be typed. Hiding it stops it being suggested to ten
+    people who cannot use it."""
+    from telegram import BotCommandScopeAllChatAdministrators, BotCommandScopeDefault
+
+    by_scope = {type(scope): {c.command for c in cmds}
+                for scope, cmds in main.COMMAND_SCOPES}
+
+    assert "admin" not in by_scope[BotCommandScopeDefault]
+    assert "admin" in by_scope[BotCommandScopeAllChatAdministrators]
+    # Everything an ordinary member gets, an administrator gets too.
+    assert by_scope[BotCommandScopeDefault] <= by_scope[BotCommandScopeAllChatAdministrators]
+
+
+async def test_startup_actually_sends_the_command_list(monkeypatch):
+    """The list being right is half of it. Removing the set_my_commands call
+    left every other test green while Telegram kept offering /ask_everyone —
+    the same "defined but never wired" gap the location branch had."""
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(bot=AsyncMock(), bot_data={})
+    app.bot.get_me.return_value = SimpleNamespace(id=BOT_ID, username=BOT_USERNAME)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
+    monkeypatch.setattr(main.db_pool_module, "create_pool", AsyncMock())
+    monkeypatch.setattr(main.db_pool_module, "init_db", AsyncMock())
+    monkeypatch.setattr(main.mcp_server, "serve", AsyncMock())
+    monkeypatch.setattr(main.router, "set_grant_store", lambda store: None)
+
+    await main.post_init(app)
+
+    calls = app.bot.set_my_commands.await_args_list
+    assert len(calls) == len(main.COMMAND_SCOPES), "every scope has to be sent"
+    by_scope = {type(c.kwargs["scope"]): [b.command for b in c.args[0]] for c in calls}
+
+    from telegram import BotCommandScopeAllChatAdministrators, BotCommandScopeDefault
+
+    assert by_scope[BotCommandScopeDefault] == ["status", "list", "reminders"]
+    assert by_scope[BotCommandScopeAllChatAdministrators] == [
+        "status", "list", "reminders", "admin",
+    ]
+
+
+async def test_a_failed_registration_does_not_stop_the_bot(monkeypatch):
+    """It costs autocomplete, not the bot. Refusing to start because a
+    cosmetic call was rate limited would be the worse trade."""
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(bot=AsyncMock(), bot_data={})
+    app.bot.get_me.return_value = SimpleNamespace(id=BOT_ID, username=BOT_USERNAME)
+    app.bot.set_my_commands.side_effect = RuntimeError("Too Many Requests")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
+    monkeypatch.setattr(main.db_pool_module, "create_pool", AsyncMock())
+    monkeypatch.setattr(main.db_pool_module, "init_db", AsyncMock())
+    monkeypatch.setattr(main.mcp_server, "serve", AsyncMock())
+    monkeypatch.setattr(main.router, "set_grant_store", lambda store: None)
+
+    await main.post_init(app)
+
+    assert app.bot_data["bot_id"] == BOT_ID, "startup finished regardless"
+
+
 # --- new_chat_members -------------------------------------------------------
 
 async def _ensure_chat(db_pool, chat_id=-100):

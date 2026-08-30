@@ -1,14 +1,31 @@
 # Commands
 
-## `/status` and `/list`
+The slash menu is registered from `bot/main.py::BOT_COMMANDS` on every
+startup, not from BotFather. Telegram keeps whatever was set last, forever
+and invisibly: the only command it offered was `/ask_everyone`, typed into
+BotFather at some point and backed by nothing in this repository — so the
+menu advertised a command that did nothing and hid three that work.
+`set_my_commands` replaces the whole list, which is what makes the code the
+single source. A test asserts the list and the handlers are the same set.
+
+`/admin` is offered to chat administrators only, through Telegram's
+`BotCommandScopeAllChatAdministrators`; everyone else sees `/status`,
+`/list` and `/reminders`. That is the **menu**, not the gate — `is_chat_admin` still asks
+Telegram on the command and again on every button press, because a command
+absent from the menu can still be typed. Hiding it stops it being suggested
+to ten people who cannot use it.
+
+
+## `/status`, `/list` and `/reminders`
 
 `/status` posts the full organizing report — place, date, participants,
-shopping list, reminders. `/list` posts just the shopping list. Any member
-may use either.
+shopping list, reminders. `/list` posts just the shopping list, `/reminders`
+just the schedule. Any member may use any of them.
 
-They are the same fixed blocks `bot.tools.composed.event_status` and
-`bot.tools.core.list_show` build, so a command and the model's answer can
-never drift apart. They spend **no model call**: asking "как дела с
+They are the same fixed blocks `bot.tools.composed.event_status`,
+`bot.tools.core.list_show` and `bot.status_render.render_reminders` build, so
+a command and the model's answer can never drift apart — a test asserts the
+`/reminders` output appears verbatim inside `/status`. They spend **no model call**: asking "как дела с
 организацией" costs a turn of the primary chain and depends on the model
 relaying the report verbatim — `bot/turn_outcome.py` exists to force that,
 which is itself evidence it does not always happen.
