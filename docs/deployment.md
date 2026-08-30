@@ -181,6 +181,17 @@ environment and is not — a bad value there breaks the closing-question query.
 `QUIET_UNTIL_HOUR` / `QUIET_FROM_HOUR` bound the hours, local to each chat, in
 which the bot may start a conversation on its own.
 
+## `BOT_OWNER_ID`
+
+One Telegram user id. That person counts as an administrator for `/admin` in
+every chat the bot was added to, whether or not they run that chat — the
+models it calls are spent from their account, so the provider chain is a
+decision about their money.
+
+Checked before Telegram, so it cannot be lost to a failed `get_chat_member`.
+Leave it unset in a deployment nobody owns personally: then only a chat's own
+administrators qualify. A malformed value is treated as unset.
+
 ## Group title/description sync
 
 `GROUP_SYNC_INTERVAL_SECONDS` (default `60`) caps how often the worker calls

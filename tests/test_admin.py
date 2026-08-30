@@ -247,3 +247,51 @@ async def test_a_menu_that_can_be_neither_deleted_nor_edited_does_not_raise(db_p
     await admin.handle_callback(db_pool, bot, query)
 
     bot.send_message.assert_not_awaited()
+
+
+# --- the bot's owner ------------------------------------------------------
+
+async def test_the_owner_is_an_administrator_everywhere(db_pool, monkeypatch):
+    """The models this bot calls are spent from the owner's account, so the
+    provider chain is a decision about their money — they configure it in
+    every chat the bot was added to, whether or not they run that chat."""
+    monkeypatch.setenv("BOT_OWNER_ID", "91237884")
+    bot = _bot(status="member")
+
+    assert await admin.is_chat_admin(bot, -100, 91237884) is True
+
+
+async def test_the_owner_is_not_asked_about(db_pool, monkeypatch):
+    """Checked before Telegram, so the answer cannot be lost to a call that
+    fails — the one thing this rule must never depend on."""
+    monkeypatch.setenv("BOT_OWNER_ID", "91237884")
+    bot = AsyncMock()
+    bot.get_chat_member.side_effect = RuntimeError("telegram is unwell")
+
+    assert await admin.is_chat_admin(bot, -100, 91237884) is True
+    bot.get_chat_member.assert_not_awaited()
+
+
+async def test_everyone_else_is_still_asked_about(db_pool, monkeypatch):
+    monkeypatch.setenv("BOT_OWNER_ID", "91237884")
+    bot = _bot(status="member")
+
+    assert await admin.is_chat_admin(bot, -100, 7) is False
+    bot.get_chat_member.assert_awaited_once()
+
+
+async def test_no_owner_configured_means_no_owner(db_pool, monkeypatch):
+    """A deployment nobody owns personally: only a chat's own administrators
+    qualify. Defaulting to somebody would hand a stranger every chat."""
+    monkeypatch.delenv("BOT_OWNER_ID", raising=False)
+    bot = _bot(status="member")
+
+    assert await admin.is_chat_admin(bot, -100, 91237884) is False
+
+
+async def test_a_malformed_owner_id_is_no_owner(db_pool, monkeypatch):
+    """Rather than crashing every permission check on a typo in a ConfigMap."""
+    monkeypatch.setenv("BOT_OWNER_ID", "не число")
+    bot = _bot(status="member")
+
+    assert await admin.is_chat_admin(bot, -100, 91237884) is False

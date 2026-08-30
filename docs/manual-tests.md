@@ -62,14 +62,25 @@ exercises Telegram's real answer.
   and it caches the menu per client — the answer is only visible in a real
   client
 
-### 1.3 An ordinary member is refused
+### 1.3 The bot's owner is an administrator anywhere
+
+- **Given** a group with the bot in it where **you are not an administrator**,
+  and `BOT_OWNER_ID` is your id
+- **When** you type `/admin` by hand there
+- **Then** the settings menu opens
+- **Why not automatable** it turns on Telegram's answer about your real role
+  in a real chat, which every test mocks. Note that `/admin` is **not**
+  suggested after `/` there — the menu goes by chat role, not by who owns the
+  bot
+
+### 1.4 An ordinary member is refused
 
 - **Given** **A2** is a member of **G** and not an administrator
 - **When** **A2** sends `/admin` in **G**
 - **Then** the reply is «Настройки доступны администраторам чата», with no
   buttons attached
 
-### 1.4 A member cannot press an administrator's menu
+### 1.5 A member cannot press an administrator's menu
 
 - **Given** you opened `/admin` in **G** and the menu is still on screen
 - **When** **A2** presses any button on it
@@ -78,7 +89,7 @@ exercises Telegram's real answer.
 - **Why not automatable** the test mocks `get_chat_member`, so it asserts our
   branch rather than Telegram's answer
 
-### 1.5 Losing admin rights takes effect at once
+### 1.6 Losing admin rights takes effect at once
 
 - **Given** you opened `/admin` while an administrator
 - **When** you demote yourself in **G**, then press a button on that same
@@ -87,14 +98,14 @@ exercises Telegram's real answer.
 - **Why not automatable** the rule being checked is "asked of Telegram every
   time, never cached", and only Telegram can change its answer mid-menu
 
-### 1.6 Closing the menu leaves nothing behind
+### 1.7 Closing the menu leaves nothing behind
 
 - **Given** an open `/admin` menu in **G**
 - **When** you press «Закрыть»
 - **Then** the menu message disappears from the chat entirely — no «Закрыто.»
   and no empty message where it was
 
-### 1.7 Any member may read the state
+### 1.8 Any member may read the state
 
 - **Given** **A2** is an ordinary member of **G**, and something is scheduled
 - **When** **A2** sends `/status`, then `/list`, then `/reminders`
@@ -102,7 +113,7 @@ exercises Telegram's real answer.
   participants, list and reminders; `/list` with the shopping list alone;
   `/reminders` with the schedule alone
 
-### 1.8 A group promoted to a supergroup
+### 1.9 A group promoted to a supergroup
 
 - **Given** **G** has an active session
 - **When** you convert **G** to a supergroup (Telegram does this by itself
