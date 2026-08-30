@@ -457,9 +457,14 @@ Nothing here can be faked; the clock has to pass.
 - **Given** a person whose stated zone differs from the chat's
 - **When** they ask for a reminder «через 5 минут»
 - **Then** it arrives five minutes later — not five minutes plus the offset
-- **Why not automatable** it depends on what the model actually sends for
-  `remind_at`; the guard is the system instruction, and only a live turn
-  proves the model followed it
+- **Why not automatable** only the model's half is left. That an instant
+  carrying an offset is stored as that instant, and is never re-anchored when
+  somebody later states a zone, is covered by
+  `test_an_instant_sent_with_an_offset_is_kept_as_that_instant` and
+  `test_an_instant_survives_the_owner_later_saying_where_they_are`. What no
+  test can show is whether the model sends the offset at all — the guard
+  there is the system instruction, and only a live turn proves it was
+  followed
 
 ---
 
