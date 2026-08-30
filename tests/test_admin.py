@@ -183,6 +183,18 @@ async def test_pressing_it_again_takes_it_back_out(db_pool):
     assert await settings.get_provider_chain(db_pool, -100) == list(ai_client.PROXY_MODELS)
 
 
+def test_the_reset_button_says_what_it_does():
+    """It said "Очистить", and only one of that word's two readings is ever
+    what anyone wants. Pressed in the sense of "done", it threw away the
+    order just built — which looks exactly like the setting failing to
+    survive a restart, and was reported as such."""
+    _, keyboard = admin.chain_view(list(ai_client.PROXY_MODELS)[:2])
+
+    labels = [button.text for row in keyboard.inline_keyboard for button in row]
+    assert "По умолчанию" in labels
+    assert "Очистить" not in labels
+
+
 async def test_clearing_deletes_the_row_rather_than_storing_a_copy(db_pool):
     bot = _bot()
     await settings.set_provider_chain(db_pool, -100, [ai_client.PROXY_MODELS[0]])
@@ -190,3 +202,48 @@ async def test_clearing_deletes_the_row_rather_than_storing_a_copy(db_pool):
     await admin.handle_callback(db_pool, bot, _Query(admin._RESET))
 
     assert await settings.get_stored_chain(db_pool, -100) is None
+
+
+# --- closing it -----------------------------------------------------------
+
+async def test_closing_the_menu_leaves_nothing_behind(db_pool):
+    """It used to write "Закрыто." over itself — a message about the bot's own
+    furniture, answering a question nobody asked and staying in the chat
+    forever, next to the plans people came to read."""
+    bot = _bot()
+    query = _Query(admin._CLOSE)
+    query.delete_message = AsyncMock()
+
+    await admin.handle_callback(db_pool, bot, query)
+
+    query.delete_message.assert_awaited_once()
+    query.edit_message_text.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
+
+
+async def test_a_menu_too_old_to_delete_at_least_loses_its_buttons(db_pool):
+    """A bot may only delete its own message for 48 hours. A menu that
+    outlives that must still stop being pressable — and still without writing
+    anything new."""
+    bot = _bot()
+    query = _Query(admin._CLOSE)
+    query.delete_message = AsyncMock(side_effect=RuntimeError("message can't be deleted"))
+    query.edit_message_reply_markup = AsyncMock()
+
+    await admin.handle_callback(db_pool, bot, query)
+
+    assert query.edit_message_reply_markup.await_args.kwargs["reply_markup"] is None
+    query.edit_message_text.assert_not_awaited()
+
+
+async def test_a_menu_that_can_be_neither_deleted_nor_edited_does_not_raise(db_pool):
+    """Whatever went wrong, it is the bot's own menu — not worth turning into
+    an error the group sees."""
+    bot = _bot()
+    query = _Query(admin._CLOSE)
+    query.delete_message = AsyncMock(side_effect=RuntimeError("nope"))
+    query.edit_message_reply_markup = AsyncMock(side_effect=RuntimeError("also nope"))
+
+    await admin.handle_callback(db_pool, bot, query)
+
+    bot.send_message.assert_not_awaited()

@@ -706,9 +706,18 @@ async def test_an_ordinary_tool_loop_failure_still_gets_the_generic_reply(db_poo
 
 
 def test_every_unavailable_message_offers_to_try_later():
-    """Sarcasm is the tone, but the line still has to tell the user what to do."""
+    """Sarcasm is the tone, but the line still has to tell the user what to
+    do. On its own the joke leaves nobody knowing whether to wait or give
+    up."""
     for message in router._AI_UNAVAILABLE_MESSAGES:
         assert any(word in message.lower() for word in ("позже", "позднее", "через", "времени"))
+
+
+def test_the_unavailable_line_is_the_groups_own_words():
+    """Asked for by the user, verbatim. A bot that says the same thing every
+    time it breaks is easier to recognise than one that is inventive about
+    it — which is why this is one line and not a rotating set."""
+    assert router._AI_UNAVAILABLE_MESSAGES == ("Мне временно снесло крышу. Попробуйте позже.",)
 
 
 async def test_the_bot_never_posts_the_words_it_was_told_to_answer_with(db_pool, monkeypatch):

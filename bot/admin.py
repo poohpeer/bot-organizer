@@ -103,7 +103,7 @@ def chain_view(chosen: list[str]) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(f"{badge} {model}", callback_data=f"{_PICK}{position}")])
 
     rows.append([
-        InlineKeyboardButton("Очистить", callback_data=_RESET),
+        InlineKeyboardButton("По умолчанию", callback_data=_RESET),
         InlineKeyboardButton("Назад", callback_data=_MENU),
     ])
     if chosen:
@@ -163,7 +163,7 @@ async def handle_callback(pool, telegram_bot, query) -> None:
 
     if data == _CLOSE:
         await query.answer()
-        await query.edit_message_text("Закрыто.")
+        await _close_menu(query)
         return
 
     if data == _MENU:
@@ -175,7 +175,10 @@ async def handle_callback(pool, telegram_bot, query) -> None:
         # Deleting the row is both "clear the selection" and "back to the
         # default" — with the fallback in settings they are the same state,
         # so the menu offers one button rather than two that look different
-        # and are not.
+        # and are not. It says "По умолчанию" rather than "Очистить" because
+        # only one of those two readings is what anyone wants: a chat that
+        # pressed it expecting "done" lost the order it had just built, and
+        # that looked exactly like the setting failing to persist.
         await settings.reset_provider_chain(pool, chat_id)
         ai_client.forget_chat(chat_id)
         await query.answer(_SAVED)
@@ -205,6 +208,29 @@ async def handle_callback(pool, telegram_bot, query) -> None:
         return
 
     await query.answer()
+
+
+async def _close_menu(query) -> None:
+    """Take the menu away, leaving nothing where it was.
+
+    Deleted rather than edited to say so. "Закрыто." is a message about the
+    bot's own furniture: it answers a question nobody asked and stays in the
+    chat forever, next to the plans people actually came to read.
+
+    A bot may only delete its own message for 48 hours, and not at all
+    without the right in some chats. When that fails the keyboard is taken
+    away instead, so a stale menu cannot be pressed — still without writing
+    anything new.
+    """
+    try:
+        await query.delete_message()
+    except Exception:
+        log.debug("Could not delete the settings menu; dropping its keyboard instead",
+                  exc_info=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            log.debug("Could not drop the menu's keyboard either", exc_info=True)
 
 
 async def _show_chain(pool, chat_id: int, query) -> None:

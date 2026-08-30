@@ -45,17 +45,14 @@ _FALLBACK_MESSAGE = "Не понял, переформулируй, пожалу
 # Shown when every model in the chain is refusing. Deliberately different from
 # _FALLBACK_MESSAGE: "переформулируй" invites the user to retype a message that
 # was perfectly fine, and they would keep retyping while nothing worked. This
-# says the problem is mine and that waiting is the fix. Rotated so a chat that
-# hits it several times in a row doesn't get the same line every time.
+# says the problem is mine and that waiting is the fix.
+#
+# One line, not a rotating set: the group's own words for it, and a bot that
+# says the same thing every time it breaks is easier to recognise than one
+# that is inventive about it. "Попробуйте позже" stays because the joke on its
+# own leaves nobody knowing whether to wait or to give up.
 _AI_UNAVAILABLE_MESSAGES = (
-    "Мой искусственный интеллект временно закончился. Остался только "
-    "естественный, а он у меня, честно говоря, так себе. Попробуйте попозже.",
-    "Все нейросети, которые я знаю, дружно сделали вид, что меня не существует. "
-    "Обидно, но переживу. Напишите через несколько минут.",
-    "Технически я всё ещё здесь. Интеллектуально — уже нет. Дайте мне немного "
-    "времени прийти в себя.",
-    "Нейронка прилегла отдохнуть и меня с собой не позвала. Загляните чуть позже, "
-    "я к тому времени, надеюсь, снова начну соображать.",
+    "Мне временно снесло крышу. Попробуйте позже.",
 )
 
 

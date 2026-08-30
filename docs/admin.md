@@ -79,7 +79,7 @@ takes it out, and everything after it moves up.
 │ ◻️  gemini-3.7-flash           │
 │ …                              │
 ├────────────────────────────────┤
-│  Очистить      │     Назад     │
+│  По умолчанию  │     Назад     │
 └────────────────────────────────┘
 ```
 
@@ -95,10 +95,22 @@ Every model the deployment offers stays listed, chosen or not: a menu that
 hides what you did not pick cannot undo itself. Chosen ones sort to the top
 so the chain reads down the screen.
 
-**Очистить** deletes the chat's row. That is both "clear the selection" and
-"back to the deployment default" — with the fallback below they are the same
-state, so the menu offers one button rather than two that look different and
-are not.
+**Закрыть** deletes the menu message. It used to write "Закрыто." over
+itself — a message about the bot's own furniture, answering a question nobody
+asked and staying in the chat forever, next to the plans people came to read.
+A bot may only delete its own message for 48 hours; an older menu loses its
+keyboard instead, so it cannot be pressed, and still nothing new is written.
+
+**По умолчанию** deletes the chat's row. That is both "clear the selection"
+and "back to the deployment default" — with the fallback below they are the
+same state, so the menu offers one button rather than two that look different
+and are not.
+
+It used to say **Очистить**, and only one of the two readings is ever what
+anyone wants. Pressed in the sense of "done", it threw away the order just
+built — which looks exactly like the setting failing to survive a restart.
+It does survive: the chain lives in `chat_settings`, and one live row was
+still there 17 hours and eight pod restarts after it was saved.
 
 ### Choosing nothing is allowed
 
