@@ -451,6 +451,15 @@ Nothing here can be faked; the clock has to pass.
 - **Then** the place name is readable at a glance and the «🔗 Map» line does
   not wrap into it
 
+### 7.5 A link brings no preview card with it
+
+- **Given** a place with a map link
+- **When** you send `/status`
+- **Then** the report ends at «Напоминания» — no card with a map picture and
+  the coordinates as its title underneath it
+- **Why not automatable** whether Telegram expands a URL is Telegram's
+  decision; a test can only assert the flag we send
+
 ---
 
 ## 8. Cluster

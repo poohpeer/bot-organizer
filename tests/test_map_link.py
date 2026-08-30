@@ -202,3 +202,30 @@ def test_markers_never_reach_a_person_as_control_characters():
 
     assert plain == "Место: Бен\n🔗 Map"
     assert not telegram_text.has_link(plain)
+
+
+async def test_a_message_with_a_link_carries_no_preview_card(db_pool):
+    """Found by running the manual plan. Telegram expanded the maps URL into
+    a card — a picture of the map with the coordinates as its title, half a
+    phone screen of it, pushed under a report whose whole point is being read
+    at a glance. The link is already a link."""
+    await _with_place(db_pool)
+    telegram_bot = AsyncMock()
+
+    await status_command.handle_command(db_pool, telegram_bot, _message(), "status")
+
+    assert telegram_bot.send_message.await_args.kwargs["disable_web_page_preview"] is True
+
+
+async def test_a_message_without_a_link_says_nothing_about_previews(db_pool):
+    """Nothing that works today starts carrying a new argument."""
+    await db_pool.execute(
+        "INSERT INTO chats (chat_id, title) VALUES (-100, 'Chat') ON CONFLICT DO NOTHING"
+    )
+    active = await session.start_session(db_pool, chat_id=-100, activity_type="picnic")
+    await core_tools.remember_fact(db_pool, active["id"], "place", "у Витька на даче")
+    telegram_bot = AsyncMock()
+
+    await status_command.handle_command(db_pool, telegram_bot, _message(), "status")
+
+    assert "disable_web_page_preview" not in telegram_bot.send_message.await_args.kwargs

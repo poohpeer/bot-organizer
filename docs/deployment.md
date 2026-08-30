@@ -304,6 +304,12 @@ thing that turns one into HTML. Two properties keep it safe:
   are the anchors the module writes itself, so entities are balanced by
   construction. A place called `<b>Бен</b> & Co` is shown, not interpreted.
 
+A message carrying a link also goes out with its preview disabled. Telegram
+expands the first URL it finds into a card, and for a maps link that card is
+a picture of the map with the coordinates as its title — half a phone screen
+of it, pushed under a report whose whole point is being read at a glance. The
+link is already a link.
+
 `send_text` is used at the two places a report can leave the process: the
 `/status` and `/list` commands, and the model relaying `event_status`
 verbatim. `strip_links` reduces a marker to its label for everywhere else —
