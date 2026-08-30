@@ -77,9 +77,18 @@ def strip_links(text: str) -> str:
 
 
 async def send_text(telegram_bot, chat_id: int, text: str, **kwargs):
-    """send_message, with HTML only when the text actually needs it."""
+    """send_message, with HTML only when the text actually needs it.
+
+    A message carrying a link also gets its preview turned off. Telegram
+    expands the first URL it finds into a card, and for a maps link that card
+    is a picture of the map with the coordinates as its title — half a phone
+    screen of it, pushed under a status report whose whole point is to be
+    read at a glance. The link is already a link; the card adds a second,
+    larger copy of it.
+    """
     if has_link(text):
         return await telegram_bot.send_message(
-            chat_id=chat_id, text=to_html(text), parse_mode="HTML", **kwargs
+            chat_id=chat_id, text=to_html(text), parse_mode="HTML",
+            disable_web_page_preview=True, **kwargs
         )
     return await telegram_bot.send_message(chat_id=chat_id, text=text, **kwargs)
