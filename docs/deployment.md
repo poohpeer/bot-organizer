@@ -212,6 +212,44 @@ jeweller in Pretoria, the chat became `Africa/Johannesburg`, and the group
 saying "мы в Тель-Авиве" afterwards moved the place but not the zone —
 leaving every reminder an hour out.
 
+### Whose clock a time is read in
+
+Three things can decide it, strongest first:
+
+1. **What the group said about itself** — `chats.timezone` with source
+   `stated`. A group that has said where *it* is has said something the
+   creator's own whereabouts cannot override; the creator may be travelling.
+2. **The group creator's own zone** — `users.timezone` for
+   `chats.creator_user_id`. Learned from `getChatAdministrators` the first
+   time a chat is synced (or the moment the bot is added), and looked up only
+   while `creator_user_id` is NULL: an owner change is rare enough not to be
+   worth an API call on every sync.
+3. **The guess** — `chats.timezone` with source `lookup`.
+
+A person's own zone (`users.timezone`) is only ever set by them saying so —
+`set_timezone` with `whose='me'` ("я в Москве", as against "мы в Москве").
+There is no coordinate lookup for a person: a location someone shares is
+almost always the venue, not where they are standing.
+
+### Personal reminders
+
+A reminder with a `target_user_id` whose owner has stated a zone is read in
+*their* wall clock: «напомни Васе в 9» means nine o'clock where Вася is,
+whatever time it is in the group. `/reminders` renders each line on the clock
+it will actually keep and names the zone when it is not the chat's.
+
+Consequences worth knowing:
+
+- Setting the **group's** zone does not move personal reminders — the group
+  learning where it is says nothing about where Вася is.
+- Someone stating their **own** zone moves everything addressed to them, in
+  every chat, and — if they created the chat and their zone is what it falls
+  back to — that chat's group reminders too.
+- An **interval** ("через 20 минут") means the same instant for everyone. The
+  system instruction tells the model to send those with an explicit offset,
+  which `to_utc` passes through untouched; a bare local time would be re-read
+  in the target's zone.
+
 ## Group title/description sync
 
 `GROUP_SYNC_INTERVAL_SECONDS` (default `60`) caps how often the worker calls

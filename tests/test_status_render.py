@@ -95,3 +95,24 @@ def test_the_whole_report_survives_to_plain_text_unchanged():
     )
 
     assert to_plain_text(report) == report
+
+
+def test_a_reminder_on_another_clock_says_which():
+    """A personal reminder is stored on its owner's clock. Without the zone on
+    the line, "09:00" in a group an hour away reads as simply wrong."""
+    line = render_reminders([
+        {"message": "выезжаем", "next_at": "2026-08-26T09:00:00",
+         "timezone": "Europe/Moscow", "timezone_differs": True, "target": "Вася"},
+    ])
+
+    assert "(Europe/Moscow)" in line
+
+
+def test_a_reminder_on_the_chats_own_clock_is_not_stamped():
+    """Every line carrying the chat's own zone would be noise on every line."""
+    line = render_reminders([
+        {"message": "сбор", "next_at": "2026-08-26T09:00:00",
+         "timezone": "Asia/Jerusalem", "timezone_differs": False, "target": "группа"},
+    ])
+
+    assert "Asia/Jerusalem" not in line

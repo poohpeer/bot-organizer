@@ -5,6 +5,12 @@ So the zone is resolved in layers, cheapest first — an environment default tha
 always works, a per-chat override once anything better is known, and a free
 lookup from the event's coordinates whenever a place gets resolved.
 
+People are not all in the chat's zone, so a person can have one of their own
+(`users.timezone`), and it is used for two things: a reminder addressed to
+them is read in *their* wall clock, and the group creator's zone stands in for
+the whole chat when nobody has stated the chat's. See effective_timezone for
+the full order of precedence.
+
 The important invariant is that conversion happens exactly once, at the point a
 local wall-clock time is written down. Everything stored is absolute UTC, so
 the worker never has to know about zones at all.
@@ -42,40 +48,165 @@ def is_valid_timezone(name) -> bool:
     return True
 
 
-async def stored_timezone(pool, chat_id: int) -> str | None:
-    """The zone actually recorded for this chat, or None if nobody knows yet.
+async def effective_timezone(pool, chat_id: int) -> str | None:
+    """The zone this chat should be read in, or None if nobody knows yet.
 
     Distinct from `chat_timezone`, which always returns something usable: the
     caller needs to tell "we know" from "we are assuming", so the bot can say
     which it is instead of quietly guessing.
+
+    Three sources, strongest first:
+
+    1. What a human said about *this chat* ("мы по Москве"). Nothing outranks
+       a statement made about the group itself.
+    2. The group creator's own stated zone. Whoever made the group is the
+       best available stand-in for where it is, and unlike a place lookup it
+       is a person's word rather than a guess.
+    3. Whatever was guessed from a resolved place's coordinates.
+
+    The creator sits above the guess and below the statement on purpose. A
+    guess is what put a chat in Pretoria because a place called "Бен & Co"
+    resolved to a jeweller there; a creator who has said where they are is
+    strictly better information than that. But a group that has explicitly
+    said where *it* is has said something the creator's own whereabouts
+    cannot override — the creator may simply be travelling.
     """
-    name = await pool.fetchval("SELECT timezone FROM chats WHERE chat_id = $1", chat_id)
+    row = await pool.fetchrow(
+        """
+        SELECT c.timezone, c.timezone_source, u.timezone AS creator_timezone
+        FROM chats c LEFT JOIN users u ON u.user_id = c.creator_user_id
+        WHERE c.chat_id = $1
+        """,
+        chat_id,
+    )
+    if row is None:
+        return None
+    stated = row["timezone"] if row["timezone_source"] == "stated" else None
+    for name in (stated, row["creator_timezone"], row["timezone"]):
+        if name is not None and is_valid_timezone(name):
+            return name
+    return None
+
+
+# The name this was called before a chat had more than one possible source.
+stored_timezone = effective_timezone
+
+
+async def user_timezone(pool, user_id) -> str | None:
+    """The zone this person stated for themselves, or None.
+
+    Only ever set from a human saying so: there is no coordinate lookup here
+    on purpose. A location someone shares is almost always the venue, not
+    where they are standing, so learning a personal zone from one would be
+    guessing about a person — the exact mistake that put a whole chat in
+    South Africa.
+    """
+    if user_id is None:
+        return None
+    name = await pool.fetchval("SELECT timezone FROM users WHERE user_id = $1", user_id)
     return name if name is not None and is_valid_timezone(name) else None
 
 
-async def reanchor_pending_reminders(pool, chat_id: int, name: str) -> int:
-    """Re-interpret reminders that were scheduled under an assumed zone.
+async def set_user_timezone(pool, user_id: int, name: str) -> bool:
+    """Record where a person is. Refuses anything not a real IANA name, and
+    anything Postgres would later choke on, for the same reasons
+    set_chat_timezone does."""
+    if not is_valid_timezone(name) or not await known_to_postgres(pool, name):
+        return False
+    await pool.execute(
+        """
+        INSERT INTO users (user_id, timezone) VALUES ($1, $2)
+        ON CONFLICT (user_id) DO UPDATE SET timezone = EXCLUDED.timezone, updated_at = now()
+        """,
+        user_id, name,
+    )
+    return True
 
-    Recomputed from the stored wall-clock time rather than shifted by an offset
-    delta, so a reminder that straddles a DST change still lands at the hour it
-    was asked for. Only pending ones: something already delivered cannot be
-    un-delivered.
+
+async def set_chat_creator(pool, chat_id: int, user_id: int) -> None:
+    """Remember who created a group, so their zone can stand in for its own.
+
+    Upsert rather than UPDATE: the bot learns this the moment it is added to
+    a group, which can be before the chat has ever been written down. An
+    empty chats row is bookkeeping, not tracking — nothing downstream reads
+    one as consent to organize anything.
+    """
+    await pool.execute(
+        """
+        INSERT INTO chats (chat_id, creator_user_id) VALUES ($1, $2)
+        ON CONFLICT (chat_id) DO UPDATE SET creator_user_id = EXCLUDED.creator_user_id
+        """,
+        chat_id, user_id,
+    )
+
+
+async def chats_created_by(pool, user_id) -> list[int]:
+    """Every chat whose zone this person's own zone might now speak for."""
+    if user_id is None:
+        return []
+    rows = await pool.fetch("SELECT chat_id FROM chats WHERE creator_user_id = $1", user_id)
+    return [r["chat_id"] for r in rows]
+
+
+async def _reanchor(pool, rows, name: str) -> int:
+    """Recompute each reminder's instant from its stored wall clock.
+
+    Recomputed rather than shifted by an offset delta, so a reminder that
+    straddles a DST change still lands at the hour it was asked for. Returns
+    how many actually moved — a row already sitting at the right instant is
+    rewritten harmlessly but is not something to report as corrected.
     """
     tz = ZoneInfo(name)
-    rows = await pool.fetch(
-        """
-        SELECT id, local_time FROM reminders
-        WHERE chat_id = $1 AND status = 'pending'
-          AND local_time IS NOT NULL AND assumed_timezone IS DISTINCT FROM $2
-        """,
-        chat_id, name,
-    )
+    moved = 0
     for row in rows:
+        when = to_utc(row["local_time"], tz)
+        if when != row["remind_at"]:
+            moved += 1
         await pool.execute(
             "UPDATE reminders SET remind_at = $2, assumed_timezone = NULL WHERE id = $1",
-            row["id"], to_utc(row["local_time"], tz),
+            row["id"], when,
         )
-    return len(rows)
+    return moved
+
+
+async def reanchor_pending_reminders(pool, chat_id: int, name: str) -> int:
+    """Re-interpret a chat's pending reminders in a newly-known zone.
+
+    Only pending ones: something already delivered cannot be un-delivered.
+
+    Skips anyone whose own zone decides their reminders: "напомни Васе в 9"
+    means nine o'clock where Вася is, and the chat learning where *it* is
+    says nothing about that. Without the exclusion, setting the group's zone
+    would silently drag every personal reminder onto the group's clock.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT id, local_time, remind_at FROM reminders r
+        WHERE r.chat_id = $1 AND r.status = 'pending' AND r.local_time IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM users u
+              WHERE u.user_id = r.target_user_id AND u.timezone IS NOT NULL
+          )
+        """,
+        chat_id,
+    )
+    return await _reanchor(pool, rows, name)
+
+
+async def reanchor_user_reminders(pool, user_id: int, name: str) -> int:
+    """Re-interpret everything addressed to one person, in every chat.
+
+    Not scoped to a chat on purpose: a person saying where they are corrects
+    their own reminders wherever they were asked for.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT id, local_time, remind_at FROM reminders
+        WHERE target_user_id = $1 AND status = 'pending' AND local_time IS NOT NULL
+        """,
+        user_id,
+    )
+    return await _reanchor(pool, rows, name)
 
 
 async def chat_timezone(pool, chat_id: int) -> ZoneInfo:
@@ -85,11 +216,12 @@ async def chat_timezone(pool, chat_id: int) -> ZoneInfo:
     manual entry) falls back rather than raising: being an hour off is a far
     better failure than the whole reminder path breaking.
     """
-    name = await pool.fetchval("SELECT timezone FROM chats WHERE chat_id = $1", chat_id)
-    if name is not None and is_valid_timezone(name):
-        return ZoneInfo(name)
+    name = await effective_timezone(pool, chat_id)
     if name is not None:
-        log.warning("Chat %s has unusable timezone %r, using %s", chat_id, name, DEFAULT_TIMEZONE)
+        return ZoneInfo(name)
+    stored = await pool.fetchval("SELECT timezone FROM chats WHERE chat_id = $1", chat_id)
+    if stored is not None:
+        log.warning("Chat %s has unusable timezone %r, using %s", chat_id, stored, DEFAULT_TIMEZONE)
     return ZoneInfo(DEFAULT_TIMEZONE)
 
 

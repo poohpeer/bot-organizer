@@ -552,12 +552,14 @@ def test_declared_parameters_match_the_bound_signatures(db_pool):
     only pass what the declaration advertises, so a drifted declaration is
     either a TypeError at call time or a chat_id the model gets to choose.
 
-    send_private_message is the exception: session_id and current_user_id are
-    bound by the router from session/message context, never by the model (see
+    send_private_message and set_timezone are the exceptions: current_user_id
+    is bound by the router from message context, never by the model (see
     bot/router.py's _bind_session_context and _CURRENT_USER_BOUND_TOOLS) — the
-    same reasoning that keeps chat_id off every tool's declaration. The
-    registry here is the *unbound* one, so its real signature still carries
-    both; this map is what excuses that gap from the equality check below.
+    same reasoning that keeps chat_id off every tool's declaration. One picks
+    the recipient of a DM; the other, with whose='me', picks whose timezone
+    moves, and with it every reminder addressed to them. The registry here is
+    the *unbound* one, so the real signatures still carry both; this map is
+    what excuses that gap from the equality check below.
     """
     from unittest.mock import AsyncMock
 
@@ -569,6 +571,7 @@ def test_declared_parameters_match_the_bound_signatures(db_pool):
     }
     router_bound_extra = {
         "send_private_message": {"session_id", "current_user_id"},
+        "set_timezone": {"current_user_id"},
     }
 
     for name, tool in registry.items():

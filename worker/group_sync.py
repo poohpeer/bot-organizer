@@ -54,6 +54,9 @@ async def sync_group_info(pool, telegram_bot) -> dict:
     for row in rows:
         chat_id, session_id = row["chat_id"], row["session_id"]
         try:
+            # Before anything that needs the chat's zone: the creator's own
+            # zone is one of the things that decides it.
+            await group_info.ensure_creator_known(pool, telegram_bot, chat_id)
             info = await group_info.fetch(telegram_bot, chat_id)
             if not info:
                 # Unreachable this pass. info_checked_at is left untouched —

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from telegram.error import Forbidden
 
@@ -744,8 +745,17 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
     # means 9am where the group is. Converted here, once, so everything stored
     # is absolute and the worker never deals with zones.
     chat_id = session_row["chat_id"]
-    known = await timezones.stored_timezone(pool, chat_id)
-    tz = await timezones.chat_timezone(pool, chat_id)
+    # A reminder addressed to one person is read in that person's wall clock:
+    # "напомни Васе в 9" means nine o'clock where Вася is, whatever time it is
+    # in the group. Only their own stated zone counts — falling back to the
+    # chat's is what happens for everyone else, including the whole group.
+    chat_tz = await timezones.chat_timezone(pool, chat_id)
+    personal = await timezones.user_timezone(pool, target_user_id)
+    if personal is not None:
+        known, tz = personal, ZoneInfo(personal)
+    else:
+        known = await timezones.effective_timezone(pool, chat_id)
+        tz = chat_tz
     local_time = when.replace(tzinfo=None) if when.tzinfo is None else None
     when = timezones.to_utc(when, tz)
 
@@ -776,6 +786,12 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
         None if known else str(tz), repeat_every_minutes, repeat_until_utc,
     )
     result = {"status": "ok", "reminder_id": row["id"]}
+    if personal is not None and personal != str(chat_tz):
+        # Say which clock this was read in whenever it is not the chat's own.
+        # Two people reading "в 9" in the same chat and meaning different
+        # instants is exactly the confusion worth spending a sentence on, and
+        # a wrong assumption is only correctable if it is visible.
+        result["target_timezone"] = personal
     if repeat_every_minutes is not None:
         result["repeats_every_minutes"] = repeat_every_minutes
         result["repeats_until"] = _local_iso(repeat_until_utc, tz)
@@ -808,7 +824,7 @@ async def reminder_list(pool, session_id) -> dict:
     if session_row is None:
         return {"reminders": []}
 
-    tz = await timezones.chat_timezone(pool, session_row["chat_id"])
+    chat_tz = await timezones.chat_timezone(pool, session_row["chat_id"])
     rows = await pool.fetch(
         """
         SELECT id, message, remind_at, target_user_id, repeat_every_minutes, repeat_until
@@ -819,6 +835,10 @@ async def reminder_list(pool, session_id) -> dict:
 
     reminders = []
     for r in rows:
+        # Rendered in the clock the reminder will actually keep, not the
+        # chat's, or the list would quietly misreport every personal one.
+        personal = await timezones.user_timezone(pool, r["target_user_id"])
+        tz = ZoneInfo(personal) if personal is not None else chat_tz
         if r["target_user_id"] is None:
             target = "группа"
         else:
@@ -836,6 +856,8 @@ async def reminder_list(pool, session_id) -> dict:
             "repeats_every_minutes": r["repeat_every_minutes"],
             "repeats_until": _local_iso(r["repeat_until"], tz) if r["repeat_until"] is not None else None,
             "target": target,
+            "timezone": str(tz),
+            "timezone_differs": str(tz) != str(chat_tz),
         })
     return {"reminders": reminders}
 
@@ -868,20 +890,48 @@ async def broadcast_message(pool, session_id, text) -> dict:
     )
 
 
-async def set_timezone(pool, session_id, timezone_name) -> dict:
-    """Record the group's timezone when a human states where they are.
+async def set_timezone(pool, session_id, timezone_name, current_user_id=None, whose="chat") -> dict:
+    """Record a timezone a human just stated — the group's, or their own.
 
     Outranks the zone guessed from a resolved place: someone saying "мы по
     Москве" knows better than the coordinates of a restaurant they looked up.
+
+    `whose="me"` records the speaker instead of the group ("я в Москве", as
+    against "мы в Москве"). That is the only way a personal zone is ever set:
+    current_user_id is bound by the router from who actually sent the
+    message, never supplied by the model — exactly the reasoning that keeps
+    the recipient off send_private_message. Otherwise the model could
+    relocate a bystander, and every reminder addressed to them with it.
+
+    Recording a person also moves the chats they created, because their zone
+    stands in for those chats when nothing better is known (see
+    timezones.effective_timezone). Doing it here rather than leaving it to
+    the next reminder is what keeps already-scheduled ones honest.
     """
     session_row = await _session_row(pool, session_id)
     if session_row is None:
         return {"status": "unknown_session"}
+
+    if whose == "me":
+        if current_user_id is None:
+            return {"status": "unknown_speaker",
+                    "detail": "nobody is identifiable as the speaker here — set the chat's zone instead"}
+        if not await timezones.set_user_timezone(pool, current_user_id, timezone_name):
+            return {"status": "bad_timezone",
+                    "detail": f"{timezone_name!r} is not an IANA zone name like 'Europe/Moscow'"}
+        moved = await timezones.reanchor_user_reminders(pool, current_user_id, timezone_name)
+        for chat_id in await timezones.chats_created_by(pool, current_user_id):
+            if await timezones.effective_timezone(pool, chat_id) == timezone_name:
+                moved += await timezones.reanchor_pending_reminders(pool, chat_id, timezone_name)
+        return {"status": "ok", "timezone": timezone_name, "whose": "me",
+                "reminders_corrected": moved}
+
     if not await timezones.set_chat_timezone(pool, session_row["chat_id"], timezone_name):
         return {"status": "bad_timezone",
                 "detail": f"{timezone_name!r} is not an IANA zone name like 'Europe/Moscow'"}
     moved = await timezones.reanchor_pending_reminders(pool, session_row["chat_id"], timezone_name)
-    return {"status": "ok", "timezone": timezone_name, "reminders_corrected": moved}
+    return {"status": "ok", "timezone": timezone_name, "whose": "chat",
+            "reminders_corrected": moved}
 
 
 async def send_private_message(pool, telegram_bot, session_id, current_user_id, text) -> dict:
