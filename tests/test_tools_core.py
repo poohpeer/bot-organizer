@@ -1539,3 +1539,31 @@ async def test_a_first_amount_still_answers_with_the_list(db_pool):
     assert result["status"] == "updated"
     assert "rendered" in result
     assert "say" not in result
+
+
+def test_the_refusal_never_hands_the_model_a_menu_of_numbers():
+    """Live: "скажи, сколько всего должно быть: пять штук, шесть штук?" — two
+    numbers invented out of nothing, in place of the one answer the person
+    actually has.
+
+    The model was not being creative. Both the system instruction and this
+    tool's ask_user ended with a list of example amounts, and it copied the
+    shape rather than the point.
+
+    So the examples are gone rather than negated. A prompt cannot show the
+    wrong output and expect it not to be copied — which is why this asserts
+    the bad shape is absent from the text sent to the model, not merely that
+    a rule against it was added. The explanation lives in a code comment,
+    where the model never sees it.
+    """
+    import bot.router as router
+
+    instruction = " ".join(router._ACTIVE_MODE_SYSTEM_INSTRUCTION.split())
+    assert "две бутылки, три бутылки" not in instruction
+    assert "пять штук" not in instruction, "not even as something to avoid"
+    assert "never offer numbers" in instruction, \
+        "forbidding it is the fix; deleting the example alone lets it come back"
+
+    ask_user = " ".join(inspect.getsource(core.list_add).split())
+    assert "never offer numbers" in ask_user
+    assert "пять штук" not in ask_user

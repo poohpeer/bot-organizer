@@ -413,9 +413,14 @@ async def list_add(pool, session_id, name, amount=None, unit=None, amounts=None,
             + (f" as {was}" if was else " with no amount recorded")
             + ". Amounts are never added to or subtracted from here, in either "
             "direction — tell them what is there, say you can neither add nor take "
-            "away, and ask what the amount should be in total (\"две бутылки\", not "
-            "\"ещё одна\"; \"один\", not \"на один меньше\"). Their answer is a plain "
-            "amount, so pass it without relative."
+            "away, and ask what the amount should be in total. Ask it as an "
+            "open question and never offer numbers to choose from. Their "
+            # This instruction used to end with sample amounts, and the model
+            # read them as a menu to hand the person — see the comment in
+            # bot/router.py's active-mode instruction for the reply it
+            # produced. The examples are gone rather than negated: a prompt
+            # cannot show the wrong output and expect it not to be copied.
+            "answer will be a plain amount, so pass it without relative."
         ),
         "rendered": await _rendered_list(pool, session_id),
     }
