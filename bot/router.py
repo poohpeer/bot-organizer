@@ -102,9 +102,16 @@ def _has_visible_text(text: str) -> bool:
         for ch in text
     )
 
+# One question, and nothing read off the group's title. The greeting used to
+# report what the title and description said — "Вижу: мероприятие, дата —
+# 03.09.2026, место — Море" — which made the bot look like it already knew
+# what was being organized while it had started nothing, and tied the whole
+# start flow to how a group happened to name itself.
 _GREETING_TEMPLATE = (
-    "Привет! Я включаюсь только когда меня зовут — упомяните {mention} или "
-    "ответьте на моё сообщение, и я начну отслеживать мероприятие."
+    "Привет! Я помогу собраться: запомню место и дату, буду вести список "
+    "покупок, отмечать кто идёт и напоминать о чём просили.\n\n"
+    "Начинаем отслеживать ваше мероприятие? Упомяните {mention} или ответьте "
+    "на это сообщение — скажите «начинай» или сразу опишите, что организуем."
 )
 
 _ASK_WHAT_TO_TRACK = "Что отслеживаем? Опишите мероприятие, которое нужно организовать."
@@ -116,17 +123,18 @@ _START_SCHEMA = types.Schema(
     properties={
         "confident": types.Schema(
             type=types.Type.BOOLEAN,
-            description="True only if a concrete event/activity to track was named.",
+            description="True if they are asking the bot to start, or describing "
+            "something being organized. An unnamed activity is not a reason to say false.",
         ),
         "activity_type": types.Schema(
             type=types.Type.STRING,
-            description="Short label for the activity, e.g. 'picnic', 'birthday', 'trip'.",
+            description="Short label for the activity if one is obvious, e.g. 'picnic', "
+            "'birthday', 'trip'. Empty string if nothing names it — never invent one.",
         ),
         "event_date": types.Schema(
             type=types.Type.STRING,
-            description="ISO-8601 date (YYYY-MM-DD) if a date is stated anywhere in the "
-            "message or chat title — including a bare '20/11', which is day/month. "
-            "Empty string if no date is stated.",
+            description="ISO-8601 date (YYYY-MM-DD) if a date is stated in the message "
+            "— including a bare '20/11', which is day/month. Empty string if none is.",
         ),
         "event_date_raw": types.Schema(
             type=types.Type.STRING,
@@ -136,15 +144,28 @@ _START_SCHEMA = types.Schema(
     required=["confident"],
 )
 
+# Deliberately undemanding. The previous wording said confident=true "only
+# when a concrete activity was actually named", and the model took it
+# literally: «Начинай это отслеживать» was refused because no noun in it
+# names an activity. Whoever wrote that had already done the only thing the
+# bot asks of them.
 _START_INSTRUCTION = (
     "A human just addressed this bot directly in a group chat with no active "
-    "organizing session. Decide whether they are explicitly asking the bot to "
-    "start tracking a specific event (a picnic, trip, birthday, etc — anything "
-    "with a shared list, participants, or a date). Set confident=true only "
-    "when a concrete activity was actually named; a vague message, small "
-    "talk, or an unrelated question is confident=false. The event's date may "
-    "be stated in the message itself, or only in the chat title context "
-    "given below — check both."
+    "organizing session. Decide whether to start tracking an event for them.\n"
+    "confident=true when the message asks the bot to get going — «начинай "
+    "отслеживать», «организуй», «поехали» — or itself describes something "
+    "being organized. Either is enough on its own.\n"
+    "A bare agreement is also true: «да», «давай», «ага», «поехали». The bot "
+    "offers to start when it joins a group, and in a chat with nothing being "
+    "tracked yet an agreement addressed to the bot is an answer to that "
+    "offer. There is nothing else it could be agreeing to.\n"
+    "The event does not need a name. activity_type is a short label when one "
+    "is obvious — picnic, trip, birthday — and an empty string otherwise. An "
+    "empty activity_type is never a reason to answer confident=false: an "
+    "outing nobody has labelled is still an outing, and the bot names it "
+    "«мероприятие» itself.\n"
+    "confident=false for a greeting, an insult, small talk, or an unrelated "
+    "question — unless it also asks the bot to start."
 )
 
 
@@ -164,61 +185,28 @@ def _parse_event_date(value) -> date | None:
         return None
 
 
-def _format_event_date(iso_date: str) -> str:
-    parsed = _parse_event_date(iso_date)
-    # A malformed date from the classifier is shown as-is rather than dropped:
-    # unlike session start (where a bad date just means no date was recorded),
-    # here it already passed the "something was found" check, so silently
-    # dropping it would make the greeting mention a place/activity but go
-    # mute about the date the model just said it saw.
-    return f"{parsed:%d.%m.%Y}" if parsed is not None else iso_date
-
-
-def _greeting_with_info(event: dict, member_count, bot_username: str) -> str:
-    parts = [event.get("activity_type") or "мероприятие"]
-    if event.get("event_date"):
-        parts.append(f"дата — {_format_event_date(event['event_date'])}")
-    if event.get("place"):
-        parts.append(f"место — {event['place']}")
-    # A number from get_chat_member_count, never a roster (R7): the group's
-    # members are not being listed, so the sentence must not read as if they
-    # were known by name.
-    count_clause = f" В группе {member_count} человек." if member_count is not None else ""
-    return (
-        f"Привет! Вижу: {', '.join(parts)}.{count_clause} Чтобы начать отслеживать, "
-        f"упомяните @{bot_username} или ответьте на моё сообщение."
-    )
-
-
 async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_username) -> None:
     """Greet a chat the bot was just added to. Being added is not consent
     (R5): this never starts a session, and a promotion/permission change
     (bot_was_added returning False) must stay silent.
 
-    Reports what the group's own title/description already say (R7) — the
-    activity, date and place if stated, plus the member count — without
-    starting anything: the greeting describes what can be seen, and asking
-    the bot to actually track it is still a separate, explicit step.
+    The greeting asks one question and reads nothing off the group's title.
+    It used to announce what the title and description stated, which made the
+    bot look like it already knew what it was organizing while it had started
+    nothing at all.
+
+    The creator is still looked up, because that is a fact about the chat
+    rather than about the event, and their stated timezone is what a chat
+    with no zone of its own falls back to.
     """
     if not bot_was_added(chat_member_updated, bot_id):
         return
     chat = chat_member_updated.chat
     await group_info.ensure_creator_known(pool, telegram_bot, chat.id)
-    info = await group_info.fetch(telegram_bot, chat.id)
-    tz = await timezones.chat_timezone(pool, chat.id)
-    event = await group_info.extract_event(
-        info.get("title"), info.get("description"), timezones.local_date(tz)
+
+    await telegram_bot.send_message(
+        chat_id=chat.id, text=_GREETING_TEMPLATE.format(mention=f"@{bot_username}")
     )
-
-    if any(event.get(k) for k in ("activity_type", "event_date", "place")):
-        text = _greeting_with_info(event, info.get("member_count"), bot_username)
-    else:
-        # Nothing was actually found — the plain greeting as it was before
-        # this story, not an empty "Поездка: не указано" scaffold (R7's last
-        # criterion: nothing invented).
-        text = _GREETING_TEMPLATE.format(mention=f"@{bot_username}")
-
-    await telegram_bot.send_message(chat_id=chat.id, text=text)
 
 
 async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_username) -> None:
@@ -240,11 +228,13 @@ async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_userna
         chat.id, chat.title,
     )
 
-    extracted = await extract(
-        _START_INSTRUCTION,
-        f"Chat title: {chat.title or '(no title)'}\n\nMessage: {text}",
-        _START_SCHEMA,
-    )
+    # The message alone. The group's title used to be handed to the classifier
+    # as context, and it decided the outcome: a chat called «Море 3/9» that
+    # said "начинай это отслеживать" was refused, because no *activity* had
+    # been named anywhere — while the same words in «Пикник на море 3/9»
+    # started a session. What a group happens to call itself is not consent
+    # and not a description of the event.
+    extracted = await extract(_START_INSTRUCTION, f"Message: {text}", _START_SCHEMA)
 
     if not extracted.get("confident"):
         await telegram_bot.send_message(chat_id=chat.id, text=_ASK_WHAT_TO_TRACK)
@@ -314,6 +304,16 @@ _CONFIRMATION_REPLY_INSTRUCTION_TEMPLATE = (
 
 _OFF_TOPIC_REPLY = "Это не относится к теме обсуждения."
 
+# One group, one event. Said out loud rather than quietly ignoring the
+# proposal or quietly switching to it: the group has to know which of the two
+# the bot is organizing, and only they can decide.
+_ONE_EVENT_AT_A_TIME = (
+    "Сейчас я веду «{current}». В одной группе я могу отслеживать только одно "
+    "мероприятие. Переключиться на «{proposed}»? Список покупок и участники "
+    "останутся."
+)
+_RETOPIC_DONE = "Готово, теперь веду «{activity_type}»."
+
 _INTENT_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={
@@ -325,8 +325,23 @@ _INTENT_SCHEMA = types.Schema(
             type=types.Type.BOOLEAN,
             description="True only if this asks for something unrelated to the event.",
         ),
+        "new_event": types.Schema(
+            type=types.Type.BOOLEAN,
+            description="True only if this proposes organizing a different event "
+            "instead of the one being tracked.",
+        ),
+        "new_event_activity": types.Schema(
+            type=types.Type.STRING,
+            description="Short label for that different event, e.g. 'trip'. Empty "
+            "string when new_event is false or nothing names it.",
+        ),
+        "new_event_date": types.Schema(
+            type=types.Type.STRING,
+            description="ISO-8601 date (YYYY-MM-DD) for that different event if one "
+            "is stated. Empty string otherwise.",
+        ),
     },
-    required=["stop", "off_topic"],
+    required=["stop", "off_topic", "new_event"],
 )
 
 # Both questions in one call, and deliberately no keyword list for either
@@ -355,26 +370,36 @@ _ADDRESSED_INTENT_INSTRUCTION = (
     "message is never off_topic — 'да', '5', 'два килограмма' are answers, "
     "not new subjects. The bot's previous message is given below when there "
     "was one.\n"
+    "new_event: true only when the message proposes organizing a *different* "
+    "event from the one named below — «а поехали на море» while a picnic is "
+    "being tracked. Adding to the event that is already being tracked is "
+    "false: a new place, a new date, another guest or another thing to buy "
+    "are all the same event. A different event is never off_topic; set "
+    "new_event and leave off_topic false.\n"
     "When unsure, answer false. Refusing a real organizing question is worse "
     "than answering a stray one."
 )
 
 
-def _intent_input(text: str, turns: list[dict]) -> str:
-    """The message, plus whatever the bot last said.
+def _intent_input(text: str, turns: list[dict], tracking: str) -> str:
+    """The message, what the bot last said, and what is being tracked.
 
-    Without it a bare "5" is indistinguishable from a non sequitur, and the
-    guard would refuse to answer the very question the bot had just asked.
+    The previous message is what tells a bare "5" from a non sequitur;
+    without it the guard would refuse to answer the very question the bot had
+    just asked. What is being tracked is what tells "а поехали на море" from
+    "поехали на море в субботу" said about the trip already under way.
     """
+    parts = [f"Currently tracking: {tracking}"]
     last_bot = next(
         (t["content"] for t in reversed(turns) if t.get("role") == "assistant"), None
     )
-    if not last_bot:
-        return f"Message: {text}"
-    return f"Bot's previous message: {last_bot}\n\nMessage: {text}"
+    if last_bot:
+        parts.append(f"Bot's previous message: {last_bot}")
+    parts.append(f"Message: {text}")
+    return "\n\n".join(parts)
 
 
-async def _addressed_intent(text: str, turns: list[dict]) -> dict:
+async def _addressed_intent(text: str, turns: list[dict], tracking: str) -> dict:
     """Both verdicts for one addressed message.
 
     Fails open in both directions, and that is the point of the phrasing:
@@ -383,7 +408,9 @@ async def _addressed_intent(text: str, turns: list[dict]) -> dict:
     either guard existed. Asking "is this on topic?" instead would have the
     same outage refuse every message in every chat.
     """
-    return await extract(_ADDRESSED_INTENT_INSTRUCTION, _intent_input(text, turns), _INTENT_SCHEMA)
+    return await extract(
+        _ADDRESSED_INTENT_INSTRUCTION, _intent_input(text, turns, tracking), _INTENT_SCHEMA
+    )
 
 _SILENT_CAPTURE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
@@ -906,10 +933,15 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             # resolved, and the action can legitimately find nothing to do.
             # Reporting "готово" either way tells the group something happened
             # when it did not — the confident-but-wrong answer R10 forbids.
-            await telegram_bot.send_message(
-                chat_id=chat_id,
-                text=_CONFIRMED_DONE if result.get("status") == "executed" else _CONFIRMED_NOTHING,
-            )
+            # "Готово." would be true but useless here: after a switch the one
+            # thing the group needs back is which event the bot is on now.
+            if result.get("status") == "executed" and result.get("activity_type"):
+                said = _RETOPIC_DONE.format(activity_type=result["activity_type"])
+            elif result.get("status") == "executed":
+                said = _CONFIRMED_DONE
+            else:
+                said = _CONFIRMED_NOTHING
+            await telegram_bot.send_message(chat_id=chat_id, text=said)
             await decision_log.log_decision(
                 pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="confirmation_reply",
                 decision={"reply": "yes", "confirmation_id": pending_confirmation["id"], "result": result},
@@ -930,7 +962,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     # to tell an answer from a new subject, and the tool loop needs the same
     # exchanges to be answerable at all.
     turns = await history.recent_turns(pool, chat_id)
-    intent = await _addressed_intent(text, turns)
+    intent = await _addressed_intent(text, turns, active_session["activity_type"])
     if intent.get("stop"):
         # close_session returns False when someone (or the worker's auto-close)
         # got there first. Posting the summary regardless means two people
@@ -945,6 +977,31 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         await decision_log.log_decision(
             pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_stop",
             decision={"trigger": "explicit", "session_id": session_id},
+        )
+        return
+
+    # Before the off-topic gate: proposing a different event is very much
+    # about organizing, and turning it away as unrelated would leave the
+    # group unable to change their minds.
+    if intent.get("new_event"):
+        proposed = (intent.get("new_event_activity") or "").strip() or "другое мероприятие"
+        await session.touch_activity(pool, session_id)
+        await core_tools.propose_confirmation(
+            pool, chat_id=chat_id, session_id=session_id, action_type="retopic",
+            action_params={
+                "activity_type": proposed,
+                "event_date": (intent.get("new_event_date") or "").strip() or None,
+            },
+        )
+        await telegram_bot.send_message(
+            chat_id=chat_id,
+            text=_ONE_EVENT_AT_A_TIME.format(
+                current=active_session["activity_type"], proposed=proposed
+            ),
+        )
+        await decision_log.log_decision(
+            pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="new_event_proposed",
+            decision={"current": active_session["activity_type"], "proposed": proposed},
         )
         return
 

@@ -6,8 +6,8 @@ import logging
 import os
 
 from telegram import (
-    BotCommand, BotCommandScopeAllChatAdministrators, BotCommandScopeDefault,
-    Update,
+    BotCommand, BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats, BotCommandScopeDefault, Update,
 )
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
@@ -184,11 +184,30 @@ ADMIN_COMMANDS = PUBLIC_COMMANDS + [
     BotCommand("admin", "Настройки бота"),
 ]
 
-# Scope -> what that scope sees. Telegram falls back from the narrowest
-# matching scope outwards, so administrators get ADMIN_COMMANDS and everyone
-# else falls through to the default.
+# Scope -> what that scope sees. Telegram resolves from the narrowest matching
+# scope outwards and stops at the first one that has ever been set, so
+# administrators get ADMIN_COMMANDS and everyone else falls outwards.
+#
+# All four are set, not just the two that look sufficient. In a group the
+# chain is
+#
+#   chat_member → chat_administrators → chat
+#     → all_chat_administrators → all_group_chats → default
+#
+# so `all_group_chats` is reached *before* `default` by anyone who is not an
+# administrator. Setting only default and all_chat_administrators left that
+# scope holding `/ask_everyone` — typed into BotFather once, backed by
+# nothing here, and kept by Telegram ever since. Ordinary members in a group
+# were offered that one dead command and none of the four that work, while
+# administrators matched a scope earlier and saw the real menu. Which made it
+# look like a permissions problem, and it never was.
+#
+# Nothing here is ever removed: a scope this tuple stops setting keeps
+# whatever it last held, for ever, invisibly.
 COMMAND_SCOPES = (
     (BotCommandScopeDefault(), PUBLIC_COMMANDS),
+    (BotCommandScopeAllPrivateChats(), PUBLIC_COMMANDS),
+    (BotCommandScopeAllGroupChats(), PUBLIC_COMMANDS),
     (BotCommandScopeAllChatAdministrators(), ADMIN_COMMANDS),
 )
 

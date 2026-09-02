@@ -39,6 +39,34 @@ async def start_session(pool, chat_id: int, activity_type: str, *, event_date=No
         raise SessionAlreadyActiveError(f"chat {chat_id} already has an active session")
 
 
+async def retopic(pool, session_id: int, activity_type: str, *, event_date=None, event_date_raw=None):
+    """Point an active session at a different event, keeping everything under
+    it.
+
+    A group gets one session at a time, so somebody proposing a second event
+    is either replacing the first or nothing happens at all. Replacing by
+    closing and reopening would throw away the shopping list, the confirmed
+    participants and the pending reminders — all of which the group built by
+    hand and most of which survive a change of plan.
+
+    A date is only overwritten when a new one was actually stated: switching
+    from a picnic to a trip says nothing about when the trip is, and keeping
+    yesterday's date would be worse than keeping none.
+    """
+    return await pool.fetchrow(
+        """
+        UPDATE sessions
+        SET activity_type = $2,
+            event_date = COALESCE($3, event_date),
+            event_date_raw = COALESCE($4, event_date_raw),
+            last_activity_at = now()
+        WHERE id = $1 AND status = 'active'
+        RETURNING *
+        """,
+        session_id, activity_type, event_date, event_date_raw,
+    )
+
+
 async def close_session(pool, session_id: int, reason: str) -> bool:
     """Close an active session. Returns True if this call actually closed it.
 
