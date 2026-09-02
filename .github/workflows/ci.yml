@@ -88,7 +88,12 @@ jobs:
         with:
           context: .
           push: true
+          # v<run number> is the version the cluster actually runs, and the
+          # only tag that is both unique per build and ordered. The sha says
+          # which commit it was; latest is for anything reaching for the
+          # image by hand, and is deliberately not what gets deployed.
           tags: |
+            ${{ env.IMAGE_NAME }}:v${{ github.run_number }}
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=gha
@@ -141,25 +146,39 @@ jobs:
           }
           Write-Host "ok"
 
+      # The manifests carry :latest so that reading them, or applying them by
+      # hand, gets something that works. What is deployed is the numbered tag,
+      # written in here first: applying :latest and then moving the image with
+      # `kubectl set image` would roll the pods twice, once to the wrong
+      # version.
+      #
+      # The workspace copy is edited and never committed.
+      - name: Pin the manifests to this build
+        shell: powershell
+        run: |
+          $image = "${{ env.IMAGE_NAME }}:v${{ github.run_number }}"
+          $path = "k8s/app.yaml"
+          $before = Get-Content $path -Raw
+          $after = $before -replace [regex]::Escape("${{ env.IMAGE_NAME }}:latest"), $image
+          # A replace that matched nothing would deploy :latest for ever and
+          # look exactly like a working pipeline.
+          if ($after -eq $before) { throw "found no ${{ env.IMAGE_NAME }}:latest to pin in $path" }
+          Set-Content -Path $path -Value $after -NoNewline
+          Write-Host "deploying $image"
+
       # Without this the workflow only ever restarts pods, so a change to a
       # manifest — an added env var, a resource limit, a new volume — lives in
       # git and never reaches the cluster. The Secret is deliberately not in
       # the kustomization: it is gitignored and applied by hand.
+      #
+      # No rollout restart afterwards any more: the image tag is different on
+      # every build, so this apply is a real spec change and rolls the pods by
+      # itself.
       - name: Apply manifests
         shell: powershell
         run: |
           kubectl apply -k k8s/
           if ($LASTEXITCODE -ne 0) { throw "kubectl apply failed" }
-
-      # Still needed after the apply: the image tag is :latest, so a rebuilt
-      # image is not a spec change and apply alone would see nothing to do.
-      - name: Restart bot
-        shell: powershell
-        run: kubectl rollout restart deployment/bot-organizer-bot
-
-      - name: Restart worker
-        shell: powershell
-        run: kubectl rollout restart deployment/bot-organizer-worker
 
       - name: Wait for rollout
         shell: powershell
@@ -198,3 +217,48 @@ jobs:
             throw "The worker never started its poll loop."
           }
           Write-Host "both processes are up"
+
+          Write-Host "--- running image ---"
+          kubectl get deployment bot-organizer-bot -o "jsonpath={.spec.template.spec.containers[0].image}"
+          Write-Host ""
+
+      # Housekeeping, and never a reason to fail a deploy that worked — hence
+      # continue-on-error and the try/catch. The node keeps every image it has
+      # ever pulled, and nothing else ever removes one.
+      #
+      # Three: the version running, the one to roll back to, and one more.
+      # Sorted by the number in the tag rather than by any timestamp, because
+      # crictl reports no creation time — which is the practical reason the
+      # tags are numbered rather than named after the commit.
+      - name: Keep only the last three versions on the node
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            # kind names the node container after the node itself.
+            $node = kubectl get nodes -o "jsonpath={.items[0].metadata.name}"
+            if (-not $node) { throw "could not read the node name" }
+            $repo = "${{ env.IMAGE_NAME }}"
+
+            $images = docker exec $node crictl images -o json | ConvertFrom-Json
+            $versions = @()
+            foreach ($img in $images.images) {
+              foreach ($tag in $img.repoTags) {
+                if ($tag -match "^$([regex]::Escape($repo)):v(\d+)$") {
+                  $versions += [pscustomobject]@{ Tag = $tag; Number = [int]$Matches[1] }
+                }
+              }
+            }
+
+            $stale = $versions | Sort-Object Number -Descending | Select-Object -Skip 3
+            if (-not $stale) {
+              Write-Host "nothing to remove ($($versions.Count) version(s) on the node)"
+            }
+            foreach ($old in $stale) {
+              Write-Host "removing $($old.Tag)"
+              docker exec $node crictl rmi $old.Tag
+            }
+          } catch {
+            Write-Warning "Could not prune old images: $_"
+          }

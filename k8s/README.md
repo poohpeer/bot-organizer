@@ -51,25 +51,53 @@ this bot can share the namespace with other bots without name collisions.
 
 ## Deploying a new version
 
-Pushes to `main` test, build, and publish a new `:latest` and
-`:<sha>` image. After the image is pushed, the `deploy` job runs on the
-self-hosted Runner: it applies the kustomization, restarts both application
-Deployments, and then checks the bot actually reached Telegram rather than
-trusting that the rollout completed.
+Pushes to `main` test, build, and publish three tags of the same image:
+`:v<run number>`, `:latest`, and `:<sha>`. **The cluster runs the numbered
+one.** `:latest` is for reading and for pulling by hand; deploying it is what
+this stopped doing.
+
+The number is the workflow's run number, so it only ever goes up. That is the
+whole reason for it: it makes "the newest" a fact the pipeline can sort on,
+and it is what the image cleanup below uses, since containerd reports no
+creation time to sort by instead.
+
+The `deploy` job runs on the self-hosted Runner. It rewrites the `:latest` in
+its *workspace copy* of `k8s/app.yaml` to the numbered tag, applies the
+kustomization, waits for both rollouts, and then checks the bot actually
+reached Telegram rather than trusting that the rollout completed.
+
+Nothing restarts the Deployments any more. The image tag differs on every
+build, so the apply is a real change to the pod spec and rolls them by
+itself. Pinning before the apply rather than moving the image afterwards with
+`kubectl set image` matters: the other order applies `:latest` first and rolls
+every pod twice, once onto the wrong version.
+
+The manifests keep `:latest` in git so that reading them, or applying them by
+hand, gets something that works. The pin step fails loudly if it finds no
+`:latest` to replace — a substitution that silently matched nothing would
+deploy `:latest` for ever and look exactly like a working pipeline.
+
+To deploy a specific version by hand:
 
 ```powershell
-kubectl rollout restart deployment/bot-organizer-bot
-kubectl rollout restart deployment/bot-organizer-worker
+kubectl set image deployment/bot-organizer-bot bot=ghcr.io/poohpeer/bot-organizer:v42
+kubectl set image deployment/bot-organizer-worker worker=ghcr.io/poohpeer/bot-organizer:v42
 kubectl rollout status deployment/bot-organizer-bot --timeout=180s
-kubectl rollout status deployment/bot-organizer-worker --timeout=180s
 ```
 
-To deploy manually:
+### Only the last three versions stay on the node
 
-```powershell
-kubectl rollout restart deployment/bot-organizer-bot
-kubectl rollout restart deployment/bot-organizer-worker
-```
+The node keeps every image it has ever pulled and nothing else removes one, so
+the last step of a deploy prunes them: it lists what containerd holds, keeps
+the three highest-numbered versions — the one running, the one to roll back
+to, and one more — and removes the rest.
+
+It is best-effort by design: `continue-on-error`, and wrapped in a
+`try`/`catch`. Housekeeping must never fail a deploy that otherwise worked,
+and a failed prune costs disk, not uptime. Watch its log rather than assume it
+ran.
+
+Older versions stay in GHCR. Only the node is pruned.
 
 The workflow does not receive or create application secrets. It only uses the
 Runner's kubeconfig to restart resources that already exist in the current
