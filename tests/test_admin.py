@@ -295,3 +295,54 @@ async def test_a_malformed_owner_id_is_no_owner(db_pool, monkeypatch):
     bot = _bot(status="member")
 
     assert await admin.is_chat_admin(bot, -100, 91237884) is False
+
+
+# --- the topic guard ------------------------------------------------------
+
+def _button_labels(markup) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+async def test_the_menu_says_which_way_the_guard_is_set(db_pool):
+    """A toggle whose button does not say its state is a coin flip: the only
+    way to find out would be to press it and watch what the bot stops doing."""
+    bot = _bot()
+
+    await admin.handle_command(db_pool, bot, _Msg(chat_id=-501))
+
+    labels = _button_labels(bot.send_message.await_args.kwargs["reply_markup"])
+    assert "Только по теме: вкл" in labels
+
+
+async def test_pressing_it_flips_the_setting_and_the_label(db_pool):
+    bot = _bot()
+    query = _Query(admin._GUARD, chat_id=-502)
+
+    await admin.handle_callback(db_pool, bot, query)
+
+    assert await settings.get_topic_guard(db_pool, -502) == settings.TOPIC_GUARD_OFF
+    labels = _button_labels(query.edit_message_text.await_args.kwargs["reply_markup"])
+    assert "Только по теме: выкл" in labels
+
+    await admin.handle_callback(db_pool, bot, _Query(admin._GUARD, chat_id=-502))
+
+    assert await settings.get_topic_guard(db_pool, -502) == settings.TOPIC_GUARD_STRICT
+
+
+async def test_two_administrators_on_one_open_menu_do_not_cancel_out(db_pool):
+    """The new value is read from storage, not carried in the button. Sent in
+    the payload, the second press would re-apply what the first person saw
+    and the setting would sit still while two people pressed it."""
+    bot = _bot()
+    await admin.handle_callback(db_pool, bot, _Query(admin._GUARD, chat_id=-503, user_id=7))
+    await admin.handle_callback(db_pool, bot, _Query(admin._GUARD, chat_id=-503, user_id=8))
+
+    assert await settings.get_topic_guard(db_pool, -503) == settings.TOPIC_GUARD_STRICT
+
+
+async def test_a_member_cannot_flip_it(db_pool):
+    bot = _bot(status="member")
+
+    await admin.handle_callback(db_pool, bot, _Query(admin._GUARD, chat_id=-504))
+
+    assert await settings.get_topic_guard(db_pool, -504) == settings.TOPIC_GUARD_STRICT

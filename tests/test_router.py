@@ -17,6 +17,7 @@ from telegram.error import Forbidden
 import bot.router as router
 import bot.session as session
 import bot.tools.core as core_tools
+import bot.settings as settings
 
 BOT_ID = 4242
 BOT_USERNAME = "orgbot"
@@ -393,7 +394,7 @@ async def test_unaddressed_message_records_facts_and_stays_silent(db_pool, monke
 async def test_addressed_explicit_stop_closes_and_summarizes(db_pool, monkeypatch):
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": True, "off_topic": False}))
     msg = _message("всё, спасибо, свободен")
 
     await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
@@ -418,7 +419,7 @@ async def test_addressed_stop_while_snoozed_still_closes(db_pool, monkeypatch):
     assert active["closing_question_asked_at"] is None  # precondition: not an outstanding question
 
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": True, "off_topic": False}))
     msg = _message("больше не нужен, можешь отдыхать")
 
     await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
@@ -429,7 +430,7 @@ async def test_addressed_stop_while_snoozed_still_closes(db_pool, monkeypatch):
 
 async def test_various_stop_phrasings_all_close_via_the_classifier(db_pool, monkeypatch):
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": True, "off_topic": False}))
 
     for i, phrasing in enumerate([
         "мы закончили",
@@ -523,7 +524,7 @@ async def test_addressed_yes_with_pending_confirmation_resolves_and_executes(db_
 async def test_addressed_ordinary_request_runs_tool_loop_and_replies(db_pool, monkeypatch):
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="Вот список: помидоры"))
     msg = _message("что у нас в списке")
 
@@ -536,7 +537,7 @@ async def test_addressed_ordinary_request_runs_tool_loop_and_replies(db_pool, mo
 async def test_markdown_in_tool_loop_reply_is_converted_before_sending(db_pool, monkeypatch):
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="**Куда:** Ben Shemen"))
     msg = _message("куда едем")
 
@@ -551,7 +552,7 @@ async def test_markdown_wrapped_silent_sentinel_still_silences(db_pool, monkeypa
     not after, or the bold markers leave the comparison never matching."""
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="**<silent>**"))
     msg = _message("записал")
 
@@ -563,7 +564,7 @@ async def test_markdown_wrapped_silent_sentinel_still_silences(db_pool, monkeypa
 async def test_a_reply_with_no_markdown_passes_through_unchanged(db_pool, monkeypatch):
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="Готово, записал."))
     msg = _message("ладно")
 
@@ -575,7 +576,7 @@ async def test_a_reply_with_no_markdown_passes_through_unchanged(db_pool, monkey
 async def test_empty_tool_loop_reply_posts_nothing(db_pool, monkeypatch):
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="   "))
     msg = _message("ладно проехали")
 
@@ -588,7 +589,7 @@ async def test_empty_tool_loop_reply_posts_nothing(db_pool, monkeypatch):
 async def test_tool_loop_failure_sends_fixed_fallback_message(db_pool, monkeypatch):
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "run_tool_loop", AsyncMock(side_effect=RuntimeError("boom")))
     msg = _message("???")
 
@@ -603,7 +604,7 @@ async def test_two_simultaneous_stops_post_one_summary(db_pool, monkeypatch):
     import asyncio
 
     active = await _new_active_session(db_pool)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=True))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": True, "off_topic": False}))
     monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="ИТОГИ"))
     telegram_bot = AsyncMock()
 
@@ -691,7 +692,7 @@ async def test_the_bot_says_the_ai_is_unreachable_rather_than_blaming_the_user(d
     from bot.ai.client import AllModelsUnavailable
 
     active = await _new_active_session(db_pool)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
     monkeypatch.setattr(
         router, "run_tool_loop", AsyncMock(side_effect=AllModelsUnavailable("all refused"))
@@ -711,7 +712,7 @@ async def test_an_ordinary_tool_loop_failure_still_gets_the_generic_reply(db_poo
     """Only an exhausted chain gets the "come back later" line. A bug must not
     be reported to the group as a temporary outage."""
     active = await _new_active_session(db_pool)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
     monkeypatch.setattr(router, "run_tool_loop", AsyncMock(side_effect=RuntimeError("boom")))
     telegram_bot = AsyncMock()
@@ -745,7 +746,7 @@ async def test_the_bot_never_posts_the_words_it_was_told_to_answer_with(db_pool,
     phrasing it reached for is treated as silence, because the model changing
     its mind about how to say "nothing" must not become a message."""
     active = await _new_active_session(db_pool)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
 
     for said in ("empty string", "<silent>", "Empty String.", "пустая строка", ""):
@@ -762,7 +763,7 @@ async def test_the_bot_never_posts_the_words_it_was_told_to_answer_with(db_pool,
 async def test_a_real_answer_is_still_posted(db_pool, monkeypatch):
     """The silence guard must not swallow ordinary replies."""
     active = await _new_active_session(db_pool)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "unrelated"}))
     monkeypatch.setattr(router, "run_tool_loop", AsyncMock(return_value="Готово, записал."))
     telegram_bot = AsyncMock()
@@ -782,7 +783,7 @@ async def test_private_reply_request_dms_the_asker_and_acks_in_group(db_pool, mo
     asserting the DM's chat_id is the asker's own id (_HUMAN, 7), not -100."""
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     private_text = "Вот список: помидоры, хлеб"
 
     # **_ rather than a spelled-out signature: run_tool_loop has gained a
@@ -811,7 +812,7 @@ async def test_private_reply_cannot_reach_tells_group_to_start_a_chat_without_le
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
     telegram_bot.send_message = AsyncMock(side_effect=[Forbidden("bot was blocked by the user"), None])
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     private_text = "Вот список: помидоры, хлеб, секретный ингредиент"
 
     async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, **_):
@@ -836,7 +837,7 @@ async def test_private_reply_with_no_from_user_does_not_crash(db_pool, monkeypat
     attempting a send with no destination."""
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
 
     async def fake_run_tool_loop(model_fn, text, registry, *, system_instruction, **_):
         result = await registry["send_private_message"](text="что угодно")
@@ -1022,7 +1023,7 @@ async def test_the_tool_loop_is_given_the_recent_conversation(db_pool):
     telegram_bot = AsyncMock()
 
     with patch("bot.router.run_tool_loop", AsyncMock(return_value="ок")) as loop, \
-            patch("bot.router.classify", AsyncMock(return_value=False)):
+            patch("bot.router._addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False})):
         await router.handle_active_message(
             db_pool, telegram_bot, active,
             _message("@bot 1 литр", chat_id=chat_id), BOT_ID, BOT_USERNAME,
@@ -1054,7 +1055,7 @@ async def test_a_grant_is_issued_for_the_turn_and_revoked_after(db_pool, monkeyp
         return "ок"
 
     monkeypatch.setattr(router, "run_tool_loop", fake_run_tool_loop)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
 
     await router.handle_active_message(
         db_pool, telegram_bot, active, _message("@bot покажи список"), BOT_ID, BOT_USERNAME,
@@ -1098,7 +1099,7 @@ async def test_no_grant_and_no_url_when_nothing_serves_mcp(db_pool, monkeypatch)
         return "ок"
 
     monkeypatch.setattr(router, "run_tool_loop", fake_run_tool_loop)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
 
     await router.handle_active_message(
         db_pool, AsyncMock(), active, _message("@bot покажи список"), BOT_ID, BOT_USERNAME,
@@ -1128,7 +1129,7 @@ async def test_the_grant_is_revoked_even_when_the_turn_fails(db_pool, monkeypatc
         raise RuntimeError("the model fell over")
 
     monkeypatch.setattr(router, "run_tool_loop", exploding_loop)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
 
     await router.handle_active_message(
         db_pool, AsyncMock(), active, _message("@bot покажи список"), BOT_ID, BOT_USERNAME,
@@ -1136,3 +1137,102 @@ async def test_the_grant_is_revoked_even_when_the_turn_fails(db_pool, monkeypatc
     router.set_grant_store(None)
 
     assert grants.resolve(tokens[0]) is None
+
+
+# --- staying on the event ----------------------------------------------------
+
+async def test_an_off_topic_request_is_turned_away_without_a_model_turn(db_pool, monkeypatch):
+    """The bot answered "дай рецепт пасты" in a group organizing a picnic.
+    The refusal has to happen before the tool loop, not inside the reply: a
+    turn that reaches the model has already been paid for and can still be
+    talked into answering."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(
+        router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": True})
+    )
+    loop = AsyncMock(return_value="рецепт пасты")
+    monkeypatch.setattr(router, "run_tool_loop", loop)
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot дай рецепт пасты"), BOT_ID, BOT_USERNAME
+    )
+
+    loop.assert_not_awaited()
+    telegram_bot.send_message.assert_awaited_once_with(
+        chat_id=active["chat_id"], text=router._OFF_TOPIC_REPLY
+    )
+
+
+async def test_a_chat_that_turned_the_guard_off_still_gets_an_answer(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool)
+    assert await settings.set_topic_guard(db_pool, active["chat_id"], settings.TOPIC_GUARD_OFF)
+    monkeypatch.setattr(
+        router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": True})
+    )
+    loop = AsyncMock(return_value="вот рецепт")
+    monkeypatch.setattr(router, "run_tool_loop", loop)
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot дай рецепт пасты"), BOT_ID, BOT_USERNAME
+    )
+
+    loop.assert_awaited_once()
+
+
+async def test_stop_is_decided_before_off_topic(db_pool, monkeypatch):
+    """"спасибо, всё" is not about the event either. Judged off-topic first,
+    it would be refused instead of closing the session, and the only way to
+    dismiss the bot would stop working."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(
+        router, "_addressed_intent", AsyncMock(return_value={"stop": True, "off_topic": True})
+    )
+    monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="ИТОГИ"))
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot спасибо, всё"), BOT_ID, BOT_USERNAME
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] == "ИТОГИ"
+    row = await db_pool.fetchrow("SELECT status FROM sessions WHERE id = $1", active["id"])
+    assert row["status"] == "closed"
+
+
+async def test_a_classifier_that_answered_nothing_lets_the_message_through(db_pool, monkeypatch):
+    """extract() returns {} on any failure. The guard is phrased so that reads
+    as "not off-topic": a classifier outage must leave the bot working, not
+    have it refuse every message in every chat."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={}))
+    loop = AsyncMock(return_value="ок")
+    monkeypatch.setattr(router, "run_tool_loop", loop)
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot сколько хлеба?"), BOT_ID, BOT_USERNAME
+    )
+
+    loop.assert_awaited_once()
+
+
+async def test_the_classifier_is_told_what_the_bot_just_asked(db_pool):
+    """A bare "5" answering the bot's own question is not a new subject. With
+    no previous message in front of it the classifier sees a contentless
+    fragment, and the guard would refuse the answer to a question the bot
+    itself had asked."""
+    turns = [
+        {"role": "user", "content": "Добавь воды"},
+        {"role": "assistant", "content": "Сколько всего?"},
+    ]
+
+    prompt = router._intent_input("5", turns)
+
+    assert "Сколько всего?" in prompt
+    assert prompt.endswith("Message: 5")
+
+
+def test_the_prompt_holds_no_stale_question_when_the_bot_has_not_spoken():
+    assert router._intent_input("привет", []) == "Message: привет"

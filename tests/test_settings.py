@@ -1,4 +1,4 @@
-"""Per-chat settings, and the model chain that is the first of them."""
+"""Per-chat settings: the model chain, and the topic guard."""
 
 import bot.ai.client as ai_client
 import bot.settings as settings
@@ -111,3 +111,54 @@ def test_forgetting_a_chat_drops_its_chain(monkeypatch):
     ai_client.forget_chat(-400)
 
     assert ai_client.fallback_for(-400, list(ai_client.PROXY_MODELS)).index == 0
+
+
+# --- staying on the event ----------------------------------------------------
+
+async def test_a_chat_that_never_chose_gets_the_guard(db_pool):
+    """Strict by default, including for every chat that predates the setting.
+    The guard exists because the bot answered a pasta recipe in a group
+    organizing a picnic; defaulting to off would ship that bug."""
+
+    assert await settings.get_topic_guard(db_pool, 1) == settings.TOPIC_GUARD_STRICT
+
+
+async def test_a_chat_can_turn_the_guard_off_and_back_on(db_pool):
+
+    assert await settings.set_topic_guard(db_pool, 1, settings.TOPIC_GUARD_OFF, updated_by=77)
+    assert await settings.get_topic_guard(db_pool, 1) == settings.TOPIC_GUARD_OFF
+
+    assert await settings.set_topic_guard(db_pool, 1, settings.TOPIC_GUARD_STRICT)
+    assert await settings.get_topic_guard(db_pool, 1) == settings.TOPIC_GUARD_STRICT
+
+
+async def test_an_unknown_setting_is_refused_rather_than_stored(db_pool):
+    """Stored, it would read back as something get_topic_guard ignores — a
+    chat believing it had turned the guard off while the guard stayed on."""
+
+    assert await settings.set_topic_guard(db_pool, 1, "loose") is False
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM chat_settings WHERE chat_id = 1 AND key = $1", settings.TOPIC_GUARD
+    ) == 0
+
+
+async def test_a_value_written_by_something_else_falls_back(db_pool):
+    """A newer version, or a hand-edited row. Falling back beats raising in
+    the middle of a turn that was otherwise fine."""
+    await db_pool.execute(
+        "INSERT INTO chat_settings (chat_id, key, value) VALUES (1, $1, $2)",
+        settings.TOPIC_GUARD, '"whatever"',
+    )
+
+    assert await settings.get_topic_guard(db_pool, 1) == settings.TOPIC_GUARD_STRICT
+
+
+async def test_resetting_follows_the_default_again(db_pool):
+    await settings.set_topic_guard(db_pool, 1, settings.TOPIC_GUARD_OFF)
+
+    await settings.reset_topic_guard(db_pool, 1)
+
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM chat_settings WHERE chat_id = 1 AND key = $1", settings.TOPIC_GUARD
+    ) == 0
+    assert await settings.get_topic_guard(db_pool, 1) == settings.TOPIC_GUARD_STRICT

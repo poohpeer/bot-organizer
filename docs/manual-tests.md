@@ -332,6 +332,32 @@ only observed.
 
 ---
 
+### 4.10 An unrelated request is turned away
+
+- **Given** an active session and the topic guard left at its default
+- **When** you address the bot with «дай рецепт пасты»
+- **Then** it answers «Это не относится к теме обсуждения.» and nothing else
+- **Why not automatable** the gate is code and tested, but whether the
+  classifier calls a recipe unrelated is the model's call
+
+### 4.11 An answer to the bot's own question is not turned away
+
+- **Given** the bot has just asked how many there should be in total
+- **When** you answer with only «пять»
+- **Then** it applies five — it does not call a contentless reply unrelated
+- **Why not automatable** same reason, and this is the failure that matters
+  more: refusing a real organizing answer is worse than answering a stray
+  question. The bot's previous message is put in front of the classifier
+  precisely to stop it
+
+### 4.12 A borderline request the event actually needs
+
+- **Given** an active session for an event with a place
+- **When** you ask «как туда доехать?»
+- **Then** it answers — getting to the event is the event's business
+- **Why not automatable** this is where the guard is most likely to be
+  wrong, and the instruction tells the model to answer false when unsure
+
 ## 5. The model chain
 
 ### 5.1 The chain moves past a rate limit

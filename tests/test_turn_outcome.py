@@ -31,7 +31,7 @@ async def _turn(db_pool, monkeypatch, *, reply, does):
     grants = mcp_server.GrantStore()
     monkeypatch.setattr(router, "MCP_BASE_URL", "http://bot:8081")
     router.set_grant_store(grants)
-    monkeypatch.setattr(router, "classify", AsyncMock(return_value=False))
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": False, "off_topic": False}))
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
 
