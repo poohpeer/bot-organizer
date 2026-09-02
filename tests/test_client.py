@@ -214,3 +214,23 @@ def test_the_default_chain_names_only_models_ai_proxy_accepts():
 
     assert models & dead == set(), f"chain names models ai-proxy rejects: {models & dead}"
     assert {"gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemma-4-31b-it"} <= models
+
+
+async def test_a_hung_provider_is_cut_off_at_the_deadline(monkeypatch):
+    """MAX_TOOL_ITERATIONS bounds round trips and bounds nothing in time. A
+    request that is accepted and never answered is not a failed turn, it is a
+    turn that never ends."""
+    import asyncio
+
+    import bot.ai.tool_loop as tool_loop
+
+    monkeypatch.setattr(tool_loop, "TURN_DEADLINE_SECONDS", 0.05)
+
+    class _NeverAnswers:
+        name = "stuck"
+
+        async def start(self, *a, **kw):
+            await asyncio.sleep(30)
+
+    with pytest.raises(tool_loop.TurnTooSlow):
+        await tool_loop.run_tool_loop(_NeverAnswers(), "привет", {})

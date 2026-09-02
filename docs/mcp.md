@@ -144,8 +144,13 @@ with a bad token learns only that it is bad.
 
 ## What it buys
 
-`codex:` and `claude:sonnet` sit at the end of `AI_PROXY_MODELS`, behind
-Groq and Gemini. They are the reserve, not the front:
+`codex:` and `claude:sonnet` now sit at the **front** of `AI_PROXY_MODELS`,
+ahead of Groq and Gemini. They were the reserve until Groq's 8 000 tokens per
+minute stopped being enough: a single turn carries the system instruction and
+25 tool declarations, so two turns in a minute is all it takes, and a whole
+afternoon of 429s is what moved them.
+
+What that costs is worth knowing before changing it back or leaving it:
 
 | provider | one tool-calling turn |
 |---|---|
@@ -153,11 +158,13 @@ Groq and Gemini. They are the reserve, not the front:
 | claude | 6 in / 150 out, 39 958 cached |
 | codex | 5 546 in uncached / 143 out |
 
-Measured on the same task with the same single tool. The reason to keep them
-anyway is that they are separate accounts with separate quotas, and this
-chain has spent whole evenings against Groq's 429s. codex comes before claude
-because it is on a free account — tokens that cost nothing outrank a token
-count.
+Measured on the same task with the same single tool. codex sends roughly
+thirty-six times Groq's input tokens for the same work, and comes first
+anyway because it is on a free account: tokens that cost nothing outrank a
+token count. claude follows it, then the metered providers.
+
+The trade is quota against latency and tokens, and it is the right way round
+only while Groq keeps refusing. If the 429s stop, the old order is cheaper.
 
 **They only work when `MCP_BASE_URL` is set.** Without it the bot sends no
 address, ai-proxy refuses the request with `unsupported_tool_use`, and the

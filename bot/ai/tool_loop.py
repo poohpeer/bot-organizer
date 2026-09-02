@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import os
 import time
 
 from bot.ai.client import AllModelsUnavailable
@@ -14,6 +16,24 @@ from bot.turn_outcome import (
 log = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 6
+
+# The wall clock a whole turn gets, however many models and tools it takes.
+#
+# MAX_TOOL_ITERATIONS bounds the number of round trips and bounds nothing in
+# time: a provider that accepts a request and never answers is not a failed
+# turn, it is a turn that never ends. Live, one such request left the bot
+# silent — no reply, no error, no log line after it — while the person who
+# had written to it watched nothing happen and reasonably concluded the bot
+# was broken. The per-request timeout was 600 seconds, which is not a timeout.
+#
+# Nothing here is unbounded any more: this deadline is the outer one, and it
+# is deliberately short. An answer three minutes late is worse than an honest
+# "I could not".
+TURN_DEADLINE_SECONDS = float(os.environ.get("TURN_DEADLINE_SECONDS", "30"))
+
+
+class TurnTooSlow(Exception):
+    """The turn ran past TURN_DEADLINE_SECONDS and was abandoned."""
 
 
 def _as_response_dict(result) -> dict:
@@ -47,11 +67,25 @@ async def run_tool_loop(fallback, prompt, registry: dict, *, history=None, syste
     """Sends `prompt`, runs whatever tools the model asks for, feeds the
     results back, and repeats until it answers in plain text.
 
-    Raises AllModelsUnavailable when every model in the chain is refusing, and
-    RuntimeError if the model never stops calling tools. Neither is caught
-    here — the router turns the first into a specific reply and the second into
-    its generic one.
+    Raises AllModelsUnavailable when every model in the chain is refusing,
+    TurnTooSlow when the whole turn outruns TURN_DEADLINE_SECONDS, and
+    RuntimeError if the model never stops calling tools. None is caught here —
+    the router turns each into a reply.
     """
+    try:
+        async with asyncio.timeout(TURN_DEADLINE_SECONDS):
+            return await _run_tool_loop(
+                fallback, prompt, registry, history=history,
+                system_instruction=system_instruction, mcp_url=mcp_url, record=record,
+            )
+    except TimeoutError as e:
+        # Deliberately not swallowed into an empty answer: silence is what
+        # this exists to stop.
+        raise TurnTooSlow(f"turn ran past {TURN_DEADLINE_SECONDS}s") from e
+
+
+async def _run_tool_loop(fallback, prompt, registry: dict, *, history=None,
+                         system_instruction=None, mcp_url=None, record=None) -> str:
     tools = openai_tools()
     started = time.perf_counter()
     log.debug("tool loop -> prompt=%s | history=%d turns", truncate(prompt), len(history or []))
