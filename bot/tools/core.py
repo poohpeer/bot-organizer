@@ -2,6 +2,7 @@ import functools
 import json
 import logging
 import os
+from datetime import date as date_type
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ import bot.maps_links as maps_links
 import bot.quantity as quantity
 import bot.list_render as list_render
 import bot.participant_render as participant_render
+import bot.session as session
 import bot.timezones as timezones
 from bot.list_render import LIST_CATEGORIES
 
@@ -187,11 +189,38 @@ async def execute_confirmed_action(pool, bot, confirmation) -> dict:
         # and confirmation — don't claim a deletion that didn't happen.
         return {"status": "executed"} if deleted else {"status": "not_found"}
 
+    if action_type == "retopic":
+        # Keeps the session and everything hanging off it — list, participants,
+        # reminders — and only moves what the event is. Closing and reopening
+        # would throw away what the group built by hand.
+        updated = await session.retopic(
+            pool, confirmation["session_id"], params["activity_type"],
+            event_date=_as_date(params.get("event_date")),
+            event_date_raw=params.get("event_date"),
+        )
+        # None means the session closed between the proposal and the "yes".
+        return {"status": "executed", "activity_type": updated["activity_type"]} if updated \
+            else {"status": "not_found"}
+
     if action_type == "broadcast_message":
         await bot.send_message(chat_id=confirmation["chat_id"], text=params["text"])
         return {"status": "executed"}
 
     return {"status": "unknown_action_type"}
+
+
+def _as_date(iso: str | None):
+    """An ISO date, or None for anything else — including the empty string the
+    strict-JSON schema makes the model send when it has no date. Parsed here
+    rather than trusted, so a malformed value leaves the date alone instead of
+    failing a confirmation the group already said yes to."""
+    if not iso:
+        return None
+    try:
+        return date_type.fromisoformat(iso)
+    except (TypeError, ValueError):
+        log.warning("Ignoring unparseable event_date %r", iso)
+        return None
 
 
 def _normalize_category(category) -> str:

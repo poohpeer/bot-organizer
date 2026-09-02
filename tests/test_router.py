@@ -204,7 +204,11 @@ async def test_addressed_message_registers_a_chat_seen_for_the_first_time(db_poo
     assert await session.get_active_session(db_pool, -100) is not None
 
 
-async def test_event_date_taken_from_chat_title_when_only_there(db_pool, monkeypatch):
+async def test_the_chat_title_never_reaches_the_start_classifier(db_pool, monkeypatch):
+    """It used to be handed over as context and it decided the outcome: «Море
+    3/9» saying "начинай это отслеживать" was refused for naming no activity,
+    while the same words in «Пикник на море 3/9» started a session. What a
+    group calls itself is neither consent nor a description of the event."""
     await _ensure_chat(db_pool, title="Пикник 15 сентября")
     telegram_bot = AsyncMock()
     extract_mock = AsyncMock(return_value={
@@ -216,10 +220,11 @@ async def test_event_date_taken_from_chat_title_when_only_there(db_pool, monkeyp
 
     await router.handle_dormant_message(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME)
 
-    # the title must actually reach the model as context
     call_text = extract_mock.await_args.args[1]
-    assert "Пикник 15 сентября" in call_text
+    assert "Пикник 15 сентября" not in call_text
+    assert call_text == "Message: @orgbot следи за пикником"
 
+    # A date the *message* states is still taken.
     active = await session.get_active_session(db_pool, -100)
     assert active["event_date"] == dt.date(2026, 9, 15)
     assert active["event_date_raw"] == "15 сентября"
@@ -308,7 +313,10 @@ async def test_bot_added_with_bare_title_sends_todays_plain_greeting(db_pool, mo
     )
 
 
-async def test_bot_added_with_rich_info_names_activity_date_place_and_count(db_pool, monkeypatch):
+async def test_the_greeting_quotes_nothing_from_the_title(db_pool, monkeypatch):
+    """It used to announce «Вижу: поход, дата — 15.09.2026, место — поляна
+    Ханания», which made the bot look like it had already started organizing
+    something it had not, off a title nobody wrote for it."""
     monkeypatch.setattr(
         router.group_info, "fetch",
         AsyncMock(return_value={
@@ -316,43 +324,31 @@ async def test_bot_added_with_rich_info_names_activity_date_place_and_count(db_p
             "member_count": 9,
         }),
     )
-    monkeypatch.setattr(
-        router.group_info, "extract_event",
-        AsyncMock(return_value={
-            "activity_type": "поход", "event_date": "2026-09-15", "place": "поляна Ханания",
-        }),
-    )
     telegram_bot = AsyncMock()
-    update = _member_update("left", "member")
 
-    await router.handle_bot_added(db_pool, telegram_bot, update, BOT_ID, BOT_USERNAME)
+    await router.handle_bot_added(
+        db_pool, telegram_bot, _member_update("left", "member"), BOT_ID, BOT_USERNAME
+    )
 
     text = telegram_bot.send_message.await_args.kwargs["text"]
-    assert "поход" in text
-    assert "15.09.2026" in text
-    assert "поляна Ханания" in text
-    assert "9" in text
-    assert await session.get_active_session(db_pool, -100) is None
+    assert "поход" not in text.lower()
+    assert "15.09" not in text and "Ханания" not in text
+    assert "9" not in text, "the member count was part of the same announcement"
 
 
-async def test_bot_added_greeting_never_claims_to_know_member_names(db_pool, monkeypatch):
-    """It has a number from get_chat_member_count, not a roster — the
-    greeting must read that way (R7)."""
-    monkeypatch.setattr(
-        router.group_info, "fetch",
-        AsyncMock(return_value={"title": "Поход", "description": "15 сентября", "member_count": 9}),
-    )
-    monkeypatch.setattr(
-        router.group_info, "extract_event",
-        AsyncMock(return_value={"activity_type": "поход", "event_date": "2026-09-15", "place": None}),
-    )
+async def test_the_greeting_asks_whether_to_start(db_pool, monkeypatch):
+    """One question. Being added is still not consent — nothing is tracked
+    until somebody answers."""
+    _no_group_info(monkeypatch)
     telegram_bot = AsyncMock()
-    update = _member_update("left", "member")
 
-    await router.handle_bot_added(db_pool, telegram_bot, update, BOT_ID, BOT_USERNAME)
+    await router.handle_bot_added(
+        db_pool, telegram_bot, _member_update("left", "member"), BOT_ID, BOT_USERNAME
+    )
 
-    text = telegram_bot.send_message.await_args.kwargs["text"].lower()
-    assert "участник" not in text
+    text = telegram_bot.send_message.await_args.kwargs["text"]
+    assert "?" in text and f"@{BOT_USERNAME}" in text
+    assert await session.get_active_session(db_pool, -100) is None
 
 
 # --- handle_active_message ---------------------------------------------------
@@ -1225,14 +1221,14 @@ async def test_the_classifier_is_told_what_the_bot_just_asked(db_pool):
         {"role": "assistant", "content": "Сколько всего?"},
     ]
 
-    prompt = router._intent_input("5", turns)
+    prompt = router._intent_input("5", turns, "пикник")
 
     assert "Сколько всего?" in prompt
     assert prompt.endswith("Message: 5")
 
 
 def test_the_prompt_holds_no_stale_question_when_the_bot_has_not_spoken():
-    assert router._intent_input("привет", []) == "Message: привет"
+    assert router._intent_input("привет", [], "пикник") == "Currently tracking: пикник\n\nMessage: привет"
 
 
 async def test_closing_says_one_line_and_no_shopping_list(db_pool, monkeypatch):
@@ -1253,3 +1249,120 @@ async def test_closing_says_one_line_and_no_shopping_list(db_pool, monkeypatch):
     said = telegram_bot.send_message.await_args.kwargs["text"]
     assert said == router.CLOSING_LINE
     assert "мангал" not in said and "уголь" not in said
+
+
+# --- one event per group -----------------------------------------------------
+
+def _intent(**over):
+    base = {"stop": False, "off_topic": False, "new_event": False}
+    base.update(over)
+    return base
+
+
+async def test_a_second_event_is_refused_and_a_switch_offered(db_pool, monkeypatch):
+    """A group gets one session. Quietly ignoring the proposal, or quietly
+    switching to it, both leave the group unsure which event the bot is on."""
+    active = await _new_active_session(db_pool, activity_type="пикник в парке")
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(
+        return_value=_intent(new_event=True, new_event_activity="поездка на море")))
+    loop = AsyncMock(return_value="ок")
+    monkeypatch.setattr(router, "run_tool_loop", loop)
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot а поехали на море"), BOT_ID, BOT_USERNAME
+    )
+
+    loop.assert_not_awaited()
+    said = telegram_bot.send_message.await_args.kwargs["text"]
+    assert "пикник в парке" in said and "поездка на море" in said
+    pending = await core_tools.get_pending_confirmation(db_pool, active["chat_id"])
+    assert pending["action_type"] == "retopic"
+    # Still the old event until somebody says yes.
+    row = await db_pool.fetchrow("SELECT activity_type FROM sessions WHERE id = $1", active["id"])
+    assert row["activity_type"] == "пикник в парке"
+
+
+async def test_saying_yes_switches_the_event_and_keeps_the_list(db_pool, monkeypatch):
+    """Retopic rather than close-and-reopen: the list and the participants are
+    what the group built by hand, and a change of plan does not undo them."""
+    active = await _new_active_session(db_pool, activity_type="пикник в парке")
+    await core_tools.list_add(db_pool, active["id"], "мангал")
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(
+        return_value=_intent(new_event=True, new_event_activity="поездка на море",
+                             new_event_date="2026-09-05")))
+    telegram_bot = AsyncMock()
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot а поехали на море 5/9"), BOT_ID, BOT_USERNAME
+    )
+
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot да"), BOT_ID, BOT_USERNAME
+    )
+
+    row = await db_pool.fetchrow(
+        "SELECT activity_type, event_date, status FROM sessions WHERE id = $1", active["id"]
+    )
+    assert row["activity_type"] == "поездка на море"
+    assert row["event_date"] == dt.date(2026, 9, 5)
+    assert row["status"] == "active"
+    items = (await core_tools.list_show(db_pool, active["id"]))["items"]
+    assert [i["name"] for i in items] == ["мангал"]
+    assert "поездка на море" in telegram_bot.send_message.await_args.kwargs["text"]
+
+
+async def test_saying_no_leaves_the_event_alone(db_pool, monkeypatch):
+    active = await _new_active_session(db_pool, activity_type="пикник в парке")
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(
+        return_value=_intent(new_event=True, new_event_activity="поездка на море")))
+    telegram_bot = AsyncMock()
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot а поехали на море"), BOT_ID, BOT_USERNAME
+    )
+
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "no"}))
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot нет"), BOT_ID, BOT_USERNAME
+    )
+
+    row = await db_pool.fetchrow("SELECT activity_type FROM sessions WHERE id = $1", active["id"])
+    assert row["activity_type"] == "пикник в парке"
+
+
+async def test_a_switch_with_no_new_date_keeps_the_old_one(db_pool, monkeypatch):
+    """Changing what the event is says nothing about when it is, and an
+    emptied date would read as "nobody has said" — which is not true."""
+    active = await _new_active_session(db_pool, activity_type="пикник")
+    await db_pool.execute(
+        "UPDATE sessions SET event_date = $2 WHERE id = $1", active["id"], dt.date(2026, 9, 20)
+    )
+
+    updated = await session.retopic(db_pool, active["id"], "поход")
+
+    assert updated["activity_type"] == "поход"
+    assert updated["event_date"] == dt.date(2026, 9, 20)
+
+
+async def test_a_new_event_is_never_treated_as_off_topic(db_pool, monkeypatch):
+    """Proposing a different event is organizing, not chatter. Judged
+    off-topic first, the group could not change their minds at all."""
+    active = await _new_active_session(db_pool, activity_type="пикник")
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(
+        return_value=_intent(new_event=True, off_topic=True, new_event_activity="поход")))
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot давайте в поход"), BOT_ID, BOT_USERNAME
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] != router._OFF_TOPIC_REPLY
+    assert await core_tools.get_pending_confirmation(db_pool, active["chat_id"]) is not None
+
+
+async def test_the_classifier_is_told_what_is_being_tracked(db_pool):
+    """Without it, "поехали на море в субботу" said *about* the trip already
+    under way is indistinguishable from proposing a different one."""
+    prompt = router._intent_input("а поехали на море", [], "пикник в парке")
+
+    assert prompt.startswith("Currently tracking: пикник в парке")

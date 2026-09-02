@@ -200,7 +200,10 @@ def test_admin_is_offered_to_administrators_only():
     command and again on every button press, because a command absent from
     the menu can still be typed. Hiding it stops it being suggested to ten
     people who cannot use it."""
-    from telegram import BotCommandScopeAllChatAdministrators, BotCommandScopeDefault
+    from telegram import (
+        BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats,
+        BotCommandScopeAllPrivateChats, BotCommandScopeDefault,
+    )
 
     by_scope = {type(scope): {c.command for c in cmds}
                 for scope, cmds in main.COMMAND_SCOPES}
@@ -231,9 +234,14 @@ async def test_startup_actually_sends_the_command_list(monkeypatch):
     assert len(calls) == len(main.COMMAND_SCOPES), "every scope has to be sent"
     by_scope = {type(c.kwargs["scope"]): [b.command for b in c.args[0]] for c in calls}
 
-    from telegram import BotCommandScopeAllChatAdministrators, BotCommandScopeDefault
+    from telegram import (
+        BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats,
+        BotCommandScopeAllPrivateChats, BotCommandScopeDefault,
+    )
 
     assert by_scope[BotCommandScopeDefault] == ["start", "status", "list", "reminders"]
+    assert by_scope[BotCommandScopeAllPrivateChats] == ["start", "status", "list", "reminders"]
+    assert by_scope[BotCommandScopeAllGroupChats] == ["start", "status", "list", "reminders"]
     assert by_scope[BotCommandScopeAllChatAdministrators] == [
         "start", "status", "list", "reminders", "admin",
     ]
@@ -483,3 +491,48 @@ async def test_an_edited_update_carrying_no_message_is_ignored():
     await main.on_start(MagicMock(message=None), ctx)
 
     ctx.bot.send_message.assert_not_awaited()
+
+
+async def test_every_scope_a_group_resolves_before_default_is_set():
+    """Telegram resolves a group's menu narrowest-first and stops at the first
+    scope that has ever been set:
+
+        chat_member → chat_administrators → chat
+          → all_chat_administrators → all_group_chats → default
+
+    Only `default` and `all_chat_administrators` were being written, so an
+    ordinary member in a group matched `all_group_chats` — which still held
+    `/ask_everyone` from BotFather, backed by nothing here and kept by
+    Telegram ever since. They were offered one dead command and none of the
+    four that work, while administrators matched a scope earlier and saw the
+    real menu. It read exactly like a permissions bug and never was one.
+
+    A scope this tuple stops setting keeps whatever it last held, for ever
+    and invisibly, so the list is asserted rather than trusted.
+    """
+    from telegram import (
+        BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats,
+        BotCommandScopeAllPrivateChats, BotCommandScopeDefault,
+    )
+
+    covered = {type(scope) for scope, _cmds in main.COMMAND_SCOPES}
+
+    assert covered == {
+        BotCommandScopeDefault,
+        BotCommandScopeAllPrivateChats,
+        BotCommandScopeAllGroupChats,
+        BotCommandScopeAllChatAdministrators,
+    }
+
+
+async def test_an_ordinary_member_in_a_group_is_offered_the_public_commands():
+    """The scope a non-administrator actually lands on in a group."""
+    from telegram import BotCommandScopeAllGroupChats
+
+    for scope, commands in main.COMMAND_SCOPES:
+        if isinstance(scope, BotCommandScopeAllGroupChats):
+            assert [c.command for c in commands] == ["start", "status", "list", "reminders"]
+            assert "admin" not in {c.command for c in commands}
+            break
+    else:
+        raise AssertionError("all_group_chats is not set at all")

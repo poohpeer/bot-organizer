@@ -250,6 +250,35 @@ Consequences worth knowing:
   which `to_utc` passes through untouched; a bare local time would be re-read
   in the target's zone.
 
+## One event per group
+
+A chat has at most one active session, and that is now said out loud rather
+than enforced by accident. Somebody proposing a second event — «а поехали на
+море» while a picnic is being tracked — is told the bot can only follow one
+and asked whether to switch. Nothing changes until they say yes.
+
+A confirmed switch **retopics** the session rather than closing and reopening
+it: the shopping list, the participants and the pending reminders are what
+the group built by hand, and most of them survive a change of plan. The date
+is only overwritten when a new one was actually stated — switching from a
+picnic to a trip says nothing about when the trip is.
+
+## What starts a session
+
+Only what somebody wrote. The group's own title used to be handed to the
+classifier as context, and it decided the outcome: a chat called «Море 3/9»
+saying «начинай это отслеживать» was refused, because no word anywhere named
+an *activity* — while the same message in «Пикник на море 3/9» started a
+session immediately. The title is no longer part of that decision, and the
+greeting the bot posts when it joins no longer reads anything off it either.
+
+An unnamed activity is not a refusal any more. A session with nothing to call
+it is stored as «мероприятие»; the code already did that, and only the
+classifier's confidence flag stood in the way.
+
+This is separate from the sync below, which still applies a title change to
+an event **already** being tracked.
+
 ## Group title/description sync
 
 `GROUP_SYNC_INTERVAL_SECONDS` (default `60`) caps how often the worker calls

@@ -125,6 +125,19 @@ exercises Telegram's real answer.
 
 ---
 
+### 1.10 An ordinary member sees the commands
+
+- **Given** a group where you are **not** an administrator
+- **When** you type `/` in it
+- **Then** the menu offers /start, /status, /list and /reminders, and no
+  /admin
+- **Why not automatable** Telegram serves the menu, and the bug this covers
+  lived entirely on their side: `all_group_chats` still held `/ask_everyone`
+  from BotFather, and that scope is resolved before `default` for anyone who
+  is not an administrator. Only a real client shows what is really served
+
+---
+
 ## 2. Private chat
 
 ### 2.1 The status arrives privately
