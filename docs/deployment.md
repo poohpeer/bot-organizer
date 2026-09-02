@@ -269,8 +269,13 @@ Only what somebody wrote. The group's own title used to be handed to the
 classifier as context, and it decided the outcome: a chat called «Море 3/9»
 saying «начинай это отслеживать» was refused, because no word anywhere named
 an *activity* — while the same message in «Пикник на море 3/9» started a
-session immediately. The title is no longer part of that decision, and the
-greeting the bot posts when it joins no longer reads anything off it either.
+session immediately. The title is no longer part of that decision.
+
+The greeting the bot posts when it joins still reads it back — «Вижу:
+мероприятие, дата — 03.09.2026, место — Море. В группе 11 человек.» —
+because reporting is not deciding. It was removed along with the decision at
+first, which was wrong: saying what can be seen, before anything is tracked,
+is the whole point of the greeting.
 
 An unnamed activity is not a refusal any more. A session with nothing to call
 it is stored as «мероприятие»; the code already did that, and only the

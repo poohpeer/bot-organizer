@@ -313,15 +313,21 @@ async def test_bot_added_with_bare_title_sends_todays_plain_greeting(db_pool, mo
     )
 
 
-async def test_the_greeting_quotes_nothing_from_the_title(db_pool, monkeypatch):
-    """It used to announce «Вижу: поход, дата — 15.09.2026, место — поляна
-    Ханания», which made the bot look like it had already started organizing
-    something it had not, off a title nobody wrote for it."""
+async def test_the_greeting_reads_the_title_back(db_pool, monkeypatch):
+    """Reporting is not deciding. The title was taken out of the *start*
+    decision and stays out; what went with it by mistake was this — saying
+    out loud what can be seen, before anything is tracked."""
     monkeypatch.setattr(
         router.group_info, "fetch",
         AsyncMock(return_value={
             "title": "Поход выходного дня", "description": "15 сентября, поляна Ханания",
             "member_count": 9,
+        }),
+    )
+    monkeypatch.setattr(
+        router.group_info, "extract_event",
+        AsyncMock(return_value={
+            "activity_type": "поход", "event_date": "2026-09-15", "place": "поляна Ханания",
         }),
     )
     telegram_bot = AsyncMock()
@@ -331,9 +337,27 @@ async def test_the_greeting_quotes_nothing_from_the_title(db_pool, monkeypatch):
     )
 
     text = telegram_bot.send_message.await_args.kwargs["text"]
-    assert "поход" not in text.lower()
-    assert "15.09" not in text and "Ханания" not in text
-    assert "9" not in text, "the member count was part of the same announcement"
+    assert "поход" in text
+    assert "15.09.2026" in text
+    assert "поляна Ханания" in text
+    assert "9 человек" in text
+    # Read back, not started.
+    assert await session.get_active_session(db_pool, -100) is None
+
+
+async def test_the_greeting_says_nothing_it_did_not_find(db_pool, monkeypatch):
+    """R7's last criterion: a title with nothing in it must not scaffold an
+    empty «Поездка: не указано»."""
+    _no_group_info(monkeypatch)
+    telegram_bot = AsyncMock()
+
+    await router.handle_bot_added(
+        db_pool, telegram_bot, _member_update("left", "member"), BOT_ID, BOT_USERNAME
+    )
+
+    telegram_bot.send_message.assert_awaited_once_with(
+        chat_id=-100, text=router._GREETING_TEMPLATE.format(mention=f"@{BOT_USERNAME}")
+    )
 
 
 async def test_the_greeting_asks_whether_to_start(db_pool, monkeypatch):
