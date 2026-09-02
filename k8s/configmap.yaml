@@ -16,12 +16,17 @@ data:
   # reach the database and answered "доступ к данным организатора сейчас
   # недоступен". Their JSON classifier calls came back empty too.
   #
-  # What has changed since is MCP: MCP_BASE_URL below hands a CLI-backed
-  # model an address and a per-turn grant, and it fetches the tools itself
-  # rather than being handed an array it ignores. That is exactly the gap the
-  # note above describes, so this order should now work — but it has not been
-  # watched in production yet. If the bot starts answering that it cannot
-  # reach the data, this line is the first thing to look at.
+  # MCP closes half of that: MCP_BASE_URL below hands a CLI-backed model an
+  # address and a per-turn grant, and it fetches the tools itself rather than
+  # being handed an array it ignores. That covers the tool loop.
+  #
+  # It does not cover the classifier, and putting codex first here proved it
+  # within the hour: the session start/stop decision asks for JSON against a
+  # schema and declares no tools at all, codex answered nothing, extract()
+  # failed closed on {} as designed, and the bot replied «Что отслеживаем?»
+  # to «Едем в парк», «Море» and «Едем на море» in turn — unable to start a
+  # session at any point. bot.ai.client.CLASSIFIER_MODELS now filters these
+  # out of the classifier's chain, so this order is safe to keep.
   AI_PROXY_MODELS: codex:,claude:sonnet,openai/gpt-oss-120b,openai/gpt-oss-20b,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemma-4-31b-it
   # 30 seconds, and the bot's own client waits 35 — five seconds longer, so a
   # slow provider surfaces as the proxy's own error rather than the bot

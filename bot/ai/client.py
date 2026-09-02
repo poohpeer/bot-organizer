@@ -1,7 +1,7 @@
 import logging
 import os
 
-from bot.ai.proxy import ProxyProvider, is_retryable, proxy
+from bot.ai.proxy import ProxyProvider, is_cli_backed, is_retryable, proxy
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +50,31 @@ PROXY_MODELS = [m.strip() for m in os.environ.get(
     "AI_PROXY_MODELS",
     DEFAULT_PROXY_MODELS,
 ).split(",") if m.strip()]
+# What the cheap structured-JSON calls may use — the session start/stop
+# decision, the topic guard, the silent capture, the title/description
+# extraction.
+#
+# Never a CLI-backed adapter. They are driven through a command-line tool
+# that answers in prose, and a request for JSON against a schema comes back
+# empty: `extract() got an empty response, defaulting to {}`. Every caller of
+# extract() fails closed on {}, deliberately — so an empty answer is not a
+# degraded decision, it is the decision "no". Live, with codex at the front
+# of the chain, that turned into a bot that answered «Что отслеживаем?» to
+# «Едем в парк», «Море» and «Едем на море» in turn and could never start a
+# session at all.
+#
+# Derived from PROXY_MODELS rather than configured separately, so reordering
+# the chain — which is a thing chats and operators do — cannot take the
+# classifier down with it. MCP does not help here: it carries tool calls, and
+# these calls declare no tools.
+CLASSIFIER_MODELS = [m for m in PROXY_MODELS if not is_cli_backed(m)]
+if not CLASSIFIER_MODELS:
+    log.warning(
+        "AI_PROXY_MODELS holds only CLI-backed adapters (%s); the classifier will "
+        "try them anyway, because no classifier at all is worse", ",".join(PROXY_MODELS),
+    )
+    CLASSIFIER_MODELS = list(PROXY_MODELS)
+
 PROXY_MODEL = os.environ.get("AI_PROXY_MODEL", PROXY_MODELS[0])
 CHAIN = [(proxy, model) for model in PROXY_MODELS] if proxy else []
 

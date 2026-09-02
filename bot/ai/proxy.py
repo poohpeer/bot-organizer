@@ -67,10 +67,7 @@ class ProxyProvider:
         account's own default and rejects any explicit name, so there is no
         model to name here and "" would be echoed back as a bogus one.
         """
-        for prefix, provider in (
-            ("codex:", "codex"),
-            ("claude:", "claude_code"),
-        ):
+        for prefix, provider in CLI_BACKED_PROVIDERS:
             if model.startswith(prefix):
                 return provider, model[len(prefix):] or None
         if model.startswith("openai/"):
@@ -85,6 +82,20 @@ class ProxyProvider:
             chat.messages.append({"role": "user", "content": prompt})
         await chat.complete()
         return chat
+
+
+# The adapters ai-proxy drives through a command-line tool rather than an
+# HTTP API. Named once, because two things need to agree about them: which
+# provider a model name routes to, and which models can be asked for
+# structured JSON at all — see bot.ai.client.CLASSIFIER_MODELS.
+CLI_BACKED_PROVIDERS = (
+    ("codex:", "codex"),
+    ("claude:", "claude_code"),
+)
+
+
+def is_cli_backed(model: str) -> bool:
+    return any(model.startswith(prefix) for prefix, _ in CLI_BACKED_PROVIDERS)
 
 
 class _ProxyChat:
