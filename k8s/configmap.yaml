@@ -39,7 +39,14 @@ data:
   # The whole turn, however many models and tools it takes. The per-request
   # timeout above bounds one call; a chain of eight models would still add up
   # to minutes without this.
-  TURN_DEADLINE_SECONDS: "30"
+  #
+  # 60 rather than 30 because codex leads the chain and is slow: measured at
+  # 13.2s, 16.7s and 20.4s on three consecutive live turns, each fetching its
+  # tools over MCP. 20 seconds is two thirds of a 30-second budget, so the
+  # first turn needing a couple of tool calls would have been cut off and
+  # answered "не успел" — a deadline that fires on healthy turns teaches
+  # people to ignore it.
+  TURN_DEADLINE_SECONDS: "60"
   DEFAULT_TIMEZONE: Asia/Jerusalem
   QUIET_UNTIL_HOUR: "9"
   QUIET_FROM_HOUR: "21"
@@ -51,7 +58,9 @@ data:
   MCP_PORT: "8081"
   # Comfortably longer than a turn's deadline and no longer: the grant exists
   # for the turn that issued it, and the router revokes it in a finally.
-  MCP_GRANT_TTL_SECONDS: "60"
+  # Equal to the deadline would be too tight — a CLI reaching for one last
+  # tool at second 59 would find its own grant expired.
+  MCP_GRANT_TTL_SECONDS: "90"
   CONVERSATION_TURNS: "5"
   CONVERSATION_MAX_AGE_MINUTES: "30"
   GROUP_SYNC_INTERVAL_SECONDS: "60"
