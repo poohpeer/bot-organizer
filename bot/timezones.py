@@ -260,8 +260,8 @@ async def learn_timezone_from_coordinates(pool, chat_id: int, lat: float, lon: f
     """Set a chat's zone from a resolved place, unless a human already said it.
 
     Deliberately called from code on place resolution rather than left to the
-    model: piggybacking on `weather_lookup` would only work when the model
-    happened to check the weather, which is neither guaranteed nor predictable.
+    model, which would do it only on the turns it happened to think the zone
+    mattered — neither guaranteed nor predictable.
 
     Never overwrites what a human stated: someone saying "мы по Москве" knows
     better than the coordinates of a restaurant they looked up.

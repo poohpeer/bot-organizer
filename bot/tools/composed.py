@@ -60,9 +60,9 @@ async def resolve_and_save_place(pool, session_id, place_query) -> dict:
         looked_up["lat"], looked_up["lon"], place_query,
     )
     # A resolved place is the one moment we can learn the group's timezone for
-    # free, so reminders land at the right local time. Done here in code rather
-    # than left to weather_lookup, which only runs when the model decides the
-    # weather is relevant — neither guaranteed nor predictable.
+    # free, so reminders land at the right local time. Done here in code
+    # rather than left to the model, which would do it only when it decided
+    # the zone was relevant — neither guaranteed nor predictable.
     await timezones.learn_timezone_from_coordinates(
         pool, session_row["chat_id"], looked_up["lat"], looked_up["lon"]
     )

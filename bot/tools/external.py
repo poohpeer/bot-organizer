@@ -1,7 +1,6 @@
 import logging
 import os
 import time
-from datetime import date as date_type
 
 import httpx
 from google.genai import types
@@ -31,7 +30,7 @@ def _client() -> httpx.AsyncClient:
     """One shared AsyncClient for all outbound HTTP, per the epic's constraint.
 
     Created lazily so importing this module never needs a running event loop,
-    and reused so a maps+weather sequence inside a single tool loop doesn't pay
+    and reused so a search and a lookup in one tool loop don't each pay
     for a fresh TLS handshake each time.
     """
     global _shared_client
@@ -94,8 +93,6 @@ async def web_search(query: str) -> dict:
 
 _MAPS_API_KEY = os.environ["GOOGLE_MAPS_API_KEY"]
 _TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
-_WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
-_WEATHER_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 
 async def maps_lookup(query: str) -> dict:
@@ -165,78 +162,8 @@ async def maps_lookup(query: str) -> dict:
     }
 
 
-async def weather_lookup(lat: float, lon: float, date: str) -> dict:
-    """Daily forecast via Open-Meteo. Same fail-safe contract as
-    maps_lookup: non-200, transport errors, malformed JSON, or a response
-    missing the requested date's fields all resolve to found=False."""
-    started = time.perf_counter()
-    log.debug("weather_lookup -> lat=%s lon=%s date=%s", lat, lon, date)
-    try:
-        requested_date = date_type.fromisoformat(date)
-    except (TypeError, ValueError):
-        return {"found": False}
-
-    is_past = requested_date < date_type.today()
-    url = _WEATHER_ARCHIVE_URL if is_past else _WEATHER_URL
-    daily = (
-        "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum"
-        if is_past else
-        "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-    )
-    try:
-        resp = await _client().get(url, params={
-            "latitude": lat, "longitude": lon,
-            "daily": daily,
-            "timezone": "auto", "start_date": date, "end_date": date,
-        })
-        resp.raise_for_status()
-        body = resp.json()
-    except httpx.HTTPError:
-        log.warning("weather_lookup request failed for lat=%r lon=%r date=%r", lat, lon, date, exc_info=True)
-        return {"found": False}
-    except ValueError:
-        log.warning("weather_lookup returned malformed JSON for lat=%r lon=%r date=%r", lat, lon, date, exc_info=True)
-        return {"found": False}
-
-    if not isinstance(body, dict):
-        return {"found": False}
-
-    daily = body.get("daily") or {}
-    dates = daily.get("time") or []
-    if date not in dates:
-        return {"found": False}
-
-    idx = dates.index(date)
-    try:
-        weather_code_key = "weather_code" if is_past else "weathercode"
-        forecast = {
-            "found": True,
-            "weather_code": daily[weather_code_key][idx],
-            "temp_max_c": daily["temperature_2m_max"][idx],
-            "temp_min_c": daily["temperature_2m_min"][idx],
-        }
-        if is_past:
-            forecast["precipitation_sum_mm"] = daily["precipitation_sum"][idx]
-        else:
-            forecast["precipitation_probability_max"] = daily["precipitation_probability_max"][idx]
-        # Open-Meteo returns nulls for variables it can't supply (e.g. a date
-        # past the forecast horizon). Reporting temp_max_c=None as a "found"
-        # forecast would be exactly the confident-but-empty answer R10 forbids.
-        if forecast["temp_max_c"] is None and forecast["weather_code"] is None:
-            log.debug("weather_lookup <- %.0fms | all-null row, treating as not found",
-                      (time.perf_counter() - started) * 1000)
-            return {"found": False}
-        log.debug("weather_lookup <- %.0fms | %s",
-                  (time.perf_counter() - started) * 1000, truncate(forecast))
-        return forecast
-    except (KeyError, IndexError, TypeError):
-        log.warning("weather_lookup response missing expected daily fields for date=%r", date, exc_info=True)
-        return {"found": False}
-
-
 def build_external_registry() -> dict:
     return {
         "web_search": web_search,
         "maps_lookup": maps_lookup,
-        "weather_lookup": weather_lookup,
     }
