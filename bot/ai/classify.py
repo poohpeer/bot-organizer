@@ -5,7 +5,7 @@ import time
 
 from google.genai import types
 
-from bot.ai.client import PROXY_MODELS
+from bot.ai.client import CLASSIFIER_MODELS
 from bot.ai.proxy import proxy
 from bot.logging_setup import truncate
 
@@ -59,7 +59,7 @@ async def _extract_via_chain(instruction: str, text: str, schema) -> str | None:
     chain does. Returns the raw JSON text, or None if nobody answered."""
     if proxy is None:
         raise RuntimeError("AI_PROXY_URL is not configured")
-    models = [os.environ["AI_PROXY_MODEL"]] if os.environ.get("AI_PROXY_MODEL") else PROXY_MODELS
+    models = [os.environ["AI_PROXY_MODEL"]] if os.environ.get("AI_PROXY_MODEL") else CLASSIFIER_MODELS
     last_error = None
     for model in models:
         try:
@@ -96,11 +96,11 @@ async def extract(instruction: str, text: str, schema: types.Schema) -> dict:
     started = time.perf_counter()
     # Logs the chain, not a single name. This line used to print
     # CLASSIFIER_MODEL, a constant no call ever used: _extract_via_chain walks
-    # PROXY_MODELS. The log therefore named one model while the request went
+    # CLASSIFIER_MODELS. The log therefore named one model while the request went
     # to another, which is exactly the wrong thing to be told when debugging a
     # classifier that returned nothing.
     log.debug("AI extract -> chain=%s | instruction=%s | text=%s",
-              ",".join(PROXY_MODELS), truncate(instruction, 120), truncate(text))
+              ",".join(CLASSIFIER_MODELS), truncate(instruction, 120), truncate(text))
     try:
         raw = await _extract_via_chain(instruction, text, schema)
         # An empty completion is not JSON. json.loads(None) raises TypeError,
