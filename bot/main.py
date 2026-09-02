@@ -175,6 +175,7 @@ async def route_membership(pool, telegram_bot, chat_member_updated, bot_id, bot_
 # button press, because a command absent from the menu can still be typed.
 # Hiding it stops it being suggested to ten people who cannot use it.
 PUBLIC_COMMANDS = [
+    BotCommand("start", "Что я умею"),
     BotCommand("status", "Что известно о встрече"),
     BotCommand("list", "Список покупок"),
     BotCommand("reminders", "Что запланировано"),
@@ -205,6 +206,36 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await route_membership(
         bot_data["pool"], context.bot, update.my_chat_member,
         bot_data["bot_id"], bot_data["bot_username"], update_id=update.update_id,
+    )
+
+
+# What /start answers. Telegram sends it automatically the first time anyone
+# opens a private chat with a bot, so this is the first thing many people
+# ever read from it — it says what the bot is for and how to set it going,
+# and nothing about how it works inside.
+#
+# The same text in a group and in private: the bot is started the same way in
+# both, and a person who read one and then tried the other would be told two
+# different things about one bot.
+START_TEXT = (
+    "Я помогаю группе собраться: помню место и дату, веду список покупок, "
+    "отмечаю кто идёт и напоминаю о чём просили.\n\n"
+    "Чтобы начать — упомяните меня и скажите, что организуем: "
+    "«@{username} едем на шашлыки в субботу».\n\n"
+    "Дальше можно просто писать в чат, я читаю и запоминаю. "
+    "Обращайтесь ко мне, когда нужен ответ.\n\n"
+    "/status — что известно о встрече\n"
+    "/list — список покупок\n"
+    "/reminders — что запланировано"
+)
+
+
+async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    await context.bot.send_message(
+        chat_id=update.message.chat.id,
+        text=START_TEXT.format(username=context.bot_data["bot_username"]),
     )
 
 
@@ -314,6 +345,7 @@ def main() -> None:
         .post_shutdown(post_shutdown)
         .build()
     )
+    app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("status", on_status))
     app.add_handler(CommandHandler("list", on_list))
     app.add_handler(CommandHandler("reminders", on_reminders))
