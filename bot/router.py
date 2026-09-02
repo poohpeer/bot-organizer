@@ -30,7 +30,7 @@ import bot.tools.composed as composed_tools
 import bot.tools.core as core_tools
 import bot.tools.external as external_tools
 from bot.addressing import addressed_to_bot, bot_was_added
-from bot.ai.classify import classify, extract
+from bot.ai.classify import extract
 import bot.ai.client as ai_client
 import bot.settings as settings
 from bot.ai.client import AllModelsUnavailable
@@ -312,18 +312,78 @@ _CONFIRMATION_REPLY_INSTRUCTION_TEMPLATE = (
     "cancels it. 'unrelated' = this message isn't actually answering that."
 )
 
-# There is deliberately no keyword list here (R3): this is the only place
-# that decides a human wants the bot gone, and it decides it by asking the
-# model, not by matching text.
-_STOP_INSTRUCTION = (
-    "The bot is actively tracking an event for this group chat and was just "
-    "addressed directly. Answer true only if this message is an explicit, "
-    "direct instruction telling the bot it is no longer needed / to stop "
-    "tracking (e.g. 'that's it, thanks', 'you can rest now', 'we're done', "
-    "'больше не нужен'). Chat that merely sounds like the event is wrapping "
-    "up, without directly telling the bot to stop, is false. An ordinary "
-    "question or request is also false."
+_OFF_TOPIC_REPLY = "Это не относится к теме обсуждения."
+
+_INTENT_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "stop": types.Schema(
+            type=types.Type.BOOLEAN,
+            description="True only for an explicit instruction to stop tracking.",
+        ),
+        "off_topic": types.Schema(
+            type=types.Type.BOOLEAN,
+            description="True only if this asks for something unrelated to the event.",
+        ),
+    },
+    required=["stop", "off_topic"],
 )
+
+# Both questions in one call, and deliberately no keyword list for either
+# (R3): these are the only two places that decide a human wants the bot gone
+# or wants something the bot is not for, and both decide by asking the model
+# rather than matching text.
+#
+# One call rather than two because they are asked at the same point about the
+# same message, and a second round trip is latency and quota spent to learn
+# something the first model already had in front of it.
+_ADDRESSED_INTENT_INSTRUCTION = (
+    "The bot is actively tracking one event for this group chat — who is "
+    "coming, what to buy or bring, where and when it happens, and reminders "
+    "about it — and was just addressed directly. Classify the message.\n"
+    "stop: true only if this is an explicit, direct instruction telling the "
+    "bot it is no longer needed / to stop tracking ('that's it, thanks', "
+    "'you can rest now', 'we're done', 'больше не нужен'). Chat that merely "
+    "sounds like the event is wrapping up, without directly telling the bot "
+    "to stop, is false. An ordinary question or request is also false.\n"
+    "off_topic: true only if this asks for something with nothing to do with "
+    "organizing the event — a recipe, general knowledge, trivia, news, "
+    "coding help, an opinion on something else. Anything about the event is "
+    "false: who is coming, what to bring and how much, the place, the date, "
+    "getting there, reminders, and asking what the bot knows or can do.\n"
+    "A short or contentless message that answers the bot's own previous "
+    "message is never off_topic — 'да', '5', 'два килограмма' are answers, "
+    "not new subjects. The bot's previous message is given below when there "
+    "was one.\n"
+    "When unsure, answer false. Refusing a real organizing question is worse "
+    "than answering a stray one."
+)
+
+
+def _intent_input(text: str, turns: list[dict]) -> str:
+    """The message, plus whatever the bot last said.
+
+    Without it a bare "5" is indistinguishable from a non sequitur, and the
+    guard would refuse to answer the very question the bot had just asked.
+    """
+    last_bot = next(
+        (t["content"] for t in reversed(turns) if t.get("role") == "assistant"), None
+    )
+    if not last_bot:
+        return f"Message: {text}"
+    return f"Bot's previous message: {last_bot}\n\nMessage: {text}"
+
+
+async def _addressed_intent(text: str, turns: list[dict]) -> dict:
+    """Both verdicts for one addressed message.
+
+    Fails open in both directions, and that is the point of the phrasing:
+    extract() returns {} on any failure, so a classifier outage reads as
+    "not a stop, not off-topic" — the bot behaves exactly as it did before
+    either guard existed. Asking "is this on topic?" instead would have the
+    same outage refuse every message in every chat.
+    """
+    return await extract(_ADDRESSED_INTENT_INSTRUCTION, _intent_input(text, turns), _INTENT_SCHEMA)
 
 _SILENT_CAPTURE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
@@ -868,7 +928,12 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         # "unrelated" -> fall through to normal processing below.
 
     log.debug("session %s: addressed, deciding intent", session_id)
-    if await classify(_STOP_INSTRUCTION, text):
+    # Fetched once and used twice: the classifier needs the bot's last message
+    # to tell an answer from a new subject, and the tool loop needs the same
+    # exchanges to be answerable at all.
+    turns = await history.recent_turns(pool, chat_id)
+    intent = await _addressed_intent(text, turns)
+    if intent.get("stop"):
         # close_session returns False when someone (or the worker's auto-close)
         # got there first. Posting the summary regardless means two people
         # saying "спасибо, всё" at once get two closing summaries.
@@ -885,6 +950,23 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             decision={"trigger": "explicit", "session_id": session_id},
         )
         return
+
+    # Asked after the stop check, so "спасибо, всё" still closes the session
+    # rather than being turned away as unrelated.
+    if intent.get("off_topic"):
+        guard = await settings.get_topic_guard(pool, chat_id)
+        if guard == settings.TOPIC_GUARD_STRICT:
+            log.info("session %s: off topic, not answering", session_id)
+            await session.touch_activity(pool, session_id)
+            await telegram_bot.send_message(chat_id=chat_id, text=_OFF_TOPIC_REPLY)
+            # Its own stage, so history.recent_turns keeps ignoring it: a
+            # refusal is not part of the conversation the model has to follow,
+            # and feeding it back would have the bot explaining its refusal.
+            await decision_log.log_decision(
+                pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="off_topic",
+                decision={"reply": _OFF_TOPIC_REPLY, "guard": guard},
+            )
+            return
 
     await session.touch_activity(pool, session_id)
     registry = _build_registry(pool, telegram_bot, session_id=session_id, current_user=message.from_user)
@@ -911,7 +993,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             # Without this the bot cannot be answered: every question it asks
             # arrives back as a message it has no memory of prompting. See
             # bot/history.py.
-            history=await history.recent_turns(pool, chat_id),
+            history=turns,
             mcp_url=_mcp_url(mcp_token),
             record=record,
         )

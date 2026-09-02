@@ -31,6 +31,7 @@ SCHEMAS = {
     "router._START_SCHEMA": router._START_SCHEMA,
     "router._SILENT_CAPTURE_SCHEMA": router._SILENT_CAPTURE_SCHEMA,
     "router._YES_NO_UNRELATED_SCHEMA": router._YES_NO_UNRELATED_SCHEMA,
+    "router._INTENT_SCHEMA": router._INTENT_SCHEMA,
     "classify._BOOL_SCHEMA": classify._BOOL_SCHEMA,
 }
 

@@ -49,6 +49,7 @@ _MENU = "adm:menu"
 _CHAIN = "adm:chain"
 _PICK = "adm:pick:"
 _RESET = "adm:reset"
+_GUARD = "adm:guard"
 _CLOSE = "adm:close"
 
 
@@ -90,9 +91,16 @@ async def is_chat_admin(telegram_bot, chat_id: int, user_id: int | None) -> bool
     return getattr(member, "status", None) in {"creator", "administrator"}
 
 
-def _menu_keyboard() -> InlineKeyboardMarkup:
+def _menu_keyboard(guard: str) -> InlineKeyboardMarkup:
+    """The menu, with the topic guard's current state written on its button.
+
+    A toggle rather than a submenu: there are two states and no order to
+    arrange, so a screen of its own would be a tap on the way to a tap.
+    """
+    state = "вкл" if guard == settings.TOPIC_GUARD_STRICT else "выкл"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Порядок моделей", callback_data=_CHAIN)],
+        [InlineKeyboardButton(f"Только по теме: {state}", callback_data=_GUARD)],
         [InlineKeyboardButton("Закрыть", callback_data=_CLOSE)],
     ])
 
@@ -163,7 +171,8 @@ async def handle_command(pool, telegram_bot, message) -> None:
         await telegram_bot.send_message(chat_id=chat_id, text=_NOT_AN_ADMIN)
         return
     await telegram_bot.send_message(
-        chat_id=chat_id, text=_MENU_TITLE, reply_markup=_menu_keyboard()
+        chat_id=chat_id, text=_MENU_TITLE,
+        reply_markup=_menu_keyboard(await settings.get_topic_guard(pool, chat_id)),
     )
 
 
@@ -189,7 +198,10 @@ async def handle_callback(pool, telegram_bot, query) -> None:
 
     if data == _MENU:
         await query.answer()
-        await query.edit_message_text(_MENU_TITLE, reply_markup=_menu_keyboard())
+        await query.edit_message_text(
+            _MENU_TITLE,
+            reply_markup=_menu_keyboard(await settings.get_topic_guard(pool, chat_id)),
+        )
         return
 
     if data == _RESET:
@@ -204,6 +216,19 @@ async def handle_callback(pool, telegram_bot, query) -> None:
         ai_client.forget_chat(chat_id)
         await query.answer(_SAVED)
         await _show_chain(pool, chat_id, query)
+        return
+
+    if data == _GUARD:
+        # Flipped from what is stored rather than carried in the payload: two
+        # administrators looking at the same open menu would otherwise each
+        # send the state they saw, and the second press would re-apply the
+        # first one's value instead of changing anything.
+        guard = await settings.get_topic_guard(pool, chat_id)
+        flipped = (settings.TOPIC_GUARD_OFF if guard == settings.TOPIC_GUARD_STRICT
+                   else settings.TOPIC_GUARD_STRICT)
+        await settings.set_topic_guard(pool, chat_id, flipped, updated_by=user_id)
+        await query.answer(_SAVED)
+        await query.edit_message_text(_MENU_TITLE, reply_markup=_menu_keyboard(flipped))
         return
 
     if data == _CHAIN:
