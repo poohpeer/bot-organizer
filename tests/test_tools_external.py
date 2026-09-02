@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -115,8 +116,14 @@ async def test_maps_lookup_not_found(monkeypatch):
 
 
 async def test_weather_lookup_found(monkeypatch):
+    # Tomorrow, not a date written down. weather_lookup reads "weathercode"
+    # from the forecast API and "weather_code" from the archive one, and picks
+    # by whether the date has passed — so a literal here quietly switches the
+    # test to the other branch the moment it does. This one did, on
+    # 2026-09-02, and failed on a body it had matched for months.
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
     body = {"daily": {
-        "time": ["2026-09-01"],
+        "time": [tomorrow],
         "weathercode": [3],
         "temperature_2m_max": [29.5],
         "temperature_2m_min": [21.0],
@@ -124,7 +131,7 @@ async def test_weather_lookup_found(monkeypatch):
     }}
     monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=_http_response(body)))
 
-    result = await external.weather_lookup(32.79, 35.05, "2026-09-01")
+    result = await external.weather_lookup(32.79, 35.05, tomorrow)
 
     assert result["found"] is True
     assert result["temp_max_c"] == 29.5

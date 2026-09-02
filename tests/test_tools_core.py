@@ -1,7 +1,29 @@
 import inspect
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import bot.tools.core as core
 import bot.tools.schema as schema
+import bot.timezones as timezones
+
+
+def _ahead(days: int) -> str:
+    """A wall-clock time still in the future whenever the suite is run.
+
+    reminder_set refuses a repeat whose end has already passed, so a date
+    written into a test is a fuse. These two passed for months and began
+    failing on 2026-09-02, when the 2026-09-01 in them went by — on main, in
+    CI, with nothing in the change that broke them.
+
+    Read in the chat's zone, not the machine's, because that is what
+    reminder_set does with a naive time: computing this against a UTC clock
+    and having it re-read three hours further east is how a "future" date
+    lands in the past. Whole days for the same reason — an offset has to be
+    bigger than any zone's.
+    """
+    now_local = datetime.now(ZoneInfo(timezones.DEFAULT_TIMEZONE))
+    ahead = (now_local + timedelta(days=days)).replace(minute=0, second=0, microsecond=0)
+    return ahead.strftime("%Y-%m-%dT%H:00:00")
 
 
 async def _new_session(db_pool, chat_id=1, tz=None):
@@ -584,13 +606,13 @@ async def test_reminder_set_with_a_repeat_stores_both_columns(db_pool):
     session_id = await _new_session(db_pool)
 
     result = await core.reminder_set(
-        db_pool, session_id, message="Пей воду", remind_at="2026-09-01T09:00:00",
-        repeat_every_minutes=30, repeat_until="2026-09-01T12:00:00",
+        db_pool, session_id, message="Пей воду", remind_at=_ahead(1),
+        repeat_every_minutes=30, repeat_until=_ahead(2),
     )
 
     assert result["status"] == "ok"
     assert result["repeats_every_minutes"] == 30
-    assert result["repeats_until"] == "2026-09-01T12:00:00"
+    assert result["repeats_until"] == _ahead(2)
     row = await db_pool.fetchrow("SELECT * FROM reminders WHERE id = $1", result["reminder_id"])
     assert row["repeat_every_minutes"] == 30
     assert row["repeat_until"] is not None
@@ -726,15 +748,15 @@ async def test_reminder_list_falls_back_to_the_id_for_an_unknown_target(db_pool)
 async def test_reminder_list_includes_repeat_fields(db_pool):
     session_id = await _new_session(db_pool)
     await core.reminder_set(
-        db_pool, session_id, message="Пей воду", remind_at="2026-09-01T09:00:00",
-        repeat_every_minutes=30, repeat_until="2026-09-01T12:00:00",
+        db_pool, session_id, message="Пей воду", remind_at=_ahead(1),
+        repeat_every_minutes=30, repeat_until=_ahead(2),
     )
 
     result = await core.reminder_list(db_pool, session_id)
 
     entry = result["reminders"][0]
     assert entry["repeats_every_minutes"] == 30
-    assert entry["repeats_until"] == "2026-09-01T12:00:00"
+    assert entry["repeats_until"] == _ahead(2)
 
 
 async def test_reminder_list_non_repeating_has_none_repeat_fields(db_pool):
