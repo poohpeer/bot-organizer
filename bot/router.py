@@ -193,28 +193,72 @@ def _parse_event_date(value) -> date | None:
         return None
 
 
+def _format_event_date(iso_date: str) -> str:
+    parsed = _parse_event_date(iso_date)
+    # A malformed date from the classifier is shown as-is rather than dropped:
+    # unlike session start (where a bad date just means no date was recorded),
+    # here it already passed the "something was found" check, so silently
+    # dropping it would make the greeting mention a place/activity but go
+    # mute about the date the model just said it saw.
+    return f"{parsed:%d.%m.%Y}" if parsed is not None else iso_date
+
+
+def _greeting_with_info(event: dict, member_count, bot_username: str) -> str:
+    """What the group's own title and description already say, read back.
+
+    Reporting is not deciding. The title was taken out of the *start*
+    decision, and it stays out — a chat called «Море 3/9» that asks the bot
+    to begin is not refused for naming no activity any more. What was thrown
+    out with it, wrongly, was this: saying out loud what can be seen, so the
+    group knows what the bot picked up before anything is tracked.
+
+    A number from get_chat_member_count, never a roster (R7): the group's
+    members are not being listed, so the sentence must not read as if they
+    were known by name.
+    """
+    parts = [event.get("activity_type") or "мероприятие"]
+    if event.get("event_date"):
+        parts.append(f"дата — {_format_event_date(event['event_date'])}")
+    if event.get("place"):
+        parts.append(f"место — {event['place']}")
+    count_clause = f" В группе {member_count} человек." if member_count is not None else ""
+    return (
+        f"Привет! Вижу: {', '.join(parts)}.{count_clause}\n\n"
+        f"Начинаем отслеживать? Упомяните @{bot_username} или ответьте на это "
+        "сообщение — скажите «начинай» или опишите, что организуем."
+    )
+
+
 async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_username) -> None:
     """Greet a chat the bot was just added to. Being added is not consent
     (R5): this never starts a session, and a promotion/permission change
     (bot_was_added returning False) must stay silent.
 
-    The greeting asks one question and reads nothing off the group's title.
-    It used to announce what the title and description stated, which made the
-    bot look like it already knew what it was organizing while it had started
-    nothing at all.
-
-    The creator is still looked up, because that is a fact about the chat
-    rather than about the event, and their stated timezone is what a chat
-    with no zone of its own falls back to.
+    Reports what the group's own title/description already say (R7) — the
+    activity, date and place if stated, plus the member count — and then asks
+    whether to begin. Reporting is not deciding: the title is no longer part
+    of the *start* decision, and reading it back here does not put it back
+    there.
     """
     if not bot_was_added(chat_member_updated, bot_id):
         return
     chat = chat_member_updated.chat
     await group_info.ensure_creator_known(pool, telegram_bot, chat.id)
-
-    await telegram_bot.send_message(
-        chat_id=chat.id, text=_GREETING_TEMPLATE.format(mention=f"@{bot_username}")
+    info = await group_info.fetch(telegram_bot, chat.id)
+    tz = await timezones.chat_timezone(pool, chat.id)
+    event = await group_info.extract_event(
+        info.get("title"), info.get("description"), timezones.local_date(tz)
     )
+
+    if any(event.get(k) for k in ("activity_type", "event_date", "place")):
+        text = _greeting_with_info(event, info.get("member_count"), bot_username)
+    else:
+        # Nothing was actually found — the plain greeting, not an empty
+        # "Поездка: не указано" scaffold (R7's last criterion: nothing
+        # invented).
+        text = _GREETING_TEMPLATE.format(mention=f"@{bot_username}")
+
+    await telegram_bot.send_message(chat_id=chat.id, text=text)
 
 
 async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_username) -> None:
