@@ -605,7 +605,6 @@ async def test_two_simultaneous_stops_post_one_summary(db_pool, monkeypatch):
 
     active = await _new_active_session(db_pool)
     monkeypatch.setattr(router, "_addressed_intent", AsyncMock(return_value={"stop": True, "off_topic": False}))
-    monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="ИТОГИ"))
     telegram_bot = AsyncMock()
 
     await asyncio.gather(
@@ -626,7 +625,6 @@ async def test_a_late_yes_to_an_already_closed_session_says_so(db_pool, monkeypa
     active = await db_pool.fetchrow("SELECT * FROM sessions WHERE id = $1", active["id"])
     await session.close_session(db_pool, active["id"], reason="auto_close_silence")
     monkeypatch.setattr(router, "extract", AsyncMock(return_value={"reply": "yes"}))
-    monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="ИТОГИ"))
     telegram_bot = AsyncMock()
 
     await router.handle_active_message(
@@ -1189,14 +1187,13 @@ async def test_stop_is_decided_before_off_topic(db_pool, monkeypatch):
     monkeypatch.setattr(
         router, "_addressed_intent", AsyncMock(return_value={"stop": True, "off_topic": True})
     )
-    monkeypatch.setattr(router, "_summarize_session", AsyncMock(return_value="ИТОГИ"))
     telegram_bot = AsyncMock()
 
     await router.handle_active_message(
         db_pool, telegram_bot, active, _message("@orgbot спасибо, всё"), BOT_ID, BOT_USERNAME
     )
 
-    assert telegram_bot.send_message.await_args.kwargs["text"] == "ИТОГИ"
+    assert telegram_bot.send_message.await_args.kwargs["text"] == router.CLOSING_LINE
     row = await db_pool.fetchrow("SELECT status FROM sessions WHERE id = $1", active["id"])
     assert row["status"] == "closed"
 
@@ -1236,3 +1233,23 @@ async def test_the_classifier_is_told_what_the_bot_just_asked(db_pool):
 
 def test_the_prompt_holds_no_stale_question_when_the_bot_has_not_spoken():
     assert router._intent_input("привет", []) == "Message: привет"
+
+
+async def test_closing_says_one_line_and_no_shopping_list(db_pool, monkeypatch):
+    """The summary read the list back at the one moment nobody needs it — a
+    wall of text about an event that had just finished."""
+    active = await _new_active_session(db_pool)
+    await core_tools.list_add(db_pool, active["id"], "мангал")
+    await core_tools.list_add(db_pool, active["id"], "уголь")
+    monkeypatch.setattr(
+        router, "_addressed_intent", AsyncMock(return_value={"stop": True, "off_topic": False})
+    )
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot всё, спасибо"), BOT_ID, BOT_USERNAME
+    )
+
+    said = telegram_bot.send_message.await_args.kwargs["text"]
+    assert said == router.CLOSING_LINE
+    assert "мангал" not in said and "уголь" not in said

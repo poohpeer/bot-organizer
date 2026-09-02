@@ -707,12 +707,11 @@ def _build_registry(pool, telegram_bot, *, session_id: int | None = None, curren
     return registry
 
 
-async def _summarize_session(pool, session_id: int) -> str:
-    list_result = await core_tools.list_show(pool, session_id)
-    participants_result = await core_tools.get_participants(pool, session_id)
-    items = ", ".join(i["name"] for i in list_result["items"]) or "пусто"
-    confirmed = [p["display_name"] for p in participants_result["participants"] if p["status"] == "confirmed"]
-    return f"Готово, сессию закрываю. Список: {items}. Подтвердили: {', '.join(confirmed) or 'никто'}."
+# What the bot says on the way out. It used to read back the shopping list
+# and who had confirmed — a wall of text about an event that had just
+# finished, arriving at the one moment nobody needs it. Anyone who does can
+# ask before closing, or read /list while the session is still open.
+CLOSING_LINE = "Мавр сделал своё дело, мавр может уходить."
 
 
 LINK_ADDED = "Добавил ссылку на место."
@@ -867,13 +866,12 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     if active_session["closing_question_asked_at"] is not None:
         reply = (await extract(_CLOSING_REPLY_INSTRUCTION, text, _YES_NO_UNRELATED_SCHEMA)).get("reply")
         if reply == "yes":
-            summary = await _summarize_session(pool, session_id)
             # False means the session had already closed — the worker's
-            # auto-close beat a late reply. Say so rather than posting a
-            # summary that implies this person closed it.
+            # auto-close beat a late reply. Say so rather than signing off as
+            # if this person had closed it.
             applied = await session.record_closing_reply(pool, session_id, continued=False)
             await telegram_bot.send_message(
-                chat_id=chat_id, text=summary if applied else _ALREADY_CLOSED
+                chat_id=chat_id, text=CLOSING_LINE if applied else _ALREADY_CLOSED
             )
             await decision_log.log_decision(
                 pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="closing_reply",
@@ -937,14 +935,13 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         # close_session returns False when someone (or the worker's auto-close)
         # got there first. Posting the summary regardless means two people
         # saying "спасибо, всё" at once get two closing summaries.
-        summary = await _summarize_session(pool, session_id)
         if not await session.close_session(pool, session_id, reason="explicit_stop"):
             await decision_log.log_decision(
                 pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_stop",
                 decision={"trigger": "explicit", "session_id": session_id, "result": "already_closed"},
             )
             return
-        await telegram_bot.send_message(chat_id=chat_id, text=summary)
+        await telegram_bot.send_message(chat_id=chat_id, text=CLOSING_LINE)
         await decision_log.log_decision(
             pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_stop",
             decision={"trigger": "explicit", "session_id": session_id},

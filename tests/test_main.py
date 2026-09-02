@@ -233,9 +233,9 @@ async def test_startup_actually_sends_the_command_list(monkeypatch):
 
     from telegram import BotCommandScopeAllChatAdministrators, BotCommandScopeDefault
 
-    assert by_scope[BotCommandScopeDefault] == ["status", "list", "reminders"]
+    assert by_scope[BotCommandScopeDefault] == ["start", "status", "list", "reminders"]
     assert by_scope[BotCommandScopeAllChatAdministrators] == [
-        "status", "list", "reminders", "admin",
+        "start", "status", "list", "reminders", "admin",
     ]
 
 
@@ -433,3 +433,53 @@ async def test_rejoin_does_not_overwrite_a_confirmed_status(db_pool, monkeypatch
     )
     assert status == "confirmed"
     telegram_bot.send_message.assert_not_awaited()
+
+
+# --- /start -------------------------------------------------------------------
+
+class _StartCtx:
+    def __init__(self, username="orgbot"):
+        self.bot = AsyncMock()
+        self.bot_data = {"bot_username": username}
+
+
+def _command_update(text="/start", chat_id=-100):
+    return MagicMock(message=MagicMock(chat=MagicMock(id=chat_id), text=text))
+
+
+async def test_start_says_what_the_bot_is_for_and_how_to_begin():
+    """Telegram sends /start by itself the first time anyone opens a private
+    chat with a bot, so this is the first thing many people ever read from
+    it. A greeting that does not say how to set it going wastes that."""
+    ctx = _StartCtx()
+
+    await main.on_start(_command_update(), ctx)
+
+    text = ctx.bot.send_message.await_args.kwargs["text"]
+    assert "список покупок" in text
+    assert "@orgbot" in text, "the example has to name this bot, not a placeholder"
+
+
+async def test_start_answers_the_same_way_in_a_group_and_in_private():
+    """One bot, started the same way in both. Two different answers would
+    have a person who read one and tried the other doubting which was true."""
+    ctx = _StartCtx()
+
+    await main.on_start(_command_update(chat_id=-100), ctx)
+    in_group = ctx.bot.send_message.await_args.kwargs["text"]
+    await main.on_start(_command_update(chat_id=555), ctx)
+    in_private = ctx.bot.send_message.await_args.kwargs["text"]
+
+    assert in_group == in_private
+
+
+async def test_start_is_offered_in_the_slash_menu():
+    assert "start" in {c.command for c in main.PUBLIC_COMMANDS}
+
+
+async def test_an_edited_update_carrying_no_message_is_ignored():
+    ctx = _StartCtx()
+
+    await main.on_start(MagicMock(message=None), ctx)
+
+    ctx.bot.send_message.assert_not_awaited()
