@@ -19,6 +19,9 @@ spec:
         - name: bot-organizer-ghcr-pull-secret
       containers:
         - name: bot
+          # Rewritten to :v<run number> by the deploy job before it applies
+          # this — see "Deploying a new version" in the README. Kept as
+          # :latest here so applying the file by hand still works.
           image: ghcr.io/poohpeer/bot-organizer:latest
           imagePullPolicy: Always
           command: ["uv", "run", "--no-sync", "python", "-m", "bot.main"]
@@ -83,6 +86,9 @@ spec:
         - name: bot-organizer-ghcr-pull-secret
       containers:
         - name: worker
+          # Rewritten to :v<run number> by the deploy job before it applies
+          # this — see "Deploying a new version" in the README. Kept as
+          # :latest here so applying the file by hand still works.
           image: ghcr.io/poohpeer/bot-organizer:latest
           imagePullPolicy: Always
           command: ["uv", "run", "--no-sync", "python", "-m", "worker.main"]
