@@ -5,19 +5,36 @@ metadata:
 data:
   AI_PROXY_URL: http://ai-proxy:8787
   AI_PROXY_PROVIDER: groq
-  # No codex: or claude: entries. Both are CLI-backed adapters in ai-proxy
-  # that accept a tools array and silently ignore it — observed live as
-  # "start provider=codex tools=26" followed by "complete ... tool_calls=0".
-  # Almost everything this bot does needs a tool call, so a provider that
-  # drops them does not degrade, it fabricates: asked to show the list,
-  # codex could not reach the database and answered "доступ к данным
-  # организатора сейчас недоступен", which is the confident-but-wrong reply
-  # R10 forbids. Their JSON classifier calls came back empty too
-  # ("extract() got an empty response"). Until ai-proxy refuses a
-  # tool-bearing request it cannot serve, this chain stays on the providers
-  # that actually support tool calling.
-  AI_PROXY_MODELS: openai/gpt-oss-120b,openai/gpt-oss-20b,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemma-4-31b-it,codex:,claude:sonnet
-  AI_PROXY_TIMEOUT_S: "600"
+  # codex first, then claude, then the rest — asked for directly.
+  #
+  # This reverses a deliberate order, and the reason it was deliberate is
+  # worth keeping: both are CLI-backed adapters in ai-proxy that accept a
+  # tools array and silently ignore it — observed live as "start
+  # provider=codex tools=26" followed by "complete ... tool_calls=0". Almost
+  # everything this bot does needs a tool call, so a provider that drops them
+  # does not degrade, it fabricates: asked to show the list, codex could not
+  # reach the database and answered "доступ к данным организатора сейчас
+  # недоступен". Their JSON classifier calls came back empty too.
+  #
+  # What has changed since is MCP: MCP_BASE_URL below hands a CLI-backed
+  # model an address and a per-turn grant, and it fetches the tools itself
+  # rather than being handed an array it ignores. That is exactly the gap the
+  # note above describes, so this order should now work — but it has not been
+  # watched in production yet. If the bot starts answering that it cannot
+  # reach the data, this line is the first thing to look at.
+  AI_PROXY_MODELS: codex:,claude:sonnet,openai/gpt-oss-120b,openai/gpt-oss-20b,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemma-4-31b-it
+  # 30 seconds, and the bot's own client waits 35 — five seconds longer, so a
+  # slow provider surfaces as the proxy's own error rather than the bot
+  # hanging up first and reporting nothing useful.
+  #
+  # It was 600. That is not a timeout: a request that was accepted and never
+  # answered left the bot silent for ten minutes, with no reply and no error,
+  # while the person who wrote to it watched an empty chat.
+  AI_PROXY_TIMEOUT_S: "30"
+  # The whole turn, however many models and tools it takes. The per-request
+  # timeout above bounds one call; a chain of eight models would still add up
+  # to minutes without this.
+  TURN_DEADLINE_SECONDS: "30"
   DEFAULT_TIMEZONE: Asia/Jerusalem
   QUIET_UNTIL_HOUR: "9"
   QUIET_FROM_HOUR: "21"
@@ -27,7 +44,9 @@ data:
   # in use and no grant or address is issued at all. See docs/mcp.md.
   MCP_BASE_URL: http://bot-organizer-bot:8081
   MCP_PORT: "8081"
-  MCP_GRANT_TTL_SECONDS: "600"
+  # Comfortably longer than a turn's deadline and no longer: the grant exists
+  # for the turn that issued it, and the router revokes it in a finally.
+  MCP_GRANT_TTL_SECONDS: "60"
   CONVERSATION_TURNS: "5"
   CONVERSATION_MAX_AGE_MINUTES: "30"
   GROUP_SYNC_INTERVAL_SECONDS: "60"

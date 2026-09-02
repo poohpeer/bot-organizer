@@ -1366,3 +1366,31 @@ async def test_the_classifier_is_told_what_is_being_tracked(db_pool):
     prompt = router._intent_input("а поехали на море", [], "пикник в парке")
 
     assert prompt.startswith("Currently tracking: пикник в парке")
+
+
+async def test_a_turn_that_never_answers_still_says_something(db_pool, monkeypatch):
+    """A provider accepted a request and never answered it. There was no
+    exception to catch, so no branch fired and nothing was posted — the person
+    watched an empty chat while the bot waited out a 600-second timeout."""
+    from bot.ai.tool_loop import TurnTooSlow
+
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(
+        return_value={"stop": False, "off_topic": False, "new_event": False}))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(side_effect=TurnTooSlow("30s")))
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot что по списку?"), BOT_ID, BOT_USERNAME
+    )
+
+    telegram_bot.send_message.assert_awaited_once_with(
+        chat_id=active["chat_id"], text=router._TOOK_TOO_LONG
+    )
+
+
+async def test_the_deadline_message_is_not_the_refusal_one():
+    """Nothing refused a turn that outran the clock, and telling somebody to
+    wait for a model that is answering everyone else would be wrong."""
+    assert router._TOOK_TOO_LONG not in router._AI_UNAVAILABLE_MESSAGES
+    assert router._TOOK_TOO_LONG != router._FALLBACK_MESSAGE

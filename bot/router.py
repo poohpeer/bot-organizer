@@ -34,7 +34,7 @@ from bot.ai.classify import extract
 import bot.ai.client as ai_client
 import bot.settings as settings
 from bot.ai.client import AllModelsUnavailable
-from bot.ai.tool_loop import run_tool_loop
+from bot.ai.tool_loop import TurnTooSlow, run_tool_loop
 from bot.formatting import to_plain_text
 from bot.turn_outcome import ACKNOWLEDGEMENT, TurnRecord, honour_verbatim
 from bot.session import SessionAlreadyActiveError, start_session
@@ -55,6 +55,14 @@ _FALLBACK_MESSAGE = "Не понял, переформулируй, пожалу
 _AI_UNAVAILABLE_MESSAGES = (
     "Мне временно снесло крышу. Попробуйте позже.",
 )
+
+
+# Said when the turn outran its deadline. Distinct from the line above on
+# purpose: nothing refused this one, it simply never came back, and telling
+# somebody to wait for a model that is answering everyone else would be
+# wrong. Live, this failure said nothing at all — a provider accepted a
+# request and never answered it, and the person watched an empty chat.
+_TOOK_TOO_LONG = "Что-то я задумался и не успел. Повторите, пожалуйста."
 
 
 def _ai_unavailable_message() -> str:
@@ -1057,6 +1065,9 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         # into a bot that cannot answer any of them.
         log.warning("Every model refused for chat_id=%s session_id=%s", chat_id, session_id)
         reply_text = _ai_unavailable_message()
+    except TurnTooSlow:
+        log.warning("Turn outran its deadline for chat_id=%s session_id=%s", chat_id, session_id)
+        reply_text = _TOOK_TOO_LONG
     except Exception:
         log.exception("Tool loop failed for chat_id=%s session_id=%s", chat_id, session_id)
         reply_text = _FALLBACK_MESSAGE
