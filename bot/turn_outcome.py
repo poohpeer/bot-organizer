@@ -29,7 +29,7 @@ _VERBATIM_FIELDS = ("report", "rendered")
 READ_ONLY_TOOLS = frozenset({
     "get_facts", "list_show", "get_participants", "reminder_list",
     "event_status", "get_chat_info", "archive_lookup", "web_search",
-    "maps_lookup", "weather_lookup",
+    "maps_lookup",
 })
 
 # Tools that deliver a message themselves. Silence in the group afterwards is

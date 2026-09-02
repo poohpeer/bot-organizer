@@ -1,4 +1,3 @@
-from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -115,67 +114,10 @@ async def test_maps_lookup_not_found(monkeypatch):
     assert result == {"found": False}
 
 
-async def test_weather_lookup_found(monkeypatch):
-    # Tomorrow, not a date written down. weather_lookup reads "weathercode"
-    # from the forecast API and "weather_code" from the archive one, and picks
-    # by whether the date has passed — so a literal here quietly switches the
-    # test to the other branch the moment it does. This one did, on
-    # 2026-09-02, and failed on a body it had matched for months.
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
-    body = {"daily": {
-        "time": [tomorrow],
-        "weathercode": [3],
-        "temperature_2m_max": [29.5],
-        "temperature_2m_min": [21.0],
-        "precipitation_probability_max": [10],
-    }}
-    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=_http_response(body)))
-
-    result = await external.weather_lookup(32.79, 35.05, tomorrow)
-
-    assert result["found"] is True
-    assert result["temp_max_c"] == 29.5
-    assert result["precipitation_probability_max"] == 10
-
-
-async def test_weather_lookup_uses_archive_for_past_dates(monkeypatch):
-    body = {"daily": {
-        "time": ["2025-07-04"],
-        "weather_code": [1],
-        "temperature_2m_max": [31.0],
-        "temperature_2m_min": [23.0],
-        "precipitation_sum": [0.0],
-    }}
-    get = AsyncMock(return_value=_http_response(body))
-    monkeypatch.setattr(httpx.AsyncClient, "get", get)
-
-    result = await external.weather_lookup(31.959019, 34.927831, "2025-07-04")
-
-    assert result == {
-        "found": True,
-        "weather_code": 1,
-        "temp_max_c": 31.0,
-        "temp_min_c": 23.0,
-        "precipitation_sum_mm": 0.0,
-    }
-    assert get.await_args.args[0] == "https://archive-api.open-meteo.com/v1/archive"
-
-
-async def test_weather_lookup_date_out_of_range(monkeypatch):
-    monkeypatch.setattr(
-        httpx.AsyncClient, "get",
-        AsyncMock(return_value=_http_response({"daily": {"time": []}})),
-    )
-
-    result = await external.weather_lookup(32.79, 35.05, "2030-01-01")
-
-    assert result == {"found": False}
-
-
 def test_build_external_registry_covers_every_external_tool():
     registry = external.build_external_registry()
 
-    assert set(registry) == {"web_search", "maps_lookup", "weather_lookup"}
+    assert set(registry) == {"web_search", "maps_lookup"}
 
 
 # --- Extra hardening tests: honesty-on-failure (R7/R10) beyond the brief's 8. ---
@@ -250,63 +192,6 @@ async def test_maps_lookup_not_found_when_location_missing(monkeypatch):
 
     assert result == {"found": False}
 
-
-async def test_weather_lookup_not_found_on_non_200(monkeypatch):
-    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=_http_error_response()))
-
-    result = await external.weather_lookup(32.79, 35.05, "2026-09-01")
-
-    assert result == {"found": False}
-
-
-async def test_weather_lookup_not_found_on_malformed_json(monkeypatch):
-    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=_malformed_json_response()))
-
-    result = await external.weather_lookup(32.79, 35.05, "2026-09-01")
-
-    assert result == {"found": False}
-
-
-async def test_weather_lookup_not_found_on_connect_error(monkeypatch):
-    monkeypatch.setattr(
-        httpx.AsyncClient, "get",
-        AsyncMock(side_effect=httpx.ConnectError("connection refused")),
-    )
-
-    result = await external.weather_lookup(32.79, 35.05, "2026-09-01")
-
-    assert result == {"found": False}
-
-
-async def test_weather_lookup_not_found_on_read_timeout(monkeypatch):
-    monkeypatch.setattr(
-        httpx.AsyncClient, "get",
-        AsyncMock(side_effect=httpx.ReadTimeout("timed out")),
-    )
-
-    result = await external.weather_lookup(32.79, 35.05, "2026-09-01")
-
-    assert result == {"found": False}
-
-
-async def test_weather_lookup_not_found_when_daily_arrays_short(monkeypatch):
-    # "time" lists the date but the parallel arrays are missing entries —
-    # must not raise IndexError.
-    body = {"daily": {
-        "time": ["2026-09-01"],
-        "weathercode": [],
-        "temperature_2m_max": [29.5],
-        "temperature_2m_min": [21.0],
-        "precipitation_probability_max": [10],
-    }}
-    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=_http_response(body)))
-
-    result = await external.weather_lookup(32.79, 35.05, "2026-09-01")
-
-    assert result == {"found": False}
-
-
-# --- regression tests for code-review findings ---
 
 async def test_web_search_falls_back_to_the_next_model_on_429(monkeypatch):
     """The API key's quota is shared process-wide. Pinning MODELS[0] meant that
@@ -395,20 +280,6 @@ async def test_maps_lookup_drops_reviews_with_no_text(monkeypatch):
     result = await external.maps_lookup("x")
 
     assert result["review_snippets"] == ["Nice"]
-
-
-async def test_weather_lookup_not_found_when_the_row_is_all_nulls(monkeypatch):
-    """Open-Meteo returns nulls past the forecast horizon; reporting
-    temp_max_c=None as a found forecast is the confident-but-empty answer R10
-    forbids."""
-    body = {"daily": {
-        "time": ["2026-09-01"], "weathercode": [None],
-        "temperature_2m_max": [None], "temperature_2m_min": [None],
-        "precipitation_probability_max": [None],
-    }}
-    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=_http_response(body)))
-
-    assert await external.weather_lookup(1.0, 2.0, "2026-09-01") == {"found": False}
 
 
 async def test_http_tools_share_one_client():
