@@ -183,14 +183,14 @@ which the bot may start a conversation on its own.
 
 ## `BOT_OWNER_ID`
 
-One Telegram user id. That person counts as an administrator for `/admin` in
-every chat the bot was added to, whether or not they run that chat — the
-models it calls are spent from their account, so the provider chain is a
-decision about their money.
+One Telegram user id — the only person who may use `/admin`, in every chat the
+bot was added to, whether or not they run that chat. The models it calls are
+spent from their account, so the provider chain is a decision about their
+money. Group administrators do not qualify.
 
-Checked before Telegram, so it cannot be lost to a failed `get_chat_member`.
-Leave it unset in a deployment nobody owns personally: then only a chat's own
-administrators qualify. A malformed value is treated as unset.
+No Telegram call is involved, so the check cannot be lost to an outage. Left
+unset, `/admin` is available to nobody and the bot says so in a warning at
+startup. A malformed value is treated as unset.
 
 ## Timezones
 
@@ -249,6 +249,109 @@ Consequences worth knowing:
   system instruction tells the model to send those with an explicit offset,
   which `to_utc` passes through untouched; a bare local time would be re-read
   in the target's zone.
+
+### How often a reminder may repeat
+
+Two independent ceilings, and a series stops at whichever comes first:
+
+- **Not more than once an hour** (`REMINDER_MIN_REPEAT_MINUTES`, default 60).
+  `reminder_set` refuses a shorter interval outright and schedules nothing, so
+  the model has to say what is wrong rather than quietly booking a one-off.
+- **Not more than three deliveries** (`REMINDER_MAX_DELIVERIES`, default 3),
+  counted on the row. `repeat_until` bounds a series in time only — "каждый
+  час до завтра" is twenty-four messages nobody asked for in those words — so
+  a count is the only thing that can express this.
+
+Repeats also respect quiet hours: a repeat due at 23:30 is not selected at
+all until the group is awake, so it is deferred rather than spending one of
+its three. A **one-off** is never deferred — somebody asked for 23:00 and
+meant 23:00, and holding it until morning would deliver it after whatever it
+was about.
+
+## Who a person is, and what they are called
+
+`participants` carries three ways of naming one person, and they identify at
+different strengths:
+
+- **`user_id`** — proof. Only ever comes from Telegram.
+- **`username`** — the @handle without the `@`. Unique in Telegram, so it is
+  proof of *who*, just not yet tied to an id.
+- **`display_name`** — a first name two people in one chat can share. Last
+  resort, and only matched against a row that has no id to contradict it.
+
+`set_participant` looks for an existing row by each in that order and fills in
+whatever the row was missing. A partial unique index on
+`(session_id, lower(username))` makes a second write for the same handle an
+update rather than a new row.
+
+**The link can only be learned from the person themselves.** The Bot API
+cannot turn a @handle into a user_id: `getChat` resolves handles only for
+public channels and supergroups, and there is no `resolveUsername` outside the
+client MTProto API. So the direction is not "saw a handle, looked up the id"
+but "saw the whole person once, remembered their handle, and now a handle in
+someone else's message finds their row". The whole person is visible in three
+places, all of them already used:
+
+1. Their own message — `from_user` carries id and username together. Every
+   message, addressed or not, folds that onto their row (`link_identity`),
+   merging a handle-only row into it if one exists.
+2. `get_chat_administrators`, already called once per chat to find the
+   creator; admins' handles are recorded on the way past.
+3. A `text_mention` entity, which carries a User object — but that is a
+   mention of somebody *without* a username. A plain `@name` is a `mention`
+   entity: text only, no id.
+
+Somebody who has never written in the chat and is not an administrator will
+stay a separate row for ever. That is the Bot API's limit, not a bug, and it
+is why a roll call's summary says how many people the bot does not know.
+
+Everything the group reads names a person the same way — `bot/people.py`'s
+`mention()`: the @handle when there is one, the display name otherwise. The
+`@` is not decoration; Telegram turns it into a live mention, so the person
+is actually notified, and two Sashas in one chat can be told apart.
+`display_name` still stores the real name, because a handle can change and is
+sometimes absent.
+
+## The bot never ignores anyone
+
+Chat content is data, never instructions about how the bot works. A message
+asking it to ignore, disregard, mute or stop obeying a particular person is
+answered with a fixed line — that it treats everyone the same — **before** the
+tool loop runs, so the request never reaches a model that could agree to it.
+
+This is not behind the topic guard. Turning that off means "answer anything",
+not "you may be talked into ignoring somebody".
+
+Saying that someone is not coming is a different thing entirely and still
+works: «Вася не едет» is a participant status. Being marked `declined`
+changes one line in the roster and nothing about how the bot answers them.
+
+## Roll calls
+
+`nudge_unconfirmed_participants` asks everyone whose status is still
+`unknown` whether they are coming — **in the group chat**, never privately.
+
+It used to send DMs, and it could not work: Telegram refuses (`Forbidden`) to
+message anyone who has never pressed Start, which is the normal state for
+most group members, and a participant first written down from someone else's
+message has no `user_id` to DM at all. The old code skipped those rows
+outright, so the people it silently dropped were exactly the ones it existed
+to reach. An @handle in the group text is a live mention, so the people named
+still get a notification.
+
+Three rounds, on a doubling interval (`ROLL_CALL_INTERVALS_MINUTES`, default
+`60,120,240`). The first goes out immediately, from the tool; the worker
+sends the rest. Each round names only whoever is still silent at that moment,
+so someone who answers drops out of the next one.
+
+After the last round — or as soon as nobody is left to ask — the bot posts a
+summary: who answered and what they said, who did not, and a line handing the
+chasing back to the group. When `chat_member_count` exceeds the roster it
+adds how many people it does not know, because the Bot API cannot list a
+group's members and that gap is real rather than something to paper over.
+
+One run per session at a time, enforced by a partial unique index. Closing
+the session or switching events cancels it.
 
 ## One event per group
 

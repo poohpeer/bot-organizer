@@ -1,5 +1,5 @@
 import inspect
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import bot.tools.core as core
@@ -255,10 +255,12 @@ async def test_get_participants_recorded_count_matches_participant_rows(db_pool)
     assert result["recorded_count"] == len(result["participants"]) == 3
 
 
-async def test_nudge_unconfirmed_dms_only_those_with_known_user_id(db_pool):
+async def test_nudge_asks_in_the_group_and_leaves_nobody_out(db_pool):
+    """The whole point of moving off DMs: a participant with no user_id cannot
+    be messaged privately at all, and used to be silently skipped."""
     from unittest.mock import AsyncMock
 
-    session_id = await _new_session(db_pool)
+    session_id = await _new_session(db_pool, chat_id=-500)
     await core.set_participant(db_pool, session_id, "Sasha", "unknown", user_id=111)
     await core.set_participant(db_pool, session_id, "NoTelegram", "unknown")
     await core.set_participant(db_pool, session_id, "Masha", "confirmed", user_id=222)
@@ -266,10 +268,71 @@ async def test_nudge_unconfirmed_dms_only_those_with_known_user_id(db_pool):
     telegram_bot = AsyncMock()
     result = await core.nudge_unconfirmed_participants(db_pool, telegram_bot, session_id)
 
-    assert result["nudged"] == ["Sasha"]
-    assert result["skipped_no_user_id"] == ["NoTelegram"]
+    assert result["status"] == "started"
     telegram_bot.send_message.assert_awaited_once()
-    assert telegram_bot.send_message.await_args.kwargs["chat_id"] == 111
+    kwargs = telegram_bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == -500
+    assert "Sasha" in kwargs["text"]
+    assert "NoTelegram" in kwargs["text"]
+    # Answered already — chasing her would be asking a question she answered.
+    assert "Masha" not in kwargs["text"]
+
+
+async def test_nudge_uses_the_handle_so_telegram_actually_notifies(db_pool):
+    from unittest.mock import AsyncMock
+
+    session_id = await _new_session(db_pool, chat_id=-501)
+    await core.set_participant(
+        db_pool, session_id, "Alex", "unknown", user_id=111, username="poohpeer"
+    )
+
+    telegram_bot = AsyncMock()
+    await core.nudge_unconfirmed_participants(db_pool, telegram_bot, session_id)
+
+    assert "@poohpeer" in telegram_bot.send_message.await_args.kwargs["text"]
+
+
+async def test_nudge_refuses_to_start_a_second_run(db_pool):
+    from unittest.mock import AsyncMock
+
+    session_id = await _new_session(db_pool, chat_id=-502)
+    await core.set_participant(db_pool, session_id, "Sasha", "unknown", user_id=111)
+    telegram_bot = AsyncMock()
+
+    await core.nudge_unconfirmed_participants(db_pool, telegram_bot, session_id)
+    second = await core.nudge_unconfirmed_participants(db_pool, telegram_bot, session_id)
+
+    assert second["status"] == "already_running"
+    telegram_bot.send_message.assert_awaited_once()
+
+
+async def test_nudge_counts_its_own_first_round(db_pool):
+    """Without this the tool's round is uncounted and the group gets four."""
+    from unittest.mock import AsyncMock
+
+    session_id = await _new_session(db_pool, chat_id=-503)
+    await core.set_participant(db_pool, session_id, "Sasha", "unknown", user_id=111)
+
+    await core.nudge_unconfirmed_participants(db_pool, AsyncMock(), session_id)
+
+    row = await db_pool.fetchrow(
+        "SELECT rounds_done, next_at FROM roll_calls WHERE session_id = $1", session_id
+    )
+    assert row["rounds_done"] == 1
+    assert row["next_at"] > datetime.now(timezone.utc)
+
+
+async def test_nudge_says_there_is_nobody_to_ask(db_pool):
+    from unittest.mock import AsyncMock
+
+    session_id = await _new_session(db_pool, chat_id=-504)
+    await core.set_participant(db_pool, session_id, "Sasha", "confirmed", user_id=111)
+    telegram_bot = AsyncMock()
+
+    result = await core.nudge_unconfirmed_participants(db_pool, telegram_bot, session_id)
+
+    assert result["status"] == "nobody_to_ask"
+    telegram_bot.send_message.assert_not_awaited()
 
 
 async def test_reminder_set_persists_to_queue(db_pool):
@@ -345,24 +408,24 @@ async def test_set_participant_merges_name_mention_with_later_dm_reply(db_pool):
     assert participants[0]["user_id"] == 333  # backfilled onto the existing row
 
 
-async def test_nudge_isolates_per_recipient_failures(db_pool):
-    """Telegram refuses to DM anyone who never started the bot — the normal case
-    for most group members. One refusal must not abort the whole run."""
+async def test_nudge_leaves_no_run_behind_when_the_post_fails(db_pool):
+    """A run started but never posted would spend its first round on nothing
+    and summarise two rounds early."""
     from unittest.mock import AsyncMock
 
-    session_id = await _new_session(db_pool)
-    await core.set_participant(db_pool, session_id, "Unreachable", "unknown", user_id=111)
-    await core.set_participant(db_pool, session_id, "Reachable", "unknown", user_id=222)
+    session_id = await _new_session(db_pool, chat_id=-505)
+    await core.set_participant(db_pool, session_id, "Sasha", "unknown", user_id=111)
 
     telegram_bot = AsyncMock()
-    telegram_bot.send_message = AsyncMock(
-        side_effect=[Exception("Forbidden: bot can't initiate conversation with a user"), None]
-    )
+    telegram_bot.send_message = AsyncMock(side_effect=Exception("chat not found"))
 
     result = await core.nudge_unconfirmed_participants(db_pool, telegram_bot, session_id)
 
-    assert result["nudged"] == ["Reachable"]
-    assert result["failed_to_reach"] == ["Unreachable"]
+    assert result["status"] == "could_not_post"
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM roll_calls WHERE session_id = $1 AND status = 'active'",
+        session_id,
+    ) == 0
 
 
 async def test_send_private_message_dms_the_asker_not_the_group(db_pool):
@@ -607,14 +670,15 @@ async def test_reminder_set_with_a_repeat_stores_both_columns(db_pool):
 
     result = await core.reminder_set(
         db_pool, session_id, message="Пей воду", remind_at=_ahead(1),
-        repeat_every_minutes=30, repeat_until=_ahead(2),
+        repeat_every_minutes=60, repeat_until=_ahead(2),
     )
 
     assert result["status"] == "ok"
-    assert result["repeats_every_minutes"] == 30
+    assert result["repeats_every_minutes"] == 60
     assert result["repeats_until"] == _ahead(2)
+    assert result["max_deliveries"] == core.REMINDER_MAX_DELIVERIES
     row = await db_pool.fetchrow("SELECT * FROM reminders WHERE id = $1", result["reminder_id"])
-    assert row["repeat_every_minutes"] == 30
+    assert row["repeat_every_minutes"] == 60
     assert row["repeat_until"] is not None
 
 
@@ -638,10 +702,10 @@ async def test_reminder_set_refuses_an_interval_below_the_floor(db_pool):
 
     result = await core.reminder_set(
         db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00",
-        repeat_every_minutes=2, repeat_until="2026-09-01T12:00:00",
+        repeat_every_minutes=30, repeat_until="2026-09-01T12:00:00",
     )
 
-    assert result == {"status": "repeat_too_frequent", "minimum_minutes": 5}
+    assert result == {"status": "repeat_too_frequent", "minimum_minutes": 60}
     assert await db_pool.fetch("SELECT id FROM reminders WHERE session_id = $1", session_id) == []
 
 
@@ -650,7 +714,7 @@ async def test_reminder_set_refuses_an_end_already_in_the_past(db_pool):
 
     result = await core.reminder_set(
         db_pool, session_id, message="x", remind_at="2026-09-01T09:00:00",
-        repeat_every_minutes=30, repeat_until="2020-01-01T00:00:00",
+        repeat_every_minutes=60, repeat_until="2020-01-01T00:00:00",
     )
 
     assert result["status"] == "repeat_end_in_the_past"
@@ -749,13 +813,13 @@ async def test_reminder_list_includes_repeat_fields(db_pool):
     session_id = await _new_session(db_pool)
     await core.reminder_set(
         db_pool, session_id, message="Пей воду", remind_at=_ahead(1),
-        repeat_every_minutes=30, repeat_until=_ahead(2),
+        repeat_every_minutes=60, repeat_until=_ahead(2),
     )
 
     result = await core.reminder_list(db_pool, session_id)
 
     entry = result["reminders"][0]
-    assert entry["repeats_every_minutes"] == 30
+    assert entry["repeats_every_minutes"] == 60
     assert entry["repeats_until"] == _ahead(2)
 
 
@@ -1592,3 +1656,159 @@ def test_the_refusal_never_hands_the_model_a_menu_of_numbers():
     ask_user = " ".join(inspect.getsource(core.list_add).split())
     assert "never offer numbers" in ask_user
     assert "пять штук" not in ask_user
+
+
+# --- one person, one row --------------------------------------------------
+
+async def test_a_handle_from_someone_elses_message_finds_the_existing_row(db_pool):
+    """The live duplicate: "Alex"/91237884 from his own message, and
+    "@poohpeer" from someone else's "@poohpeer не участвует"."""
+    session_id = await _new_session(db_pool, chat_id=-600)
+    await core.set_participant(
+        db_pool, session_id, "Alex", "unknown", user_id=91237884, username="poohpeer"
+    )
+
+    await core.set_participant(db_pool, session_id, "@poohpeer", "declined")
+
+    rows = await db_pool.fetch(
+        "SELECT display_name, status, user_id FROM participants WHERE session_id = $1",
+        session_id,
+    )
+    assert len(rows) == 1
+    assert rows[0]["display_name"] == "Alex"
+    assert rows[0]["status"] == "declined"
+    assert rows[0]["user_id"] == 91237884
+
+
+async def test_a_handle_is_stored_as_a_handle_not_as_a_name(db_pool):
+    """Otherwise the roster prints "@poohpeer" for a person it could name."""
+    session_id = await _new_session(db_pool, chat_id=-601)
+
+    await core.set_participant(db_pool, session_id, "@poohpeer", "declined")
+
+    row = await db_pool.fetchrow(
+        "SELECT username FROM participants WHERE session_id = $1", session_id
+    )
+    assert row["username"] == "poohpeer"
+
+
+async def test_speaking_yourself_merges_the_row_written_about_you(db_pool):
+    """Bot API cannot resolve a @handle to a user_id, so the link can only be
+    learned from the person themselves. This is that moment."""
+    session_id = await _new_session(db_pool, chat_id=-602)
+    await core.set_participant(db_pool, session_id, "@poohpeer", "declined")
+    await core.set_participant(db_pool, session_id, "Alex", "unknown", user_id=91237884)
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM participants WHERE session_id = $1", session_id
+    ) == 2
+
+    result = await core.link_identity(
+        db_pool, session_id, user_id=91237884, username="poohpeer", display_name="Alex"
+    )
+
+    assert result["status"] == "merged"
+    rows = await db_pool.fetch(
+        "SELECT display_name, username, status FROM participants WHERE session_id = $1",
+        session_id,
+    )
+    assert len(rows) == 1
+    assert rows[0]["display_name"] == "Alex"
+    assert rows[0]["username"] == "poohpeer"
+    # The answer given about them survives the merge — it is still their answer.
+    assert rows[0]["status"] == "declined"
+
+
+async def test_speaking_yourself_attaches_your_handle_when_there_is_no_duplicate(db_pool):
+    session_id = await _new_session(db_pool, chat_id=-603)
+    await core.set_participant(db_pool, session_id, "Alex", "unknown", user_id=91237884)
+
+    await core.link_identity(
+        db_pool, session_id, user_id=91237884, username="poohpeer", display_name="Alex"
+    )
+
+    assert await db_pool.fetchval(
+        "SELECT username FROM participants WHERE session_id = $1", session_id
+    ) == "poohpeer"
+
+
+async def test_a_handle_only_row_learns_the_id_once_its_owner_speaks(db_pool):
+    session_id = await _new_session(db_pool, chat_id=-604)
+    await core.set_participant(db_pool, session_id, "@poohpeer", "declined")
+
+    await core.link_identity(
+        db_pool, session_id, user_id=91237884, username="poohpeer", display_name="Alex"
+    )
+
+    row = await db_pool.fetchrow(
+        "SELECT user_id, display_name FROM participants WHERE session_id = $1", session_id
+    )
+    assert row["user_id"] == 91237884
+    assert row["display_name"] == "Alex"
+
+
+async def test_linking_never_puts_a_stranger_on_the_roster(db_pool):
+    """Everyone who speaks is not everyone who is coming."""
+    session_id = await _new_session(db_pool, chat_id=-605)
+
+    result = await core.link_identity(
+        db_pool, session_id, user_id=42, username="passerby", display_name="Passer By"
+    )
+
+    assert result["status"] == "nothing_to_link"
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM participants WHERE session_id = $1", session_id
+    ) == 0
+
+
+async def test_two_different_people_stay_two_rows(db_pool):
+    """Merging is only ever on proof — a user_id or a handle, never on
+    looking similar."""
+    session_id = await _new_session(db_pool, chat_id=-606)
+
+    await core.set_participant(db_pool, session_id, "Саша", "unknown", user_id=1)
+    await core.set_participant(db_pool, session_id, "Саша Б.", "unknown", user_id=2)
+
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM participants WHERE session_id = $1", session_id
+    ) == 2
+
+
+async def test_the_roster_shows_handles(db_pool):
+    session_id = await _new_session(db_pool, chat_id=-607)
+    await core.set_participant(
+        db_pool, session_id, "Alex", "confirmed", user_id=1, username="poohpeer"
+    )
+    await core.set_participant(db_pool, session_id, "Игорёк", "unknown")
+
+    rendered = (await core.get_participants(db_pool, session_id))["rendered"]
+
+    assert "@poohpeer" in rendered
+    assert "Игорёк" in rendered
+
+
+async def test_the_list_names_whoever_took_an_item_by_handle(db_pool):
+    """The handle lives on the person, not on the item — resolved at render
+    time so a rename is one update in one place."""
+    session_id = await _new_session(db_pool, chat_id=-608)
+    await core.set_participant(
+        db_pool, session_id, "Alex", "confirmed", user_id=1, username="poohpeer"
+    )
+    await core.list_add(db_pool, session_id, "хлеб")
+    await core.list_claim(db_pool, session_id, "хлеб", "Alex")
+
+    rendered = (await core.list_show(db_pool, session_id))["rendered"]
+
+    assert "@poohpeer" in rendered
+
+
+# --- how often a repeat may fire ------------------------------------------
+
+async def test_an_hourly_repeat_is_the_fastest_allowed(db_pool):
+    session_id = await _new_session(db_pool, chat_id=-609)
+
+    result = await core.reminder_set(
+        db_pool, session_id, message="x", remind_at=_ahead(1),
+        repeat_every_minutes=59, repeat_until=_ahead(2),
+    )
+
+    assert result == {"status": "repeat_too_frequent", "minimum_minutes": 60}

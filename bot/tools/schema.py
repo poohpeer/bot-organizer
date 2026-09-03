@@ -67,11 +67,12 @@ ALL_TOOLS = types.Tool(function_declarations=[
     _fn("set_participant", "Record or update a participant's confirmation status for the session.",
         {"session_id": _S(Type.INTEGER), "display_name": _S(Type.STRING),
          "status": _S(Type.STRING, "One of: unknown, confirmed, maybe, declined. Use 'maybe' for a hedged reply ('может быть', 'постараюсь') — distinct from 'unknown', which means nobody has answered at all."),
-         "user_id": _S(Type.INTEGER, "Telegram user id, if known.")},
+         "user_id": _S(Type.INTEGER, "Telegram user id, if known."),
+         "username": _S(Type.STRING, "Telegram @username, without the '@', if the message names the person that way. Pass it here rather than in display_name — a handle is not a name.")},
         ["session_id", "display_name", "status"]),
     _fn("get_participants", "List participants and their confirmation status for the session.",
         {"session_id": _S(Type.INTEGER)}, ["session_id"]),
-    _fn("nudge_unconfirmed_participants", "Privately message every participant with unknown status, asking if they're coming. Only call this when a human explicitly asked to check on/chase confirmations.",
+    _fn("nudge_unconfirmed_participants", "Ask everyone who has not confirmed yet, in the group chat, whether they are coming. Repeats twice more on a growing interval and then posts who answered and who did not. Does not use private messages. Only call this when a human explicitly asked to check on/chase confirmations.",
         {"session_id": _S(Type.INTEGER)}, ["session_id"]),
     # chat_id is deliberately NOT a parameter on the tools below: it is derived
     # from session_id in code, so a hallucinated chat_id cannot make the bot

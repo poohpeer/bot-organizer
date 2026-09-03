@@ -71,28 +71,32 @@ and in what order.
 
 ## Who may use it
 
-Chat administrators, checked against Telegram every time — including on each
-button press, not only when the menu is opened. A keyboard stays live in the
-chat afterwards, so anyone can press it, and whoever opened it may since have
-been demoted.
+The bot's owner, and nobody else. `BOT_OWNER_ID` names one Telegram user who
+may open the menu in every chat the bot was added to, whether or not they run
+that chat: the models it calls are spent from their account, so the provider
+chain is a decision about their money and their rate limits.
 
-If the check itself fails — Telegram unreachable, an unexpected reply — the
-answer is no. A settings menu is the wrong place to fail open.
+Group administrators used to qualify too. They no longer do — running a group
+is not running the bot, and every administrator of every chat it had been
+added to could otherwise reorder someone else's model chain.
 
-**The bot's owner is the exception.** `BOT_OWNER_ID` names one Telegram user
-who counts as an administrator in every chat the bot was added to, whether or
-not they run that chat: the models it calls are spent from their account, so
-the provider chain is a decision about their money and their rate limits.
+Telegram is not consulted at all any more. With group status out of the
+picture there is nothing left to ask about, so the check cannot fail, cannot
+be slow, and cannot be raced by a promotion.
 
-It is checked **before** Telegram, so that answer does not depend on a call
-that can fail — the one rule here that must never be lost to an outage.
-Unset in a deployment nobody owns personally, and then only a chat's own
-administrators qualify; a malformed value is treated as unset rather than
-crashing every permission check on a typo in a ConfigMap.
+Checked on the command and again on every button press: a keyboard stays live
+in the chat afterwards, so anyone in the group could press it.
 
-The slash menu still shows `/admin` by chat role, so an owner who is not an
-administrator of a group will not see it suggested there. Typed by hand it
-works.
+Unset in a deployment nobody owns personally, and then the menu is available
+to nobody — a settings screen is the wrong place to fail open. A malformed
+value is treated as unset rather than crashing every permission check on a
+typo in a ConfigMap; the bot logs a warning at startup either way, because
+otherwise "`/admin` refuses everyone" looks like a bug.
+
+The slash menu offers `/admin` only in the owner's private chat with the bot,
+which is the one scope Telegram has that follows a person rather than a
+group. In groups the owner types it by hand: the gate is the ownership check,
+not the menu.
 
 ## The chain
 

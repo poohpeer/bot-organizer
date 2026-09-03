@@ -13,6 +13,8 @@ import bot.maps_links as maps_links
 import bot.quantity as quantity
 import bot.list_render as list_render
 import bot.participant_render as participant_render
+import bot.people as people
+import bot.roll_call as roll_call
 import bot.session as session
 import bot.timezones as timezones
 from bot.list_render import LIST_CATEGORIES
@@ -21,9 +23,16 @@ log = logging.getLogger(__name__)
 
 # The floor beneath REMINDER_MIN_INTERVAL_HOURS's per-target rate limit, which
 # repeating reminders are exempt from (see worker/reminders.py). Someone asked
-# out loud for a cadence still shouldn't be able to spam the chat every few
-# seconds.
-REMINDER_MIN_REPEAT_MINUTES = int(os.environ.get("REMINDER_MIN_REPEAT_MINUTES", "5"))
+# out loud for a cadence still shouldn't be able to spam the chat.
+#
+# An hour, not five minutes. Five was low enough for "напоминай каждые 5 минут
+# в течение часа" to be a legitimate request the bot would honour, and twelve
+# messages in an hour is harassment however politely it was asked for.
+REMINDER_MIN_REPEAT_MINUTES = int(os.environ.get("REMINDER_MIN_REPEAT_MINUTES", "60"))
+# repeat_until bounds a series in time only, so "каждый час до завтра" is
+# still twenty-four messages. Three is the ceiling, and it has to be counted
+# because no end time can express it.
+REMINDER_MAX_DELIVERIES = int(os.environ.get("REMINDER_MAX_DELIVERIES", "3"))
 
 # Actions the model is never allowed to perform directly (R10). Each is
 # proposed as a pending_confirmation and only executed after an explicit human
@@ -496,6 +505,7 @@ async def list_show(pool, session_id) -> dict:
         """,
         session_id,
     )
+    handles = await _username_lookup(pool, session_id)
     items = [
         {
             "name": r["name"], "status": r["status"],
@@ -506,10 +516,45 @@ async def list_show(pool, session_id) -> dict:
             "amounts": _amounts_of(r),
             "category": r["category"], "claimed_by": r["claimed_by"],
             "claimed_by_user_id": r["claimed_by_user_id"],
+            "claimed_by_username": _lookup_username(
+                handles, r["claimed_by_user_id"], r["claimed_by"]
+            ),
         }
         for r in rows
     ]
     return {"items": items, "rendered": list_render.render(items)}
+
+
+async def _username_lookup(pool, session_id) -> dict:
+    """Two maps from the session roster: user_id -> username, and lowercased
+    display name -> username.
+
+    Whoever claimed an item is stored on the item as a name (and sometimes an
+    id), never as a handle — the handle lives on the person, in participants.
+    Resolving it here rather than copying it onto list_items means a rename is
+    one update in one place instead of a fan-out nobody would remember to run.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT user_id, display_name, username FROM participants
+        WHERE session_id = $1 AND username IS NOT NULL
+        """,
+        session_id,
+    )
+    return {
+        "by_id": {r["user_id"]: r["username"] for r in rows if r["user_id"] is not None},
+        "by_name": {r["display_name"].lower(): r["username"] for r in rows if r["display_name"]},
+    }
+
+
+def _lookup_username(handles: dict, user_id, name) -> str | None:
+    """id first, name second — the id is proof, the name is a guess that two
+    people in one chat can both answer to."""
+    if user_id is not None and user_id in handles["by_id"]:
+        return handles["by_id"][user_id]
+    if name:
+        return handles["by_name"].get(name.lower())
+    return None
 
 
 async def _resolve_item_name(pool, session_id, name) -> str:
@@ -624,41 +669,86 @@ async def get_participant_status(pool, session_id, *, user_id) -> str | None:
     )
 
 
-async def set_participant(pool, session_id, display_name, status, user_id=None) -> dict:
-    """Record or update one participant's status.
+async def _find_participant(pool, session_id, *, user_id, username, display_name):
+    """The row this person already has, searched by strongest key first.
 
-    Identity is deliberately fuzzy: someone is first mentioned by name in the
-    group ("Masha is coming"), and only later replies in DM where a real
-    telegram user_id is known. Matching on user_id alone would create a second
-    row for the same person — get_participants would then report Masha twice
-    with conflicting statuses, and the nudge would DM someone who had already
-    confirmed. So: match on user_id first, fall back to the name, and backfill
-    the user_id onto the existing row once it becomes known.
+    Three keys, and the order is the whole point. A user_id is proof. A
+    @username is unique in Telegram, so it is proof of *who*, just not tied to
+    an id yet. A display name is a first name two people in one chat can
+    share, so it is the last resort and only matches a row that has no id of
+    its own to contradict it.
     """
-    row = None
     if user_id is not None:
         row = await pool.fetchrow(
             "SELECT id FROM participants WHERE session_id = $1 AND user_id = $2",
             session_id, user_id,
         )
-    if row is None:
+        if row is not None:
+            return row
+    if username is not None:
         row = await pool.fetchrow(
-            """
-            SELECT id FROM participants
-            WHERE session_id = $1 AND lower(display_name) = lower($2)
-              AND (user_id IS NULL OR user_id = $3::bigint)
-            ORDER BY (user_id IS NULL) LIMIT 1
-            """,
-            session_id, display_name, user_id,
+            "SELECT id FROM participants WHERE session_id = $1 AND lower(username) = lower($2)",
+            session_id, username,
         )
+        if row is not None:
+            return row
+    return await pool.fetchrow(
+        """
+        SELECT id FROM participants
+        WHERE session_id = $1 AND lower(display_name) = lower($2)
+          AND (user_id IS NULL OR user_id = $3::bigint)
+        ORDER BY (user_id IS NULL) LIMIT 1
+        """,
+        session_id, display_name, user_id,
+    )
+
+
+def _preferred_display_name(new_name: str | None, username: str | None) -> str | None:
+    """"@poohpeer" is a handle someone typed, not a name.
+
+    It reaches display_name whenever a person is first written down from
+    another person's message, since that message contains nothing else. Once
+    the handle has a column of its own, keeping it in display_name too would
+    print "@poohpeer" for a person the roster could name properly.
+    """
+    if new_name and username and new_name.strip().lstrip("@").lower() == username.lower():
+        return None
+    return new_name
+
+
+async def set_participant(pool, session_id, display_name, status, user_id=None,
+                          username=None) -> dict:
+    """Record or update one participant's status.
+
+    Identity is deliberately fuzzy: someone is first mentioned in the group
+    ("Masha is coming", "@poohpeer не участвует") and only later writes
+    themselves, which is the first moment their id and their handle are known
+    together. Matching on user_id alone would create a second row for the same
+    person — get_participants would then report Masha twice with conflicting
+    statuses, and a roll call would chase someone who had already answered. So
+    every key that is known is used to find the existing row, and whatever the
+    row was missing is backfilled onto it.
+    """
+    username = people.normalise_username(username)
+    if username is None and display_name and display_name.strip().startswith("@"):
+        # The model was given a handle and nothing else, which is what a
+        # message like "@poohpeer не участвует" actually contains. Reading it
+        # as a handle is what lets this row merge with the person's real one
+        # the next time they speak.
+        username = people.normalise_username(display_name)
+
+    row = await _find_participant(
+        pool, session_id, user_id=user_id, username=username, display_name=display_name
+    )
 
     if row is None:
         await pool.execute(
             """
-            INSERT INTO participants (session_id, user_id, display_name, status, responded_at)
-            VALUES ($1, $2, $3, $4, now())
+            INSERT INTO participants (session_id, user_id, username, display_name,
+                                      status, responded_at)
+            VALUES ($1, $2, $3, $4, $5, now())
             """,
-            session_id, user_id, display_name, status,
+            session_id, user_id, username, display_name, status,
         )
         return {"status": "ok"}
 
@@ -666,14 +756,98 @@ async def set_participant(pool, session_id, display_name, status, user_id=None) 
         """
         UPDATE participants SET
             status = $2,
-            display_name = $3,
+            display_name = COALESCE($3, display_name),
             user_id = COALESCE($4::bigint, user_id),
+            username = COALESCE($5, username),
             responded_at = now()
         WHERE id = $1
         """,
-        row["id"], status, display_name, user_id,
+        row["id"], status, _preferred_display_name(display_name, username), user_id, username,
     )
     return {"status": "ok"}
+
+
+async def link_identity(pool, session_id, *, user_id, username, display_name) -> dict:
+    """Tie a speaker's id, handle and name together on one row.
+
+    Called for every message from a known sender, because that message is the
+    only place Telegram hands over all three at once. Bot API cannot turn a
+    @username into a user_id — getChat resolves handles only for public
+    channels and supergroups, and there is no resolveUsername outside the
+    client MTProto API — so the link can only ever be learned from the person
+    themselves (or from getChatAdministrators, see bot/group_info.py).
+
+    Nothing is created here. Writing a row for everyone who speaks would put
+    people on the roster who never said they were coming; this only repairs
+    rows that already exist.
+    """
+    username = people.normalise_username(username)
+    if user_id is None:
+        return {"status": "nothing_to_link"}
+
+    by_id = await pool.fetchrow(
+        "SELECT id, display_name FROM participants WHERE session_id = $1 AND user_id = $2",
+        session_id, user_id,
+    )
+    by_handle = None
+    if username is not None:
+        by_handle = await pool.fetchrow(
+            """
+            SELECT id, status, responded_at FROM participants
+            WHERE session_id = $1 AND lower(username) = lower($2)
+            """,
+            session_id, username,
+        )
+
+    if by_id is not None and by_handle is not None and by_id["id"] != by_handle["id"]:
+        # The live duplicate this exists for: "Alex"/91237884 written from his
+        # own message, and "@poohpeer" written from someone else's. The handle
+        # row is folded into the id row and deleted — the id row is the one
+        # that can still be matched by every future message.
+        # Delete first, then claim the handle. The other way round trips the
+        # unique index on (session_id, lower(username)) — the handle is still
+        # held by the row being folded in. One transaction so a failure between
+        # the two cannot leave the handle attached to nobody.
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM participants WHERE id = $1", by_handle["id"])
+                await conn.execute(
+                    """
+                    UPDATE participants SET
+                        status = $2,
+                        responded_at = GREATEST(COALESCE(responded_at, to_timestamp(0)), $3),
+                        username = $4
+                    WHERE id = $1
+                    """,
+                    by_id["id"], by_handle["status"], by_handle["responded_at"], username,
+                )
+        return {"status": "merged", "kept": by_id["id"], "removed": by_handle["id"]}
+
+    if by_id is not None:
+        await pool.execute(
+            """
+            UPDATE participants SET
+                username = COALESCE($2, username),
+                display_name = COALESCE($3, display_name)
+            WHERE id = $1
+            """,
+            by_id["id"], username, _preferred_display_name(display_name, username),
+        )
+        return {"status": "linked", "participant_id": by_id["id"]}
+
+    if by_handle is not None:
+        await pool.execute(
+            """
+            UPDATE participants SET
+                user_id = $2,
+                display_name = COALESCE($3, display_name)
+            WHERE id = $1
+            """,
+            by_handle["id"], user_id, _preferred_display_name(display_name, username),
+        )
+        return {"status": "linked", "participant_id": by_handle["id"]}
+
+    return {"status": "nothing_to_link"}
 
 
 async def get_participants(pool, session_id) -> dict:
@@ -691,11 +865,17 @@ async def get_participants(pool, session_id) -> dict:
     """
     session_row = await _session_row(pool, session_id, columns="chat_id")
     rows = await pool.fetch(
-        "SELECT user_id, display_name, status FROM participants WHERE session_id = $1 ORDER BY id",
+        """
+        SELECT user_id, display_name, username, status FROM participants
+        WHERE session_id = $1 ORDER BY id
+        """,
         session_id,
     )
     participants = [
-        {"user_id": r["user_id"], "display_name": r["display_name"], "status": r["status"]}
+        {
+            "user_id": r["user_id"], "display_name": r["display_name"],
+            "username": r["username"], "status": r["status"],
+        }
         for r in rows
     ]
     chat_member_count = None
@@ -712,42 +892,67 @@ async def get_participants(pool, session_id) -> dict:
 
 
 async def nudge_unconfirmed_participants(pool, telegram_bot, session_id) -> dict:
-    """DM every participant whose status is still unknown.
+    """Start a roll call: ask everyone still silent, in the group chat.
 
-    Scoped to 'unknown' only, not 'maybe' — someone who hedged has already
-    answered, just non-committally; re-nudging them is chasing a response
-    they already gave, not the silence this tool exists to break.
+    This used to send private messages, and it could not work. Telegram
+    refuses (Forbidden) to DM anyone who has never pressed Start with the bot
+    — the normal state for most group members — and a participant first
+    written down from someone else's message has no user_id to DM at all, so
+    the old implementation skipped them outright. The people it silently
+    dropped were exactly the ones it existed to reach.
 
-    Each send is isolated: Telegram refuses (Forbidden) to DM anyone who has
-    never started a private chat with the bot, which is the normal state for
-    most group members. Letting that propagate would abort the run, lose the
-    record of who was already reached, and re-DM them all on a retry. Instead
-    every failure is collected so the model can tell the group who it could
-    not reach.
+    The group chat reaches everyone, and an @handle in the text is a live
+    Telegram mention, so the people named still get a notification.
+
+    Only the first round is sent here. The next two, and the summary, are the
+    worker's (worker/roll_call.py) — a tool call must not block for hours.
     """
-    session_row = await _session_row(pool, session_id, columns="activity_type")
+    session_row = await _session_row(pool, session_id, columns="chat_id")
     if session_row is None:
         return {"status": "unknown_session"}
 
-    rows = await pool.fetch(
-        "SELECT user_id, display_name FROM participants WHERE session_id = $1 AND status = 'unknown'",
-        session_id,
+    roster = await get_participants(pool, session_id)
+    answered, unanswered = roll_call.split_by_answer(roster["participants"])
+    others = roll_call.unknown_others(roster["chat_member_count"], roster["recorded_count"])
+    if not unanswered and others == 0:
+        # Nothing to ask and nobody unaccounted for. Starting a run here would
+        # post a question naming no one, then two more just like it.
+        return {"status": "nobody_to_ask"}
+
+    started = await session.start_roll_call(pool, session_id, session_row["chat_id"])
+    if started is None:
+        # A run is already going. Starting a second would double every
+        # remaining round, which reads as the bot malfunctioning.
+        return {"status": "already_running"}
+
+    try:
+        await roll_call.send_round(
+            telegram_bot, session_row["chat_id"],
+            answered=answered, unanswered=unanswered, others=others, rounds_done=0,
+        )
+    except Exception:
+        log.warning("Could not post the first roll-call round for session %s", session_id,
+                    exc_info=True)
+        await session.cancel_roll_calls_for_session(pool, session_id)
+        return {"status": "could_not_post"}
+
+    # The claim the worker would have made for this round, made here instead:
+    # without it the first round is not counted and the group gets four.
+    await pool.execute(
+        """
+        UPDATE roll_calls SET
+            rounds_done = 1,
+            next_at = now() + make_interval(mins => $2)
+        WHERE id = $1 AND status = 'active'
+        """,
+        started["id"], roll_call.next_interval_minutes(0),
     )
-    nudged, skipped, failed = [], [], []
-    for r in rows:
-        if r["user_id"] is None:
-            skipped.append(r["display_name"])
-            continue
-        try:
-            await telegram_bot.send_message(
-                chat_id=r["user_id"],
-                text=f"Hey {r['display_name']}, are you in for the {session_row['activity_type']}?",
-            )
-            nudged.append(r["display_name"])
-        except Exception as e:
-            log.warning("Could not DM participant %s: %s", r["display_name"], e)
-            failed.append(r["display_name"])
-    return {"nudged": nudged, "skipped_no_user_id": skipped, "failed_to_reach": failed}
+    return {
+        "status": "started",
+        "asked": [people.mention(p.get("display_name"), p.get("username")) for p in unanswered],
+        "unknown_others": others,
+        "rounds_total": roll_call.MAX_ROUNDS,
+    }
 
 
 async def reminder_set(pool, session_id, message, remind_at, target_user_id=None,
@@ -824,6 +1029,9 @@ async def reminder_set(pool, session_id, message, remind_at, target_user_id=None
     if repeat_every_minutes is not None:
         result["repeats_every_minutes"] = repeat_every_minutes
         result["repeats_until"] = _local_iso(repeat_until_utc, tz)
+        # Said out loud so the model tells the group how many to expect rather
+        # than promising a series that quietly stops after the third.
+        result["max_deliveries"] = REMINDER_MAX_DELIVERIES
     if known is None and local_time is not None:
         # Nobody has said where this group is, so the time was interpreted in
         # the configured default. Say so instead of silently guessing: the
