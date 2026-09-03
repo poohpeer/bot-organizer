@@ -253,12 +253,138 @@ jobs:
 
             $stale = $versions | Sort-Object Number -Descending | Select-Object -Skip 3
             if (-not $stale) {
-              Write-Host "nothing to remove ($($versions.Count) version(s) on the node)"
+              Write-Host "no stale tags ($($versions.Count) version(s) on the node)"
             }
             foreach ($old in $stale) {
               Write-Host "removing $($old.Tag)"
               docker exec $node crictl rmi $old.Tag
             }
+
+            # Removing by tag is only half of it. An image whose :vN tag is
+            # already gone is invisible to the loop above, which matches on
+            # that tag — so it is kept for ever. Live, 27 such images had piled
+            # up against 3 tagged ones, 2.7 GiB on a laptop's disk, while the
+            # step cheerfully reported "nothing to remove". They date from
+            # before the tags were numbered, when the node pulled :latest and
+            # every new build orphaned the previous image.
+            #
+            # Removed by digest, and only ours. `crictl rmi --prune` would have
+            # been one line, but it removes everything no container references
+            # — which includes the two older versions kept above, the whole
+            # point of keeping them.
+            $untagged = $images.images | Where-Object {
+              -not $_.repoTags -and ($_.repoDigests | Where-Object { $_ -like "$repo@*" })
+            }
+            Write-Host "$($untagged.Count) untagged image(s) of $repo to remove"
+            foreach ($img in $untagged) {
+              docker exec $node crictl rmi $img.id
+            }
           } catch {
             Write-Warning "Could not prune old images: $_"
           }
+
+  # Only after the cluster is confirmed running the new image. Deleting the
+  # version someone might have to roll back to, before knowing the new one
+  # works, is the one way this job could do real damage.
+  prune-registry:
+    needs: deploy
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      # Housekeeping, like the node prune, and never a reason to fail a deploy
+      # that worked. Roughly 300 versions had accumulated, one or more per
+      # build since the first, and nothing had ever removed one.
+      #
+      # Three, matching the node: the version running, the one to roll back
+      # to, and one more. The registry is the only place a rollback can pull
+      # from once the node's copy is gone, so this is the real floor.
+      - name: Keep only the last three versions in GHCR
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_CLEANUP_TOKEN || secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ github.event.repository.name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -uo pipefail
+
+          # A user account and an organisation have different endpoints and
+          # neither accepts the other's path, so ask which this owner is
+          # rather than hard-coding one and breaking on a transfer.
+          owner_type=$(gh api "/users/$OWNER" --jq .type 2>/dev/null || echo User)
+          if [ "$owner_type" = "Organization" ]; then
+            base="/orgs/$OWNER/packages/container/$PACKAGE"
+          else
+            base="/users/$OWNER/packages/container/$PACKAGE"
+          fi
+          echo "owner is a $owner_type; using $base"
+
+          # `jq -s add` because --paginate emits one JSON array per page, not
+          # one merged array. Without it jq runs the whole program once per
+          # page and the cutoff below is computed per page — which keeps three
+          # versions from every page and deletes the rest of each.
+          versions=$(gh api --paginate "$base/versions?per_page=100" 2>/dev/null | jq -s 'add') || {
+            echo "Could not list versions — see the note on GHCR_CLEANUP_TOKEN below."
+            exit 0
+          }
+          if [ -z "$versions" ] || [ "$versions" = "null" ]; then
+            echo "Could not list versions — see the note on GHCR_CLEANUP_TOKEN below."
+            exit 0
+          fi
+          echo "$(printf '%s' "$versions" | jq 'length') version(s) in the registry"
+
+          # What to keep, and why it is a timestamp rather than a count of
+          # versions. A build pushes one image index, and buildx adds a
+          # provenance attestation alongside it; GHCR lists the attestation as
+          # its own untagged version. So "three versions" is not three builds,
+          # and deleting an untagged one at random can orphan a tag that is
+          # still in use.
+          #
+          # Parent and attestation are created in the same instant, so keeping
+          # everything at or after the oldest kept build's timestamp keeps each
+          # kept build whole, whatever it is made of. A minute of slack absorbs
+          # sub-second ordering between the two.
+          cutoff=$(printf '%s' "$versions" | jq -r '
+            [ .[]
+              | select(any(.metadata.container.tags[]?; test("^v[0-9]+$")))
+              | { n: ([ .metadata.container.tags[] | select(test("^v[0-9]+$")) | ltrimstr("v") | tonumber ] | max),
+                  at: .created_at }
+            ]
+            | sort_by(.n) | reverse | .[0:3] | map(.at) | min // empty
+          ')
+          if [ -z "$cutoff" ]; then
+            echo "no v<N>-tagged versions found; refusing to delete anything"
+            exit 0
+          fi
+          cutoff=$(date -u -d "$cutoff - 1 minute" +%Y-%m-%dT%H:%M:%SZ)
+          echo "keeping everything created at or after $cutoff"
+
+          stale=$(printf '%s' "$versions" | jq -r --arg cutoff "$cutoff" '
+            .[] | select(.created_at < $cutoff)
+            | "\(.id)\t\(.created_at)\t\((.metadata.container.tags // []) | join(",") | if . == "" then "<untagged>" else . end)"
+          ')
+          if [ -z "$stale" ]; then
+            echo "nothing to remove"
+            exit 0
+          fi
+
+          echo "$stale" | wc -l | xargs echo "removing" "version(s):"
+          failed=0
+          while IFS=$'\t' read -r id created tags; do
+            [ -z "$id" ] && continue
+            if gh api -X DELETE "$base/versions/$id" >/dev/null 2>&1; then
+              echo "  deleted $id  $created  $tags"
+            else
+              failed=$((failed + 1))
+              echo "  FAILED  $id  $created  $tags"
+            fi
+          done <<< "$stale"
+
+          if [ "$failed" -gt 0 ]; then
+            echo
+            echo "$failed deletion(s) refused. GITHUB_TOKEN can only delete versions of a"
+            echo "package owned by an organisation. For a user-owned package, add a"
+            echo "personal access token with the delete:packages scope as the repository"
+            echo "secret GHCR_CLEANUP_TOKEN; this step picks it up automatically."
+          fi
