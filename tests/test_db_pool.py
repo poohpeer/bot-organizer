@@ -129,3 +129,60 @@ async def test_init_db_upgrades_a_database_built_by_an_older_version(db_pool):
         "SELECT count(*) FROM information_schema.tables "
         "WHERE table_schema = current_schema() AND table_name = 'roll_calls'"
     ) == 1
+
+
+async def test_init_db_moves_a_bare_handle_out_of_the_display_name(db_pool):
+    """Rows written before the username column put "@poohpeer" in
+    display_name, which no lookup searches — so the duplicate they are half of
+    could never heal. The migration moves the handle into its own column; it
+    does not merge anybody, which is the group's call, not a migration's."""
+    await db_pool.execute("INSERT INTO chats (chat_id, title) VALUES (-1, 'Chat')")
+    session_id = await db_pool.fetchval(
+        "INSERT INTO sessions (chat_id, activity_type) VALUES (-1, 'picnic') RETURNING id"
+    )
+    await db_pool.execute(
+        "INSERT INTO participants (session_id, display_name, status) VALUES ($1, $2, $3)",
+        session_id, "@poohpeer", "declined",
+    )
+    await db_pool.execute(
+        "INSERT INTO participants (session_id, display_name, status) VALUES ($1, $2, $3)",
+        session_id, "Игорёк", "confirmed",
+    )
+
+    await db.pool.init_db(db_pool)
+
+    rows = {
+        r["display_name"]: r["username"] for r in await db_pool.fetch(
+            "SELECT display_name, username FROM participants WHERE session_id = $1",
+            session_id,
+        )
+    }
+    assert rows["@poohpeer"] == "poohpeer"
+    # A name is never turned into a handle — that would mention whoever really
+    # owns it.
+    assert rows["Игорёк"] is None
+    assert len(rows) == 2, "the migration must not merge or delete anything"
+
+
+async def test_the_backfill_leaves_a_row_alone_rather_than_colliding(db_pool):
+    """A session where the handle is already on another row: taking it here
+    would break the unique index and fail the whole migration for everyone."""
+    await db_pool.execute("INSERT INTO chats (chat_id, title) VALUES (-2, 'Chat')")
+    session_id = await db_pool.fetchval(
+        "INSERT INTO sessions (chat_id, activity_type) VALUES (-2, 'picnic') RETURNING id"
+    )
+    await db_pool.execute(
+        "INSERT INTO participants (session_id, display_name, username, status) "
+        "VALUES ($1, 'Alex', 'poohpeer', 'confirmed')", session_id
+    )
+    await db_pool.execute(
+        "INSERT INTO participants (session_id, display_name, status) "
+        "VALUES ($1, '@poohpeer', 'declined')", session_id
+    )
+
+    await db.pool.init_db(db_pool)
+
+    assert await db_pool.fetchval(
+        "SELECT username FROM participants WHERE session_id = $1 AND display_name = '@poohpeer'",
+        session_id,
+    ) is None
