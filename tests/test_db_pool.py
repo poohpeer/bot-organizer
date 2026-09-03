@@ -97,3 +97,35 @@ async def test_list_items_alter_preserves_existing_rows(db_pool):
     assert item["category"] is None
     assert item["claimed_by"] is None
     assert item["claimed_by_user_id"] is None
+
+
+async def test_init_db_upgrades_a_database_built_by_an_older_version(db_pool):
+    """init_db has to run against a database that already has the tables but
+    not the newest columns — which is every real deployment, and the one case
+    a fresh test database can never reproduce.
+
+    A `CREATE UNIQUE INDEX ... (lower(username))` placed in the CREATE block
+    rather than the ALTER block passes every test here and takes production
+    down on deploy: `CREATE TABLE IF NOT EXISTS participants` is a no-op
+    against the existing table, so the column it indexes does not exist yet
+    and the whole schema statement fails. This drops the newest columns to put
+    the database back into that shape, then runs init_db over it.
+    """
+    await db_pool.execute("DROP INDEX IF EXISTS one_username_per_session")
+    await db_pool.execute("ALTER TABLE participants DROP COLUMN IF EXISTS username")
+    await db_pool.execute("ALTER TABLE reminders DROP COLUMN IF EXISTS deliveries")
+    await db_pool.execute("DROP TABLE IF EXISTS roll_calls")
+
+    await db.pool.init_db(db_pool)
+
+    columns = {
+        r["column_name"] for r in await db_pool.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'participants'"
+        )
+    }
+    assert "username" in columns
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = current_schema() AND table_name = 'roll_calls'"
+    ) == 1

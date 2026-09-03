@@ -175,12 +175,13 @@ CREATE TABLE IF NOT EXISTS participants (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_participants_session ON participants (session_id);
--- What actually collapses the duplicate: one @username can only ever name one
--- row in a session, so the second write for the same person updates instead of
--- inserting. Partial, because most rows have no username at all and NULLs must
--- not collide with each other.
-CREATE UNIQUE INDEX IF NOT EXISTS one_username_per_session
-    ON participants (session_id, lower(username)) WHERE username IS NOT NULL;
+-- The unique index on (session_id, lower(username)) is NOT here. It lives in
+-- the ALTER block below, immediately after the ADD COLUMN that creates the
+-- column it indexes. Here it would run against a database where participants
+-- already exists — CREATE TABLE IF NOT EXISTS is then a no-op, the column has
+-- not been added yet, and the whole schema statement fails with
+-- `column "username" does not exist`. A fresh database hides that completely,
+-- which is exactly how it reached production.
 
 CREATE TABLE IF NOT EXISTS list_items (
     id          BIGSERIAL PRIMARY KEY,
