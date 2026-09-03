@@ -452,6 +452,28 @@ ALTER TABLE reminders ADD COLUMN IF NOT EXISTS deliveries INT NOT NULL DEFAULT 0
 ALTER TABLE participants ADD COLUMN IF NOT EXISTS username TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS one_username_per_session
     ON participants (session_id, lower(username)) WHERE username IS NOT NULL;
+-- Rows written before the column existed put the @handle in display_name,
+-- because a message like "@poohpeer не участвует" contains nothing else. Left
+-- there it is invisible to every lookup, so the duplicate those rows are half
+-- of could never heal: link_identity searches `username`, finds nothing, and
+-- the same person stays twice on the roster for ever.
+--
+-- This moves the handle into its own column and nothing more. It does not
+-- merge anybody — merging rows with conflicting answers is the group's call,
+-- not a migration's. It only makes the rows recognisable, so the ordinary
+-- path (that person's next message) can do the merge with real evidence.
+--
+-- The NOT EXISTS guard is the unique index: a session that somehow already
+-- has the handle on another row keeps it there, and this row is left alone
+-- rather than failing the whole migration.
+UPDATE participants p SET username = lower(substring(display_name from 2))
+WHERE p.username IS NULL
+  AND p.display_name ~ '^@[A-Za-z0-9_]{4,32}$'
+  AND NOT EXISTS (
+      SELECT 1 FROM participants o
+      WHERE o.session_id = p.session_id AND o.id <> p.id
+        AND lower(o.username) = lower(substring(p.display_name from 2))
+  );
 """
 
 
