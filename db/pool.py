@@ -162,12 +162,25 @@ CREATE TABLE IF NOT EXISTS participants (
     session_id    BIGINT NOT NULL REFERENCES sessions(id),
     user_id       BIGINT,
     display_name  TEXT NOT NULL,
+    -- The @username, without the '@', kept apart from display_name because
+    -- they identify at different strengths. A username is unique and is what
+    -- other people type when they mean this person; a display name is a
+    -- first name two people in one chat can share. Someone first written down
+    -- from another person's message has only one of the two, so both are
+    -- nullable and both are match keys — see set_participant.
+    username      TEXT,
     status        TEXT NOT NULL DEFAULT 'unknown'
                        CHECK (status IN ('unknown', 'confirmed', 'maybe', 'declined')),
     responded_at  TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_participants_session ON participants (session_id);
+-- What actually collapses the duplicate: one @username can only ever name one
+-- row in a session, so the second write for the same person updates instead of
+-- inserting. Partial, because most rows have no username at all and NULLs must
+-- not collide with each other.
+CREATE UNIQUE INDEX IF NOT EXISTS one_username_per_session
+    ON participants (session_id, lower(username)) WHERE username IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS list_items (
     id          BIGSERIAL PRIMARY KEY,
@@ -233,6 +246,36 @@ CREATE TABLE IF NOT EXISTS reminders (
     sent_at         TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (status, remind_at);
+
+-- A roll call is the bot going round the group asking everyone who has not
+-- said whether they are coming, three times with a growing gap, then posting
+-- who answered and who did not.
+--
+-- Deliberately not a repeating `reminders` row, though the shape looks close.
+-- A reminder carries fixed text; every roll-call round is composed fresh from
+-- whoever is still 'unknown' at that moment, and the run ends either after
+-- MAX_ROUNDS or the moment nobody is left to ask — neither of which
+-- repeat_until can express. The fourth message is a different message again.
+--
+-- The interval is not stored: it is a pure function of rounds_done (see
+-- bot/roll_call.py), so changing the schedule is a code change rather than a
+-- migration over live rows.
+CREATE TABLE IF NOT EXISTS roll_calls (
+    id           BIGSERIAL PRIMARY KEY,
+    session_id   BIGINT NOT NULL REFERENCES sessions(id),
+    chat_id      BIGINT NOT NULL,
+    rounds_done  INT NOT NULL DEFAULT 0,
+    next_at      TIMESTAMPTZ NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'done', 'cancelled')),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- One running roll call per session. Asked twice in a row ("спроси всех" said
+-- again a minute later), two rows would post every one of the six messages
+-- twice, and the group would read it as the bot malfunctioning.
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_roll_call_per_session
+    ON roll_calls (session_id) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_roll_calls_due ON roll_calls (status, next_at);
 
 CREATE TABLE IF NOT EXISTS places (
     id           BIGSERIAL PRIMARY KEY,
@@ -397,6 +440,17 @@ ALTER TABLE chats ADD COLUMN IF NOT EXISTS title_seen TEXT;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS description_seen TEXT;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS info_checked_at TIMESTAMPTZ;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS member_count INT;
+-- How many times a repeating reminder has actually gone out. repeat_until
+-- alone bounded a series only in time, so "каждые 5 минут до завтра" was 288
+-- messages the group never meant to ask for; three is the ceiling now, and it
+-- has to be counted because the end time cannot express it.
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS deliveries INT NOT NULL DEFAULT 0;
+-- See the participants table above: the @username is a second, stronger
+-- identity key, and the partial unique index is what makes a second write for
+-- the same person an update rather than a duplicate row.
+ALTER TABLE participants ADD COLUMN IF NOT EXISTS username TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS one_username_per_session
+    ON participants (session_id, lower(username)) WHERE username IS NOT NULL;
 """
 
 

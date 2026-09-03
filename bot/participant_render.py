@@ -7,6 +7,8 @@ there is no cached rendering anywhere, so re-rendering after a status change
 is the entire "update mechanism".
 """
 
+from bot import people
+
 # "maybe" is a hedged reply ("может быть", "постараюсь") — distinct from
 # "unknown", which means nobody has answered at all. Without that distinction
 # the ❓/◻️ icons the user asked for would have nothing different to point at.
@@ -26,7 +28,8 @@ _EMPTY_ROSTER = "Пока никого не записал."
 
 def _participant_line(participant: dict) -> str:
     icon = _ICONS.get(participant.get("status"), _DEFAULT_ICON)
-    return f"{icon} {participant['display_name']}"
+    who = people.mention(participant.get("display_name"), participant.get("username"))
+    return f"{icon} {who}"
 
 
 def render(participants: list[dict]) -> str:

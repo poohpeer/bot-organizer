@@ -1,6 +1,10 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
+import bot.session as session
+import bot.timezones as timezones
+from bot.tools.core import REMINDER_MAX_DELIVERIES
+
 log = logging.getLogger(__name__)
 
 # A reminder to someone who has blocked the bot can never succeed. Retrying it
@@ -8,10 +12,32 @@ log = logging.getLogger(__name__)
 # send every poll, so give up after this many tries.
 MAX_ATTEMPTS = 3
 
+# Quiet hours apply to repeats only. A one-off was scheduled for a moment
+# somebody named — "напомни в 23:00" means 23:00, and holding it until nine in
+# the morning would deliver it after whatever it was about. A repeat has no
+# such moment: it fires on a cadence, and skipping the night simply moves the
+# next one to the start of the waking window, without spending a delivery,
+# because the row is not selected at all while the chat is asleep.
+_DUE = f"""
+    r.status = 'pending'
+    AND r.remind_at <= now()
+    AND (r.repeat_every_minutes IS NULL OR ({session.WAKING_HOURS_SQL}))
+"""
+
 
 async def _due_reminders(pool):
+    # LEFT JOIN, belt and braces. reminders.chat_id is copied from the
+    # session, and sessions.chat_id has a foreign key to chats, so the row is
+    # always there today — but an inner join would turn any future gap into
+    # reminders that silently never fire, and the timezone expression already
+    # falls back to the configured default for a NULL.
     return await pool.fetch(
-        "SELECT * FROM reminders WHERE status = 'pending' AND remind_at <= now() ORDER BY remind_at"
+        f"""
+        SELECT r.* FROM reminders r LEFT JOIN chats c USING (chat_id)
+        WHERE {_DUE}
+        ORDER BY r.remind_at
+        """,
+        timezones.DEFAULT_TIMEZONE, session.QUIET_UNTIL_HOUR, session.QUIET_FROM_HOUR,
     )
 
 
@@ -60,6 +86,20 @@ async def _advance(pool, reminder_id, next_at) -> None:
         WHERE id = $1
         """,
         reminder_id, next_at,
+    )
+
+
+async def _count_delivery(pool, reminder_id) -> int:
+    """Record that one occurrence actually went out, and say how many have.
+
+    Counted rather than derived from the clock: repeat_until bounds a series
+    in time only, so "каждый час до завтра" is twenty-four messages nobody
+    asked for in those words. The cap is on how many are sent, and only a
+    counter can express that.
+    """
+    return await pool.fetchval(
+        "UPDATE reminders SET deliveries = deliveries + 1 WHERE id = $1 RETURNING deliveries",
+        reminder_id,
     )
 
 
@@ -135,8 +175,12 @@ async def deliver_due_reminders(pool, telegram_bot, *, min_interval_hours: float
             continue
 
         if r["repeat_every_minutes"] is not None:
+            delivered_so_far = await _count_delivery(pool, r["id"])
             next_at = _next_occurrence(r["remind_at"], r["repeat_every_minutes"])
-            if next_at <= r["repeat_until"]:
+            # Two independent ends, and the series stops at whichever comes
+            # first: the time the group asked for, and the ceiling on how many
+            # messages any one request may produce.
+            if next_at <= r["repeat_until"] and delivered_so_far < REMINDER_MAX_DELIVERIES:
                 await _advance(pool, r["id"], next_at)
 
         delivered.append(r["id"])

@@ -12,6 +12,7 @@ from datetime import date
 
 from google.genai import types
 
+import bot.people as people
 import bot.timezones as timezones
 import bot.tools.core as core_tools
 from bot.ai.classify import extract
@@ -65,6 +66,7 @@ async def ensure_creator_known(pool, telegram_bot, chat_id: int) -> int | None:
     except Exception:
         log.warning("Could not read administrators of chat %s", chat_id, exc_info=True)
         return None
+    await _record_admin_handles(pool, chat_id, admins)
     for member in admins or ():
         if getattr(member, "status", None) == "creator":
             user_id = getattr(getattr(member, "user", None), "id", None)
@@ -72,6 +74,43 @@ async def ensure_creator_known(pool, telegram_bot, chat_id: int) -> int | None:
                 await timezones.set_chat_creator(pool, chat_id, user_id)
                 return user_id
     return None
+
+
+async def _record_admin_handles(pool, chat_id: int, admins) -> None:
+    """Attach @usernames to roster rows for the administrators we just fetched.
+
+    A free ride on a call that was being made anyway. Bot API cannot turn a
+    @username into a user_id, so the only way a handle in someone else's
+    message ("@poohpeer не участвует") ever reaches the right person is if the
+    pair was seen together somewhere first — from their own message, or here.
+
+    Only rows that already exist are touched. Administrators are not
+    automatically participants, and writing them onto the roster would put
+    people on the guest list who never said they were coming.
+    """
+    for member in admins or ():
+        user = getattr(member, "user", None)
+        user_id = getattr(user, "id", None)
+        username = people.normalise_username(getattr(user, "username", None))
+        if user_id is None or username is None:
+            continue
+        try:
+            await pool.execute(
+                """
+                UPDATE participants p SET username = $3
+                FROM sessions s
+                WHERE p.session_id = s.id AND s.chat_id = $1
+                  AND p.user_id = $2 AND p.username IS NULL
+                """,
+                chat_id, user_id, username,
+            )
+        except Exception:
+            # A handle already taken by another row in the same session (the
+            # unique index) means the roster still holds a duplicate that only
+            # a message from that person can resolve. Not worth failing the
+            # creator lookup over.
+            log.warning("Could not record handle @%s in chat %s", username, chat_id,
+                        exc_info=True)
 
 
 async def changed_fields(pool, chat_id: int, info: dict) -> set[str]:

@@ -364,3 +364,100 @@ async def test_an_overdue_repeat_delivers_once_per_poll_not_once_per_missed_slot
         await worker_reminders.deliver_due_reminders(db_pool, telegram_bot, min_interval_hours=0)
 
     assert telegram_bot.send_message.await_count == 1
+
+
+# --- how many times a repeat may fire -------------------------------------
+
+async def _tz_session(db_pool, chat_id, tz):
+    await db_pool.execute(
+        "INSERT INTO chats (chat_id, title, timezone) VALUES ($1, 'Chat', $2)", chat_id, tz
+    )
+    row = await db_pool.fetchrow(
+        "INSERT INTO sessions (chat_id, activity_type) VALUES ($1, 'picnic') RETURNING id", chat_id
+    )
+    return row["id"]
+
+
+def _zone_where_the_hour_is(wanted) -> str:
+    """A timezone in which it is right now one of `wanted` hours — computed,
+    so the test does not pass or fail depending on when the suite runs."""
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(timezone.utc)
+    for offset in range(-12, 15):
+        # Etc/GMT+N is UTC-N; the inverted sign is a POSIX quirk.
+        name = f"Etc/GMT{'-' if offset > 0 else '+'}{abs(offset)}"
+        if now.astimezone(ZoneInfo(name)).hour in wanted:
+            return name
+    raise AssertionError("no fixed-offset zone matched; the clock is impossible")
+
+
+async def _deliver(db_pool, telegram_bot):
+    return await worker_reminders.deliver_due_reminders(
+        db_pool, telegram_bot, min_interval_hours=6
+    )
+
+
+async def test_a_repeat_stops_after_three_deliveries(db_pool):
+    """repeat_until bounds a series in time only — "каждый час до завтра" is
+    twenty-four messages nobody asked for in those words."""
+    session_id = await _session(db_pool, chat_id=-700)
+    far_future = datetime.now(timezone.utc) + timedelta(days=30)
+    reminder_id = await _reminder(
+        db_pool, session_id, chat_id=-700,
+        repeat_every_minutes=60, repeat_until=far_future,
+    )
+    telegram_bot = AsyncMock()
+
+    for _ in range(5):
+        await db_pool.execute(
+            "UPDATE reminders SET remind_at = now() - interval '1 minute' "
+            "WHERE id = $1 AND status = 'pending'",
+            reminder_id,
+        )
+        await _deliver(db_pool, telegram_bot)
+
+    assert telegram_bot.send_message.await_count == worker_reminders.REMINDER_MAX_DELIVERIES
+    row = await db_pool.fetchrow(
+        "SELECT status, deliveries FROM reminders WHERE id = $1", reminder_id
+    )
+    assert row["deliveries"] == worker_reminders.REMINDER_MAX_DELIVERIES
+    assert row["status"] == "sent"
+
+
+async def test_a_repeat_waits_out_quiet_hours_without_spending_one(db_pool, monkeypatch):
+    import bot.session
+
+    monkeypatch.setattr(bot.session, "QUIET_UNTIL_HOUR", 9)
+    monkeypatch.setattr(bot.session, "QUIET_FROM_HOUR", 21)
+    session_id = await _tz_session(db_pool, -701, _zone_where_the_hour_is(range(21, 24)))
+    reminder_id = await _reminder(
+        db_pool, session_id, chat_id=-701, repeat_every_minutes=60,
+        repeat_until=datetime.now(timezone.utc) + timedelta(days=30),
+    )
+    telegram_bot = AsyncMock()
+
+    await _deliver(db_pool, telegram_bot)
+
+    telegram_bot.send_message.assert_not_awaited()
+    row = await db_pool.fetchrow(
+        "SELECT status, deliveries FROM reminders WHERE id = $1", reminder_id
+    )
+    assert row["status"] == "pending"
+    assert row["deliveries"] == 0
+
+
+async def test_a_one_off_still_fires_during_quiet_hours(db_pool, monkeypatch):
+    """Somebody asked for 23:00 and meant 23:00. Holding it until nine in the
+    morning delivers it after whatever it was about."""
+    import bot.session
+
+    monkeypatch.setattr(bot.session, "QUIET_UNTIL_HOUR", 9)
+    monkeypatch.setattr(bot.session, "QUIET_FROM_HOUR", 21)
+    session_id = await _tz_session(db_pool, -702, _zone_where_the_hour_is(range(21, 24)))
+    await _reminder(db_pool, session_id, chat_id=-702)
+    telegram_bot = AsyncMock()
+
+    await _deliver(db_pool, telegram_bot)
+
+    telegram_bot.send_message.assert_awaited_once()

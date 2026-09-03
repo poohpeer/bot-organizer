@@ -187,31 +187,59 @@ def test_the_slash_menu_offers_exactly_the_commands_that_exist():
     import inspect
     import re
 
-    registered = {c.command for _scope, cmds in main.COMMAND_SCOPES for c in cmds}
+    # The owner's scope only exists when BOT_OWNER_ID is set, and /admin lives
+    # only there — so the comparison is over every command the module can
+    # offer, not over whatever this environment happens to configure.
+    registered = {c.command for cmds in (main.PUBLIC_COMMANDS, main.ADMIN_COMMANDS)
+                  for c in cmds}
     handled = set(re.findall(r'CommandHandler\("(\w+)"', inspect.getsource(main.main)))
 
     assert registered == handled, "the slash menu and the handlers must be the same set"
-    assert all(c.description for _s, cmds in main.COMMAND_SCOPES for c in cmds), \
+    assert all(c.description for cmds in (main.PUBLIC_COMMANDS, main.ADMIN_COMMANDS)
+               for c in cmds), \
         "a command with no description is a blank line in the menu"
 
 
-def test_admin_is_offered_to_administrators_only():
-    """The menu, not the gate: admin.is_chat_admin still asks Telegram on the
-    command and again on every button press, because a command absent from
-    the menu can still be typed. Hiding it stops it being suggested to ten
-    people who cannot use it."""
+def test_admin_is_offered_to_the_owner_only(monkeypatch):
+    """The menu, not the gate: admin.is_bot_owner is checked on the command
+    and again on every button press, because a command absent from the menu
+    can still be typed. Hiding it stops it being suggested to people who
+    cannot use it — which, now, is everyone but one person."""
     from telegram import (
-        BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats,
-        BotCommandScopeAllPrivateChats, BotCommandScopeDefault,
+        BotCommandScopeAllChatAdministrators, BotCommandScopeChat,
+        BotCommandScopeDefault,
     )
 
+    monkeypatch.setenv("BOT_OWNER_ID", "91237884")
     by_scope = {type(scope): {c.command for c in cmds}
-                for scope, cmds in main.COMMAND_SCOPES}
+                for scope, cmds in main._command_scopes()}
 
     assert "admin" not in by_scope[BotCommandScopeDefault]
-    assert "admin" in by_scope[BotCommandScopeAllChatAdministrators]
-    # Everything an ordinary member gets, an administrator gets too.
-    assert by_scope[BotCommandScopeDefault] <= by_scope[BotCommandScopeAllChatAdministrators]
+    # The rule that changed: running a group no longer offers /admin.
+    assert "admin" not in by_scope[BotCommandScopeAllChatAdministrators]
+    assert "admin" in by_scope[BotCommandScopeChat]
+
+
+def test_the_administrators_scope_is_overwritten_not_dropped(monkeypatch):
+    """Telegram keeps whatever a scope last held for ever. Removing the row
+    instead of rewriting it would leave every group's administrators looking
+    at a /admin they can no longer use."""
+    from telegram import BotCommandScopeAllChatAdministrators
+
+    monkeypatch.setenv("BOT_OWNER_ID", "91237884")
+    scopes = [type(scope) for scope, _cmds in main._command_scopes()]
+
+    assert BotCommandScopeAllChatAdministrators in scopes
+
+
+def test_without_an_owner_nobody_is_offered_admin(monkeypatch):
+    from telegram import BotCommandScopeChat
+
+    monkeypatch.delenv("BOT_OWNER_ID", raising=False)
+    scopes = main._command_scopes()
+
+    assert BotCommandScopeChat not in [type(scope) for scope, _cmds in scopes]
+    assert all("admin" not in {c.command for c in cmds} for _scope, cmds in scopes)
 
 
 async def test_startup_actually_sends_the_command_list(monkeypatch):
@@ -232,6 +260,7 @@ async def test_startup_actually_sends_the_command_list(monkeypatch):
 
     calls = app.bot.set_my_commands.await_args_list
     assert len(calls) == len(main.COMMAND_SCOPES), "every scope has to be sent"
+
     by_scope = {type(c.kwargs["scope"]): [b.command for b in c.args[0]] for c in calls}
 
     from telegram import (
@@ -243,7 +272,7 @@ async def test_startup_actually_sends_the_command_list(monkeypatch):
     assert by_scope[BotCommandScopeAllPrivateChats] == ["start", "status", "list", "reminders"]
     assert by_scope[BotCommandScopeAllGroupChats] == ["start", "status", "list", "reminders"]
     assert by_scope[BotCommandScopeAllChatAdministrators] == [
-        "start", "status", "list", "reminders", "admin",
+        "start", "status", "list", "reminders",
     ]
 
 

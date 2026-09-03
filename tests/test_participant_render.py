@@ -52,3 +52,21 @@ def test_icons_are_a_pure_function_of_current_status():
     assert "◻️ Витька" in before
     assert "✅ Витька" in after
     assert before != after
+
+
+def test_a_handle_is_shown_instead_of_the_profile_name():
+    """An @handle is a live Telegram mention; a display name notifies nobody,
+    and two Sashas in one chat cannot be told apart by it."""
+    rendered = render(
+        [{"display_name": "Alex", "username": "poohpeer", "status": "confirmed"}]
+    )
+
+    assert rendered == "✅ @poohpeer"
+
+
+def test_without_a_handle_the_name_is_used():
+    rendered = render(
+        [{"display_name": "Игорёк", "username": None, "status": "unknown"}]
+    )
+
+    assert rendered == "◻️ Игорёк"

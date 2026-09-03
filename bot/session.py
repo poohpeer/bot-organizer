@@ -53,7 +53,7 @@ async def retopic(pool, session_id: int, activity_type: str, *, event_date=None,
     from a picnic to a trip says nothing about when the trip is, and keeping
     yesterday's date would be worse than keeping none.
     """
-    return await pool.fetchrow(
+    row = await pool.fetchrow(
         """
         UPDATE sessions
         SET activity_type = $2,
@@ -65,6 +65,12 @@ async def retopic(pool, session_id: int, activity_type: str, *, event_date=None,
         """,
         session_id, activity_type, event_date, event_date_raw,
     )
+    if row is not None:
+        # The list and the participants survive a change of plan; a roll call
+        # does not. It was asking who was coming to the *old* event, and its
+        # summary would name that one.
+        await cancel_roll_calls_for_session(pool, session_id)
+    return row
 
 
 async def close_session(pool, session_id: int, reason: str) -> bool:
@@ -85,7 +91,13 @@ async def close_session(pool, session_id: int, reason: str) -> bool:
         """,
         session_id, reason,
     )
-    return result == "UPDATE 1"
+    closed = result == "UPDATE 1"
+    if closed:
+        # A roll call that outlived its session would keep asking the group
+        # about an event that is over. Only on a real close: the guard above
+        # means a second caller must not cancel a run the winner just started.
+        await cancel_roll_calls_for_session(pool, session_id)
+    return closed
 
 
 async def touch_activity(pool, session_id: int) -> None:
@@ -112,6 +124,13 @@ QUIET_UNTIL_HOUR = int(os.environ.get("QUIET_UNTIL_HOUR", "9"))
 QUIET_FROM_HOUR = int(os.environ.get("QUIET_FROM_HOUR", "21"))
 
 _WAKING_HOURS = f"EXTRACT(HOUR FROM {_LOCAL_NOW}) >= $2 AND EXTRACT(HOUR FROM {_LOCAL_NOW}) < $3"
+
+# The same predicate, for queries outside this module (worker/reminders.py).
+# Exported rather than re-written there so there is one definition of "the
+# group is awake" — two would drift, and the second would be the one nobody
+# remembered to update. Callers must pass the same three parameters in the
+# same positions: default timezone, QUIET_UNTIL_HOUR, QUIET_FROM_HOUR.
+WAKING_HOURS_SQL = _WAKING_HOURS
 
 _DUE_FOR_CLOSING_QUESTION = f"""
     status = 'active'
@@ -229,6 +248,133 @@ async def mark_closing_question_asked(pool, session_id: int) -> None:
         WHERE id = $1
         """,
         session_id,
+    )
+
+
+# --- roll calls -------------------------------------------------------------
+#
+# Rounds are claimed with the same claim-and-mark-in-one-statement shape the
+# closing question uses above, and for the same reason: two pollers, or one
+# poller overlapping a slow send, would otherwise both see the same due row
+# and post the round twice.
+#
+# _WAKING_HOURS sits in the *claim*, not around the send. That is what makes
+# quiet hours defer a round rather than consume one: at 23:30 the row is not
+# selected at all, so rounds_done does not move, and at 09:00 it is simply
+# overdue and goes out on the first poll of the morning.
+
+_DUE_FOR_ROLL_CALL = f"""
+    status = 'active'
+    AND next_at <= now()
+    AND ({_WAKING_HOURS})
+"""
+
+
+async def start_roll_call(pool, session_id: int, chat_id: int):
+    """Begin a roll call, due immediately.
+
+    Returns None when one is already running for this session — the partial
+    unique index decides that, not a read-then-write, so two "спроси всех" a
+    second apart cannot both start one and post every round twice.
+    """
+    return await pool.fetchrow(
+        """
+        INSERT INTO roll_calls (session_id, chat_id, next_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT DO NOTHING
+        RETURNING *
+        """,
+        session_id, chat_id,
+    )
+
+
+async def active_roll_call(pool, session_id: int):
+    return await pool.fetchrow(
+        "SELECT * FROM roll_calls WHERE session_id = $1 AND status = 'active'", session_id
+    )
+
+
+async def claim_due_roll_calls(pool, intervals_minutes):
+    """Claim every roll call whose next round is due, and schedule the one
+    after it — in one statement.
+
+    One statement, not select-then-update, for the same reason as the closing
+    question: the lock a separate SELECT ... FOR UPDATE takes is gone the
+    moment that query returns, so two pollers would both see the row as due
+    and both post the round.
+
+    `intervals_minutes` is passed in rather than imported so this module stays
+    free of bot.roll_call — session.py is storage, and the schedule is a
+    policy decision that belongs with the wording. It is indexed in SQL
+    (arrays are 1-based, hence the +1) and clamped to its own last element, so
+    a row somehow past the last round still gets a sane next_at.
+
+    Each row carries its state before the claim (`prev_rounds_done`,
+    `prev_next_at`) so a caller whose send fails can put it back exactly as it
+    was. Without that a round that was never delivered still counts as one of
+    the three, and the group is asked twice instead of three times.
+    """
+    return await pool.fetch(
+        f"""
+        WITH due AS (
+            SELECT r.id,
+                   r.rounds_done AS prev_rounds_done,
+                   r.next_at     AS prev_next_at
+            FROM roll_calls r JOIN chats c USING (chat_id)
+            WHERE {_DUE_FOR_ROLL_CALL}
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE roll_calls r SET
+            rounds_done = due.prev_rounds_done + 1,
+            next_at = now() + make_interval(
+                mins => ($4::int[])[LEAST(GREATEST(due.prev_rounds_done, 0), $5) + 1]
+            )
+        FROM due WHERE r.id = due.id
+        RETURNING r.*, due.prev_rounds_done, due.prev_next_at
+        """,
+        timezones.DEFAULT_TIMEZONE, QUIET_UNTIL_HOUR, QUIET_FROM_HOUR,
+        list(intervals_minutes), len(intervals_minutes) - 1,
+    )
+
+
+async def release_roll_call_claim(pool, roll_call_id: int, prev_rounds_done: int,
+                                  prev_next_at) -> None:
+    """Undo a claim whose round could not be delivered, restoring the exact
+    prior state so it is retried on a later poll."""
+    await pool.execute(
+        "UPDATE roll_calls SET rounds_done = $2, next_at = $3 WHERE id = $1",
+        roll_call_id, prev_rounds_done, prev_next_at,
+    )
+
+
+async def finish_roll_call(pool, roll_call_id: int) -> None:
+    await pool.execute(
+        "UPDATE roll_calls SET status = 'done' WHERE id = $1 AND status = 'active'",
+        roll_call_id,
+    )
+
+
+async def cancel_roll_calls_for_session(pool, session_id: int) -> None:
+    """Stop any roll call for a session that is closing or changing event.
+
+    A run that outlived its event would keep asking about a picnic the group
+    already went to, or about the wrong event entirely after a retopic.
+    """
+    await pool.execute(
+        "UPDATE roll_calls SET status = 'cancelled' WHERE session_id = $1 AND status = 'active'",
+        session_id,
+    )
+
+
+async def roll_calls_due(pool):
+    """Read-only view of what's due, for tests and diagnostics. The worker uses
+    claim_due_roll_calls so it can't double-send."""
+    return await pool.fetch(
+        f"""
+        SELECT r.* FROM roll_calls r JOIN chats c USING (chat_id)
+        WHERE {_DUE_FOR_ROLL_CALL}
+        """,
+        timezones.DEFAULT_TIMEZONE, QUIET_UNTIL_HOUR, QUIET_FROM_HOUR,
     )
 
 

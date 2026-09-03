@@ -13,6 +13,8 @@ call that produced it, and "update the icons when a status changes" is not a
 separate mechanism to get right, just a consequence of calling render() again.
 """
 
+from bot import people
+
 
 # Fixed and closed: sorting has to be stable across calls, and a model asked
 # to invent categories will say "молочка" once and "молочные продукты" the
@@ -60,7 +62,11 @@ def _item_line(item: dict) -> str:
     if item.get("quantity"):
         line += f", {item['quantity']}"
     if item.get("claimed_by"):
-        line += f" — {item['claimed_by']}"
+        # claimed_by_username is not a column — it is filled in by the caller
+        # from the session roster (see bot/tools/core.py list_show), because
+        # the handle belongs to the person, not to the item, and duplicating
+        # it here would leave a stale copy behind the day someone renames.
+        line += f" — {people.mention(item['claimed_by'], item.get('claimed_by_username'))}"
     return line
 
 

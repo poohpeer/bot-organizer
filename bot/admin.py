@@ -2,9 +2,10 @@
 
 One setting so far: which models this chat tries, and in what order.
 
-Restricted to chat administrators. The chain decides how every message in
-the group is answered, so leaving it open to any member would let one person
-change the bot's behaviour for everyone else without their knowing.
+Restricted to the bot's owner — not to chat administrators. The chain decides
+how every message is answered and is spent from the owner's account, so it is
+their money and their rate limits at stake, in every chat the bot was added
+to. A group's own administrators run the group; they do not run the bot.
 """
 
 import logging
@@ -17,7 +18,7 @@ import bot.settings as settings
 
 log = logging.getLogger(__name__)
 
-_NOT_AN_ADMIN = "Настройки доступны администраторам чата."
+_NOT_AN_ADMIN = "Настройки доступны только владельцу бота."
 _MENU_TITLE = "Настройки бота. Что меняем?"
 _CHAIN_TITLE = (
     "Порядок моделей. Нажимайте их в том порядке, в каком бот должен их "
@@ -53,42 +54,25 @@ _GUARD = "adm:guard"
 _CLOSE = "adm:close"
 
 
-# Whoever runs this bot. Their groups' administrators configure the bot in
-# their own chats; the owner can configure it anywhere it was added, because
-# the models it calls are spent from their account and the chain is a
-# decision about their money and their rate limits.
-#
-# Unset in a deployment nobody owns personally, and then only chat
-# administrators qualify — which is why this reads the environment rather
-# than defaulting to somebody.
-def _owner_id() -> int | None:
+# Whoever runs this bot. Read from the environment rather than defaulting to
+# somebody: unset, nobody qualifies, and the menu is simply unavailable. That
+# is the right failure — a settings screen is the wrong place to fail open.
+def owner_id() -> int | None:
     raw = os.environ.get("BOT_OWNER_ID", "").strip()
     return int(raw) if raw.lstrip("-").isdigit() else None
 
 
-async def is_chat_admin(telegram_bot, chat_id: int, user_id: int | None) -> bool:
-    """Whether this person may change the chat's settings.
+def is_bot_owner(user_id: int | None) -> bool:
+    """Whether this person may change the bot's settings, in any chat.
 
-    Asked of Telegram every time rather than cached: an administrator who has
-    been demoted should stop being one immediately, and a cache would decide
-    otherwise. Any failure answers no — a settings menu is the wrong place to
-    fail open.
-
-    The bot's owner is the one exception, and it is checked first: they
-    qualify in every chat the bot was added to, whether or not they run that
-    chat. Telegram is not asked at all in that case, so the answer does not
-    depend on a call that can fail.
+    Telegram is not consulted at all. Group administrator status used to
+    qualify, which meant every administrator of every group the bot was added
+    to could reorder the model chain — a decision about someone else's
+    account. With that gone there is nothing left to ask Telegram about, so
+    the check cannot fail, cannot be slow, and cannot be raced by a promotion.
     """
-    if user_id is None:
-        return False
-    if user_id == _owner_id():
-        return True
-    try:
-        member = await telegram_bot.get_chat_member(chat_id, user_id)
-    except Exception:
-        log.warning("Could not check admin status for %s in %s", user_id, chat_id, exc_info=True)
-        return False
-    return getattr(member, "status", None) in {"creator", "administrator"}
+    owner = owner_id()
+    return user_id is not None and owner is not None and user_id == owner
 
 
 def _menu_keyboard(guard: str) -> InlineKeyboardMarkup:
@@ -164,10 +148,10 @@ def pick(chosen: list[str], position: int) -> list[str]:
 
 
 async def handle_command(pool, telegram_bot, message) -> None:
-    """/admin — open the menu, for an administrator."""
+    """/admin — open the menu, for the bot's owner."""
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else None
-    if not await is_chat_admin(telegram_bot, chat_id, user_id):
+    if not is_bot_owner(user_id):
         await telegram_bot.send_message(chat_id=chat_id, text=_NOT_AN_ADMIN)
         return
     await telegram_bot.send_message(
@@ -179,15 +163,15 @@ async def handle_command(pool, telegram_bot, message) -> None:
 async def handle_callback(pool, telegram_bot, query) -> None:
     """A button press on an open menu.
 
-    Admin status is re-checked here and not only when the menu was opened: a
-    keyboard stays live in the chat afterwards, so anyone could press it, and
-    whoever opened it may since have been demoted.
+    Ownership is re-checked here and not only when the menu was opened: a
+    keyboard stays live in the chat afterwards, so anyone in the group could
+    press it.
     """
     data = query.data or ""
     chat_id = query.message.chat.id if query.message else None
     user_id = query.from_user.id if query.from_user else None
 
-    if chat_id is None or not await is_chat_admin(telegram_bot, chat_id, user_id):
+    if chat_id is None or not is_bot_owner(user_id):
         await query.answer(_NOT_AN_ADMIN, show_alert=True)
         return
 

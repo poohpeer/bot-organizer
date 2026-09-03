@@ -10,6 +10,7 @@ from bot.logging_setup import configure_logging
 from worker.closing import fire_auto_closes, fire_closing_questions
 from worker.group_sync import sync_group_info
 from worker.reminders import deliver_due_reminders
+from worker.roll_call import run_roll_calls
 
 configure_logging()
 log = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ async def poll_once(pool, telegram_bot, *, min_interval_hours: float) -> None:
         ("closing questions", functools.partial(fire_closing_questions, pool, telegram_bot)),
         ("auto-closes", functools.partial(fire_auto_closes, pool, telegram_bot)),
         ("group sync", functools.partial(sync_group_info, pool, telegram_bot)),
+        ("roll calls", functools.partial(run_roll_calls, pool, telegram_bot)),
     )
     for name, step in steps:
         try:

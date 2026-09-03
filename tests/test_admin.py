@@ -2,19 +2,32 @@
 
 from unittest.mock import AsyncMock
 
+import pytest
+
 import bot.admin as admin
 import bot.ai.client as ai_client
 import bot.settings as settings
 
 
+# Whoever the tests mean by "the owner". Set for every test by the autouse
+# fixture below, because the gate is now ownership and nothing else — without
+# it every button test would be testing the refusal path.
+OWNER_ID = 91237884
+
+
+@pytest.fixture(autouse=True)
+def _owner(monkeypatch):
+    monkeypatch.setenv("BOT_OWNER_ID", str(OWNER_ID))
+
+
 class _Msg:
-    def __init__(self, chat_id=-100, user_id=7):
+    def __init__(self, chat_id=-100, user_id=OWNER_ID):
         self.chat = type("C", (), {"id": chat_id})()
         self.from_user = type("U", (), {"id": user_id})() if user_id else None
 
 
 class _Query:
-    def __init__(self, data, chat_id=-100, user_id=7):
+    def __init__(self, data, chat_id=-100, user_id=OWNER_ID):
         self.data = data
         self.message = _Msg(chat_id, user_id)
         self.from_user = self.message.from_user
@@ -31,17 +44,27 @@ def _bot(status="administrator"):
 # --- who may use it -------------------------------------------------------
 
 async def test_a_member_is_told_no_and_shown_nothing(db_pool):
-    """The chain decides how every message in the group is answered. Leaving
-    it open would let one person change the bot for everyone else."""
+    """The chain is spent from the owner's account, so nobody else may
+    reorder it — however senior they are in the group."""
     bot = _bot(status="member")
 
-    await admin.handle_command(db_pool, bot, _Msg())
+    await admin.handle_command(db_pool, bot, _Msg(user_id=7))
 
-    assert "администраторам" in bot.send_message.await_args.kwargs["text"]
+    assert "владельцу" in bot.send_message.await_args.kwargs["text"]
     assert "reply_markup" not in bot.send_message.await_args.kwargs
 
 
-async def test_an_administrator_gets_the_menu(db_pool):
+async def test_a_group_administrator_is_told_no_too(db_pool):
+    """The rule that changed: running the group is not running the bot."""
+    bot = _bot(status="administrator")
+
+    await admin.handle_command(db_pool, bot, _Msg(user_id=7))
+
+    assert "владельцу" in bot.send_message.await_args.kwargs["text"]
+    assert "reply_markup" not in bot.send_message.await_args.kwargs
+
+
+async def test_the_owner_gets_the_menu(db_pool):
     bot = _bot()
 
     await admin.handle_command(db_pool, bot, _Msg())
@@ -50,10 +73,10 @@ async def test_an_administrator_gets_the_menu(db_pool):
 
 
 async def test_a_button_press_is_checked_again_not_just_the_open(db_pool):
-    """The keyboard stays live in the chat, so anyone can press it, and
-    whoever opened it may since have been demoted."""
-    bot = _bot(status="member")
-    query = _Query(admin._CHAIN)
+    """The keyboard stays live in the chat, so anyone in the group can press
+    it long after the owner opened it."""
+    bot = _bot(status="administrator")
+    query = _Query(admin._CHAIN, user_id=7)
 
     await admin.handle_callback(db_pool, bot, query)
 
@@ -62,12 +85,16 @@ async def test_a_button_press_is_checked_again_not_just_the_open(db_pool):
     query.edit_message_text.assert_not_awaited()
 
 
-async def test_a_failed_admin_check_answers_no(db_pool):
-    """A settings menu is the wrong place to fail open."""
+async def test_telegram_is_never_asked_at_all(db_pool):
+    """Group status stopped mattering, so there is nothing left to ask about
+    — and the check can no longer be lost to a call that fails."""
     bot = AsyncMock()
     bot.get_chat_member.side_effect = RuntimeError("telegram is unwell")
 
-    assert await admin.is_chat_admin(bot, -100, 7) is False
+    await admin.handle_command(db_pool, bot, _Msg())
+
+    bot.get_chat_member.assert_not_awaited()
+    assert bot.send_message.await_args.kwargs["reply_markup"] is not None
 
 
 # --- the buttons ----------------------------------------------------------
@@ -251,50 +278,35 @@ async def test_a_menu_that_can_be_neither_deleted_nor_edited_does_not_raise(db_p
 
 # --- the bot's owner ------------------------------------------------------
 
-async def test_the_owner_is_an_administrator_everywhere(db_pool, monkeypatch):
+def test_the_owner_qualifies_everywhere():
     """The models this bot calls are spent from the owner's account, so the
     provider chain is a decision about their money — they configure it in
     every chat the bot was added to, whether or not they run that chat."""
-    monkeypatch.setenv("BOT_OWNER_ID", "91237884")
-    bot = _bot(status="member")
-
-    assert await admin.is_chat_admin(bot, -100, 91237884) is True
+    assert admin.is_bot_owner(OWNER_ID) is True
 
 
-async def test_the_owner_is_not_asked_about(db_pool, monkeypatch):
-    """Checked before Telegram, so the answer cannot be lost to a call that
-    fails — the one thing this rule must never depend on."""
-    monkeypatch.setenv("BOT_OWNER_ID", "91237884")
-    bot = AsyncMock()
-    bot.get_chat_member.side_effect = RuntimeError("telegram is unwell")
-
-    assert await admin.is_chat_admin(bot, -100, 91237884) is True
-    bot.get_chat_member.assert_not_awaited()
+def test_a_group_administrator_does_not_qualify():
+    """Group status is no longer consulted at all, in any chat."""
+    assert admin.is_bot_owner(7) is False
 
 
-async def test_everyone_else_is_still_asked_about(db_pool, monkeypatch):
-    monkeypatch.setenv("BOT_OWNER_ID", "91237884")
-    bot = _bot(status="member")
-
-    assert await admin.is_chat_admin(bot, -100, 7) is False
-    bot.get_chat_member.assert_awaited_once()
+def test_an_anonymous_sender_does_not_qualify():
+    assert admin.is_bot_owner(None) is False
 
 
-async def test_no_owner_configured_means_no_owner(db_pool, monkeypatch):
-    """A deployment nobody owns personally: only a chat's own administrators
-    qualify. Defaulting to somebody would hand a stranger every chat."""
+def test_no_owner_configured_means_nobody_qualifies(monkeypatch):
+    """A deployment nobody owns personally: the menu is unavailable, rather
+    than falling back to whoever happens to run the group."""
     monkeypatch.delenv("BOT_OWNER_ID", raising=False)
-    bot = _bot(status="member")
 
-    assert await admin.is_chat_admin(bot, -100, 91237884) is False
+    assert admin.is_bot_owner(OWNER_ID) is False
 
 
-async def test_a_malformed_owner_id_is_no_owner(db_pool, monkeypatch):
+def test_a_malformed_owner_id_is_no_owner(monkeypatch):
     """Rather than crashing every permission check on a typo in a ConfigMap."""
     monkeypatch.setenv("BOT_OWNER_ID", "не число")
-    bot = _bot(status="member")
 
-    assert await admin.is_chat_admin(bot, -100, 91237884) is False
+    assert admin.is_bot_owner(OWNER_ID) is False
 
 
 # --- the topic guard ------------------------------------------------------
@@ -340,9 +352,11 @@ async def test_two_administrators_on_one_open_menu_do_not_cancel_out(db_pool):
     assert await settings.get_topic_guard(db_pool, -503) == settings.TOPIC_GUARD_STRICT
 
 
-async def test_a_member_cannot_flip_it(db_pool):
-    bot = _bot(status="member")
+async def test_anyone_but_the_owner_cannot_flip_it(db_pool):
+    bot = _bot(status="administrator")
 
-    await admin.handle_callback(db_pool, bot, _Query(admin._GUARD, chat_id=-504))
+    await admin.handle_callback(
+        db_pool, bot, _Query(admin._GUARD, chat_id=-504, user_id=7)
+    )
 
     assert await settings.get_topic_guard(db_pool, -504) == settings.TOPIC_GUARD_STRICT

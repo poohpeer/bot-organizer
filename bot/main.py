@@ -7,7 +7,7 @@ import os
 
 from telegram import (
     BotCommand, BotCommandScopeAllChatAdministrators, BotCommandScopeAllGroupChats,
-    BotCommandScopeAllPrivateChats, BotCommandScopeDefault, Update,
+    BotCommandScopeAllPrivateChats, BotCommandScopeChat, BotCommandScopeDefault, Update,
 )
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
@@ -170,10 +170,10 @@ async def route_membership(pool, telegram_bot, chat_member_updated, bot_id, bot_
 # what a person sees while typing, so they say what they get rather than
 # naming the machinery.
 #
-# /admin is offered to administrators only. That is the menu, not the gate:
-# admin.is_chat_admin still asks Telegram on the command and again on every
-# button press, because a command absent from the menu can still be typed.
-# Hiding it stops it being suggested to ten people who cannot use it.
+# /admin is offered to the bot's owner only. That is the menu, not the gate:
+# admin.is_bot_owner is checked on the command and again on every button
+# press, because a command absent from the menu can still be typed. Hiding it
+# stops it being suggested to people who cannot use it.
 PUBLIC_COMMANDS = [
     BotCommand("start", "Что я умею"),
     BotCommand("status", "Что известно о встрече"),
@@ -204,12 +204,29 @@ ADMIN_COMMANDS = PUBLIC_COMMANDS + [
 #
 # Nothing here is ever removed: a scope this tuple stops setting keeps
 # whatever it last held, for ever, invisibly.
-COMMAND_SCOPES = (
-    (BotCommandScopeDefault(), PUBLIC_COMMANDS),
-    (BotCommandScopeAllPrivateChats(), PUBLIC_COMMANDS),
-    (BotCommandScopeAllGroupChats(), PUBLIC_COMMANDS),
-    (BotCommandScopeAllChatAdministrators(), ADMIN_COMMANDS),
-)
+# all_chat_administrators is still listed, now holding PUBLIC_COMMANDS. It has
+# to be: per the note above, a scope this tuple stops writing keeps whatever
+# it last held for ever, so dropping the row would leave every group's
+# administrators looking at a /admin they can no longer use. It is overwritten,
+# not removed.
+def _command_scopes():
+    scopes = [
+        (BotCommandScopeDefault(), PUBLIC_COMMANDS),
+        (BotCommandScopeAllPrivateChats(), PUBLIC_COMMANDS),
+        (BotCommandScopeAllGroupChats(), PUBLIC_COMMANDS),
+        (BotCommandScopeAllChatAdministrators(), PUBLIC_COMMANDS),
+    ]
+    owner_id = admin.owner_id()
+    if owner_id is not None:
+        # The owner's own private chat with the bot — the only scope Telegram
+        # offers that follows one person without naming a group. In groups they
+        # type /admin without autocomplete, which works: the gate is
+        # admin.is_bot_owner, not the menu.
+        scopes.append((BotCommandScopeChat(chat_id=owner_id), ADMIN_COMMANDS))
+    return tuple(scopes)
+
+
+COMMAND_SCOPES = _command_scopes()
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -330,6 +347,12 @@ async def post_init(app: Application) -> None:
         # A failure here costs autocomplete, not the bot. Starting anyway
         # beats refusing to run because a cosmetic call was rate limited.
         log.warning("Could not register the command list", exc_info=True)
+
+    if admin.owner_id() is None:
+        # Said out loud because the symptom is otherwise indistinguishable
+        # from a bug: /admin answers "только владельцу бота" to everyone,
+        # including whoever deployed it.
+        log.warning("BOT_OWNER_ID is not set — /admin is unavailable to everyone")
 
     # Started here rather than as its own process: the endpoint dispatches
     # into the same registry and the same pool this one already holds, and a

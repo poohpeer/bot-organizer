@@ -137,3 +137,18 @@ def test_no_category_names_appear_anywhere_in_the_output():
 
     for category in LIST_CATEGORIES:
         assert category.capitalize() not in result
+
+
+def test_whoever_took_an_item_is_named_by_handle():
+    rendered = render(
+        [{"name": "хлеб", "claimed_by": "Alex", "claimed_by_username": "poohpeer"}]
+    )
+
+    assert "@poohpeer" in rendered
+    assert "Alex" not in rendered
+
+
+def test_without_a_handle_the_claimer_keeps_their_name():
+    rendered = render([{"name": "хлеб", "claimed_by": "Игорёк"}])
+
+    assert "Игорёк" in rendered

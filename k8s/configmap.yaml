@@ -51,7 +51,16 @@ data:
   QUIET_UNTIL_HOUR: "9"
   QUIET_FROM_HOUR: "21"
   REMINDER_MIN_INTERVAL_HOURS: "6"
-  REMINDER_MIN_REPEAT_MINUTES: "5"
+  # Two independent ceilings on a repeating reminder, and it stops at
+  # whichever comes first. Five minutes was low enough for "напоминай каждые 5
+  # минут в течение часа" to be a request the bot would honour, and twelve
+  # messages in an hour is harassment however politely it was asked for.
+  # repeat_until bounds a series in time only, so the count is the other half.
+  REMINDER_MIN_REPEAT_MINUTES: "60"
+  REMINDER_MAX_DELIVERIES: "3"
+  # The roll call's three rounds: an hour, then two, then four. Shortened only
+  # for a live check — production runs the default.
+  ROLL_CALL_INTERVALS_MINUTES: "60,120,240"
   # Where a CLI-backed model reaches this bot's tools. Unset means MCP is not
   # in use and no grant or address is issued at all. See docs/mcp.md.
   MCP_BASE_URL: http://bot-organizer-bot:8081
