@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from google.genai import types
 
 import bot.decision_log as decision_log
+import bot.farewells as farewells
 import bot.group_info as group_info
 import bot.history as history
 import bot.list_render as list_render
@@ -845,11 +846,11 @@ def _build_registry(pool, telegram_bot, *, session_id: int | None = None, curren
     return registry
 
 
-# What the bot says on the way out. It used to read back the shopping list
-# and who had confirmed — a wall of text about an event that had just
-# finished, arriving at the one moment nobody needs it. Anyone who does can
-# ask before closing, or read /list while the session is still open.
-CLOSING_LINE = "Мавр сделал своё дело, мавр может уходить."
+# What the bot says on the way out lives in bot/farewells.py: one fixed line
+# and one of thirty. Re-exported here because CLOSING_LINE is how every other
+# module and every test recognises a closing message — by its opening, not by
+# whichever farewell happened to follow.
+CLOSING_LINE = farewells.CLOSING_LINE
 
 
 LINK_ADDED = "Добавил ссылку на место."
@@ -1040,7 +1041,8 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
             # if this person had closed it.
             applied = await session.record_closing_reply(pool, session_id, continued=False)
             await telegram_bot.send_message(
-                chat_id=chat_id, text=CLOSING_LINE if applied else _ALREADY_CLOSED
+                chat_id=chat_id,
+                text=farewells.closing_message() if applied else _ALREADY_CLOSED,
             )
             await decision_log.log_decision(
                 pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="closing_reply",
@@ -1115,7 +1117,7 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
                 decision={"trigger": "explicit", "session_id": session_id, "result": "already_closed"},
             )
             return
-        await telegram_bot.send_message(chat_id=chat_id, text=CLOSING_LINE)
+        await telegram_bot.send_message(chat_id=chat_id, text=farewells.closing_message())
         await decision_log.log_decision(
             pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="session_stop",
             decision={"trigger": "explicit", "session_id": session_id},
