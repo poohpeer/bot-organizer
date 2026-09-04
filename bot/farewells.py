@@ -1,9 +1,8 @@
-"""What the bot says on the way out.
+"""What the bot says on the way out: one line, from one list.
 
-One fixed line and one of many. The fixed half is the bot's own signature —
-people recognise it, and a session that ended reads as ended because of it.
-The varied half is there so the thirtieth picnic does not close with exactly
-the words of the first.
+The Moor is a member of the list, not a prefix to it. Said before every other
+farewell it stopped being a sign-off and became a preamble — the same two
+sentences every time, with a rotating tail nobody would read twice.
 
 Deliberately only the sign-off. The closing message used to read back the
 shopping list and who had confirmed — a wall of text about an event that had
@@ -13,12 +12,15 @@ can ask before closing, or read /list while the session is still open.
 
 import random
 
-CLOSING_LINE = "Мавр сделал своё дело, мавр может уходить."
-
-# Said after CLOSING_LINE, one at random. Kept as written rather than
+# One of these, at random, and nothing else. Kept as written rather than
 # normalised: the mix of registers — film quotes, plain Russian, the odd
 # bureaucratic one — is what stops the set sounding like one joke retold.
+#
+# The Moor leads because it came first and is the one people know, but it is
+# an ordinary member: it comes up as often as any other, which is to say
+# about one closing in thirty-one.
 FAREWELLS = (
+    "Мавр сделал своё дело, мавр может уходить.",
     "Миссия выполнена. Я могу удалиться.",
     "Ну, я пошёл.",
     "Hasta la vista, baby.",
@@ -53,13 +55,9 @@ FAREWELLS = (
 
 
 def closing_message(*, rng: random.Random | None = None) -> str:
-    """The sign-off, fixed half first.
-
-    Composed rather than stored so the constant half stays one string with
-    one definition: every caller and every test can still recognise a closing
-    message by its opening, whichever farewell followed.
+    """One farewell, whole.
 
     `rng` is injectable so a test can pin the choice without reaching into
     the module's globals.
     """
-    return f"{CLOSING_LINE} {(rng or random).choice(FAREWELLS)}"
+    return (rng or random).choice(FAREWELLS)

@@ -846,11 +846,11 @@ def _build_registry(pool, telegram_bot, *, session_id: int | None = None, curren
     return registry
 
 
-# What the bot says on the way out lives in bot/farewells.py: one fixed line
-# and one of thirty. Re-exported here because CLOSING_LINE is how every other
-# module and every test recognises a closing message — by its opening, not by
-# whichever farewell happened to follow.
-CLOSING_LINE = farewells.CLOSING_LINE
+# What the bot says on the way out lives in bot/farewells.py: one line, drawn
+# from one list. There is deliberately no constant here to compare against —
+# a closing message is recognised by being in that list, not by starting with
+# a fixed sentence, which is what let the Moor become a preamble to every
+# other farewell.
 
 
 LINK_ADDED = "Добавил ссылку на место."

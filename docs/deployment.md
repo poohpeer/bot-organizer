@@ -355,19 +355,26 @@ the session or switching events cancels it.
 
 ## How the bot signs off
 
-Closing a session posts one message: a fixed line and one of thirty
-farewells, picked at random.
+Closing a session posts one line, drawn at random from one list of
+thirty-one in `bot/farewells.py`:
 
 ```
-Мавр сделал своё дело, мавр может уходить. Hasta la vista, baby.
+Hasta la vista, baby.
+На этом мои полномочия всё.
+Мавр сделал своё дело, мавр может уходить.
+Квест пройден. NPC возвращается на исходную позицию.
 ```
 
-The fixed half is the signature — people recognise it, and a session that
-ended reads as ended because of it, which is why every caller and every test
-identifies a closing message by its opening rather than by the whole string.
-The varied half is there so the thirtieth picnic does not close with exactly
-the words of the first. Both live in `bot/farewells.py`; `router.CLOSING_LINE`
-re-exports the fixed half.
+**The Moor is a member of the list, not a prefix to it.** It leads the list
+because it came first and is the one people know, but it comes up about as
+often as any other — roughly one closing in thirty-one. Put before every
+other farewell, as it briefly was, it stopped being a sign-off and became a
+preamble: the same two sentences every time, with a rotating tail nobody
+would read twice.
+
+There is deliberately no constant to compare against. A closing message is
+recognised by being **in** the list, not by starting with a fixed sentence —
+a prefix check is exactly what let the two get glued together.
 
 It is deliberately only the sign-off. This used to read back the shopping list
 and who had confirmed — a wall of text about an event that had just finished,
