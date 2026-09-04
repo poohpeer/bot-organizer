@@ -353,6 +353,32 @@ group's members and that gap is real rather than something to paper over.
 One run per session at a time, enforced by a partial unique index. Closing
 the session or switching events cancels it.
 
+## How the bot signs off
+
+Closing a session posts one message: a fixed line and one of thirty
+farewells, picked at random.
+
+```
+Мавр сделал своё дело, мавр может уходить. Hasta la vista, baby.
+```
+
+The fixed half is the signature — people recognise it, and a session that
+ended reads as ended because of it, which is why every caller and every test
+identifies a closing message by its opening rather than by the whole string.
+The varied half is there so the thirtieth picnic does not close with exactly
+the words of the first. Both live in `bot/farewells.py`; `router.CLOSING_LINE`
+re-exports the fixed half.
+
+It is deliberately only the sign-off. This used to read back the shopping list
+and who had confirmed — a wall of text about an event that had just finished,
+arriving at the one moment nobody needs it. Anyone who does can ask before
+closing, or read `/list` while the session is still open.
+
+The worker's **auto-close** after silence keeps its own plain sentence
+(`Не дождался ответа — закрываю сессию сам.`). Nobody said goodbye to the bot
+there, and a jaunty farewell for having been ignored reads as a joke at the
+group's expense.
+
 ## One event per group
 
 A chat has at most one active session, and that is now said out loud rather
