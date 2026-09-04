@@ -294,6 +294,52 @@ async def test_bot_added_sends_one_greeting_and_no_session(db_pool, monkeypatch)
     assert await session.get_active_session(db_pool, -100) is None
 
 
+async def test_joining_clears_any_per_chat_command_menu(db_pool, monkeypatch):
+    """A chat-level scope set to an empty list swallows the slash menu while
+    the commands keep working, and getMyCommands cannot tell it from a scope
+    that was never set — so it is deleted on the way in rather than hunted
+    down later. Live, three groups had exactly that and showed no menu."""
+    from telegram import BotCommandScopeChat, BotCommandScopeChatAdministrators
+
+    _no_group_info(monkeypatch)
+    telegram_bot = AsyncMock()
+
+    await router.handle_bot_added(
+        db_pool, telegram_bot, _member_update("left", "member"), BOT_ID, BOT_USERNAME
+    )
+
+    cleared = {type(c.kwargs["scope"]): c.kwargs["scope"].chat_id
+               for c in telegram_bot.delete_my_commands.await_args_list}
+    assert cleared == {BotCommandScopeChat: -100,
+                       BotCommandScopeChatAdministrators: -100}
+
+
+async def test_a_promotion_clears_nothing(db_pool):
+    """Being promoted is not joining — the menu was already right."""
+    telegram_bot = AsyncMock()
+
+    await router.handle_bot_added(
+        db_pool, telegram_bot, _member_update("member", "administrator"),
+        BOT_ID, BOT_USERNAME,
+    )
+
+    telegram_bot.delete_my_commands.assert_not_awaited()
+
+
+async def test_the_greeting_survives_a_failed_scope_clear(db_pool, monkeypatch):
+    """Refusing to greet a group because a cosmetic call was rate-limited is
+    worse than a group with no menu."""
+    _no_group_info(monkeypatch)
+    telegram_bot = AsyncMock()
+    telegram_bot.delete_my_commands = AsyncMock(side_effect=Exception("flood wait"))
+
+    await router.handle_bot_added(
+        db_pool, telegram_bot, _member_update("left", "member"), BOT_ID, BOT_USERNAME
+    )
+
+    telegram_bot.send_message.assert_awaited_once()
+
+
 async def test_bot_promoted_sends_nothing(db_pool):
     telegram_bot = AsyncMock()
     update = _member_update("member", "administrator")

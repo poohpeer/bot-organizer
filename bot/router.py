@@ -16,6 +16,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from google.genai import types
+from telegram import BotCommandScopeChat, BotCommandScopeChatAdministrators
 
 import bot.decision_log as decision_log
 import bot.farewells as farewells
@@ -231,6 +232,46 @@ def _greeting_with_info(event: dict, member_count, bot_username: str) -> str:
     )
 
 
+async def clear_chat_command_scopes(telegram_bot, chat_id: int) -> None:
+    """Drop any per-chat command menu so this chat uses the global one.
+
+    Telegram resolves the slash menu narrowest-scope-first — chat_member,
+    chat_administrators, chat, then the global scopes — and stops at the first
+    scope that was ever set. A scope set to an *empty* list still counts as
+    set, so it swallows the menu entirely while the commands themselves keep
+    working, because the menu and the handlers are unrelated. Live, three
+    groups had exactly that and showed no menu at all.
+
+    Worse, it cannot be diagnosed by asking: getMyCommands returns an empty
+    list both for "never set" and for "set to nothing". Deleting is the only
+    way to be sure, and deleting something that was never there costs one API
+    call and changes nothing.
+
+    Nothing this bot writes creates these scopes — it only ever sets the four
+    global ones and the owner's private chat — so anything found here came
+    from BotFather or another tool. Cleared on the way in, once, rather than
+    hunted down later.
+
+    chat_member is not cleared: it is keyed by (chat, user), so there is no
+    "for this chat" form of it and no list of users to iterate on joining. It
+    is also the one nothing sets in bulk — a per-person override has to be
+    written deliberately, one call at a time.
+
+    Never raises: a bot that refuses to greet a group because a cosmetic call
+    was rate-limited is worse than one with no menu.
+    """
+    scopes = (
+        BotCommandScopeChat(chat_id=chat_id),
+        BotCommandScopeChatAdministrators(chat_id=chat_id),
+    )
+    for scope in scopes:
+        try:
+            await telegram_bot.delete_my_commands(scope=scope)
+        except Exception:
+            log.warning("Could not clear %s command scope for chat %s",
+                        type(scope).__name__, chat_id, exc_info=True)
+
+
 async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_username) -> None:
     """Greet a chat the bot was just added to. Being added is not consent
     (R5): this never starts a session, and a promotion/permission change
@@ -245,6 +286,7 @@ async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_
     if not bot_was_added(chat_member_updated, bot_id):
         return
     chat = chat_member_updated.chat
+    await clear_chat_command_scopes(telegram_bot, chat.id)
     await group_info.ensure_creator_known(pool, telegram_bot, chat.id)
     info = await group_info.fetch(telegram_bot, chat.id)
     tz = await timezones.chat_timezone(pool, chat.id)

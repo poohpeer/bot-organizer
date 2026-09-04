@@ -353,6 +353,50 @@ group's members and that gap is real rather than something to paper over.
 One run per session at a time, enforced by a partial unique index. Closing
 the session or switching events cancels it.
 
+## The slash menu
+
+Registered from code at startup, never from BotFather, across five scopes:
+`default`, `all_private_chats`, `all_group_chats`, `all_chat_administrators`
+(all four public commands) and the owner's private chat, which also gets
+`/admin`.
+
+**Telegram resolves the menu narrowest-scope-first** and stops at the first
+scope that was ever set:
+
+```
+chat_member → chat_administrators → chat
+  → all_chat_administrators → all_group_chats → default
+```
+
+A scope set to an **empty list still counts as set**, so it swallows the menu
+entirely while the commands keep working — the menu and the handlers are
+unrelated. Live, three groups had exactly that and showed no menu at all while
+`/status` typed by hand worked fine.
+
+It cannot be diagnosed by asking: `getMyCommands` returns an empty list both
+for "never set" and for "set to nothing". Deleting is the only way to be sure.
+
+So the bot **clears the per-chat scopes when it is added to a group**
+(`router.clear_chat_command_scopes`) — `chat` and `chat_administrators`, one
+call each, failures logged and ignored. Deleting something that was never
+there costs one API call and changes nothing; leaving one in place costs the
+menu, invisibly.
+
+`chat_member` is not cleared: it is keyed by (chat, user), so there is no
+"for this chat" form of it and no list of users to iterate on joining.
+
+Nothing this bot writes creates a per-chat scope, so anything found there came
+from BotFather or another tool. To clear one by hand:
+
+```bash
+curl -s "https://api.telegram.org/bot$TOKEN/deleteMyCommands" \
+  -H 'content-type: application/json' \
+  -d '{"scope":{"type":"chat","chat_id":-100123}}'
+```
+
+The client caches the menu per chat, so a fix shows up after Telegram is fully
+closed and reopened, not immediately.
+
 ## How the bot signs off
 
 Closing a session posts one line, drawn at random from one list of
