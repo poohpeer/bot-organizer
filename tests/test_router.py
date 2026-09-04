@@ -428,11 +428,9 @@ async def test_addressed_explicit_stop_closes_and_summarizes(db_pool, monkeypatc
     assert (row["status"], row["closed_reason"]) == ("closed", "explicit_stop")
     telegram_bot.send_message.assert_awaited_once()
     assert telegram_bot.send_message.await_args.kwargs["chat_id"] == -100
-    # Both halves, not just the signature: sending a bare CLOSING_LINE would
-    # satisfy a startswith check while dropping the farewell entirely.
-    said = telegram_bot.send_message.await_args.kwargs["text"]
-    assert said.startswith(router.CLOSING_LINE)
-    assert said[len(router.CLOSING_LINE):].strip() in farewells.FAREWELLS
+    # Membership, not a prefix: the sign-off is one phrase from the list, and
+    # a startswith check would pass on a message that glued two together.
+    assert telegram_bot.send_message.await_args.kwargs["text"] in farewells.FAREWELLS
     assert await _decision_log_count(db_pool) == 1
 
 
@@ -1336,9 +1334,7 @@ async def test_stop_is_decided_before_off_topic(db_pool, monkeypatch):
         db_pool, telegram_bot, active, _message("@orgbot спасибо, всё"), BOT_ID, BOT_USERNAME
     )
 
-    # startswith, not equality: the sign-off ends with one of thirty
-    # farewells picked at random.
-    assert telegram_bot.send_message.await_args.kwargs["text"].startswith(router.CLOSING_LINE)
+    assert telegram_bot.send_message.await_args.kwargs["text"] in farewells.FAREWELLS
     row = await db_pool.fetchrow("SELECT status FROM sessions WHERE id = $1", active["id"])
     assert row["status"] == "closed"
 
@@ -1396,7 +1392,7 @@ async def test_closing_says_one_line_and_no_shopping_list(db_pool, monkeypatch):
     )
 
     said = telegram_bot.send_message.await_args.kwargs["text"]
-    assert said.startswith(router.CLOSING_LINE)
+    assert said in farewells.FAREWELLS
     assert "мангал" not in said and "уголь" not in said
 
 
