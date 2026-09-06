@@ -353,6 +353,47 @@ group's members and that gap is real rather than something to paper over.
 One run per session at a time, enforced by a partial unique index. Closing
 the session or switching events cancels it.
 
+## What the model is sent, and in what order
+
+Every turn sends four things: the system instruction, the conversation
+history, the prompt, and the tool declarations. Only two of them ever change.
+
+**The order is load-bearing.** A prefix cache is valid up to the first byte
+that differs, so everything stable has to come first:
+
+| | Size | Changes |
+|---|---|---|
+| `_ACTIVE_MODE_SYSTEM_INSTRUCTION` (`bot/router.py`) | ~8,300 chars | never |
+| tool declarations (`bot/tools/schema.py`) | ~12,900 chars | never |
+| `turn_context()` — session id, sender, clock | ~750 chars | every turn |
+| the message itself | — | every turn |
+
+`turn_context()` is prefixed to the **user's message**, not appended to the
+system instruction. It used to live at the end of the instruction, which put
+it *before* the tool catalogue a CLI provider fetches over MCP — so a clock
+that moves once a minute invalidated the single largest stable block in the
+request, every turn.
+
+Measured against codex over 24 turns at 2, 6 and 12 minute spacing:
+
+```
+                    fresh input tokens per turn
+  tail in system    median 8,776   range 3,546–15,401   full cache 1/12
+  tail in prompt    median 3,544   range 3,151– 4,965   full cache 11/12
+                    60% fewer
+```
+
+The wider the spacing the larger the gap: at 6 and 12 minutes the old shape
+hit the full cache **0 times out of 8** and the new one **8 out of 8**. It is
+not a TTL effect — the old prefix was simply different every turn. Timing was
+unchanged (14.3s median either way) and so was behaviour: all 24 turns made
+the same tool call.
+
+Two tests hold the split — one that the instruction contains nothing volatile,
+one that the volatile half still reaches the model, in front of the message.
+Losing either half silently would be expensive in opposite directions: a
+leaked date costs the cache, a dropped context costs the model its clock.
+
 ## The slash menu
 
 Registered from code at startup, never from BotFather, across five scopes:

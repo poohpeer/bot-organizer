@@ -1011,14 +1011,14 @@ async def test_the_model_is_told_what_day_it_is(db_pool):
     active = await _new_active_session(db_pool)
     await db_pool.execute("UPDATE chats SET timezone = 'Europe/Moscow' WHERE chat_id = $1", active["chat_id"])
 
-    instruction = await router._active_mode_instruction(
+    context = await router.turn_context(
         db_pool, active["chat_id"], active["id"], _HUMAN
     )
 
     today = dt.datetime.now(ZoneInfo("Europe/Moscow"))
-    assert today.strftime("%Y-%m-%d") in instruction
-    assert "Europe/Moscow" in instruction
-    assert "reminder_set" in instruction
+    assert today.strftime("%Y-%m-%d") in context
+    assert "Europe/Moscow" in context
+    assert "reminder_set" in context
 
 
 async def test_the_date_follows_the_chats_own_timezone(db_pool):
@@ -1031,12 +1031,12 @@ async def test_the_date_follows_the_chats_own_timezone(db_pool):
         "UPDATE chats SET timezone = 'Pacific/Kiritimati' WHERE chat_id = $1", active["chat_id"]
     )
 
-    instruction = await router._active_mode_instruction(
+    context = await router.turn_context(
         db_pool, active["chat_id"], active["id"], _HUMAN
     )
 
     local = dt.datetime.now(ZoneInfo("Pacific/Kiritimati"))
-    assert local.strftime("%Y-%m-%d") in instruction
+    assert local.strftime("%Y-%m-%d") in context
 
 
 def test_the_system_instruction_covers_the_roster_gap_remark():
@@ -1585,3 +1585,63 @@ async def test_the_deadline_message_is_not_the_refusal_one():
     wait for a model that is answering everyone else would be wrong."""
     assert router._TOOK_TOO_LONG not in router._AI_UNAVAILABLE_MESSAGES
     assert router._TOOK_TOO_LONG != router._FALLBACK_MESSAGE
+
+
+# --- the cacheable prefix ----------------------------------------------------
+
+def test_the_system_instruction_holds_nothing_that_changes():
+    """It is the cache key. Anything in here that differs turn to turn
+    invalidates everything after it — including the tool catalogue, which is
+    the largest stable block a CLI provider fetches over MCP.
+
+    Matched on the phrases that introduce live values, not on anything
+    date-shaped: the instruction quotes «до завтра до 17:00» as an example of
+    what a person might say, and a bare \\d{2}:\\d{2} rejects that too.
+    """
+    import re
+
+    instruction = router._ACTIVE_MODE_SYSTEM_INSTRUCTION
+
+    for marker in ("Right now it is", "Current session_id is", "Current sender",
+                   "The sender is in"):
+        assert marker not in instruction, f"volatile line leaked in: {marker}"
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", instruction), "a real date leaked in"
+
+
+async def test_the_turn_context_carries_what_changes(db_pool):
+    """The other half of the same rule: everything volatile has to be here,
+    or the model loses it entirely."""
+    active = await _new_active_session(db_pool)
+
+    context = await router.turn_context(db_pool, active["chat_id"], active["id"], _HUMAN)
+
+    assert f"Current session_id is {active['id']}" in context
+    assert "Current sender" in context
+    assert "Right now it is" in context
+
+
+async def test_the_volatile_half_reaches_the_model_in_front_of_the_message(db_pool, monkeypatch):
+    """Moved out of the system instruction, it has to arrive somewhere — and
+    before the message, so the model reads the clock before the request that
+    depends on it."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(
+        router, "_addressed_intent",
+        AsyncMock(return_value={"stop": False, "off_topic": False}),
+    )
+    seen = {}
+
+    async def fake_loop(fallback, prompt, registry, **kwargs):
+        seen["prompt"] = prompt
+        seen["system"] = kwargs.get("system_instruction")
+        return "готово"
+
+    monkeypatch.setattr(router, "run_tool_loop", fake_loop)
+
+    await router.handle_active_message(
+        db_pool, AsyncMock(), active, _message("добавь хлеб"), BOT_ID, BOT_USERNAME
+    )
+
+    assert seen["system"] == router._ACTIVE_MODE_SYSTEM_INSTRUCTION
+    assert seen["prompt"].startswith("Current session_id is")
+    assert seen["prompt"].endswith("добавь хлеб")
