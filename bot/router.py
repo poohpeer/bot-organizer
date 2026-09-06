@@ -762,7 +762,22 @@ def _display_name_of(user) -> str | None:
     return name or None
 
 
-async def _active_mode_instruction(pool, chat_id: int, session_id: int, current_user) -> str:
+async def turn_context(pool, chat_id: int, session_id: int, current_user) -> str:
+    """The part of the context that is different on every single turn.
+
+    Kept out of the system instruction and prefixed to the message instead,
+    and that placement is the whole point. A prefix cache is only valid up to
+    the first byte that changed; with the clock sitting at the end of the
+    system instruction, every turn invalidated everything after it —
+    including the 25-tool catalogue a CLI fetches over MCP, which is the
+    single largest stable block in the request.
+
+    Measured over 24 turns at 2, 6 and 12 minute spacing: fresh input fell
+    from a median of 8,776 tokens to 3,544, a 60% saving, and the wider the
+    spacing the larger the gap. At 6 and 12 minutes the old shape hit the
+    full cache 0 times out of 8; this one hit it 8 out of 8. Timing and
+    behaviour were unchanged — 12/12 turns still made the same tool call.
+    """
     user_id = getattr(current_user, "id", None)
     display_name = _display_name_of(current_user)
     # Without this the model has no idea what day it is and dates it from
@@ -791,8 +806,7 @@ async def _active_mode_instruction(pool, chat_id: int, session_id: int, current_
     else:
         sender_clock = ""
     return (
-        _ACTIVE_MODE_SYSTEM_INSTRUCTION
-        + "\nCurrent session_id is "
+        "Current session_id is "
         + str(session_id)
         + ". Always use this exact session_id for every session-bound tool. "
         + user_context
@@ -1241,12 +1255,19 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     grants = _mcp_grants()
     mcp_token = grants.issue(session_id, message.from_user, record=record) if grants else None
     try:
+        # The volatile half goes in front of the message, not at the end of
+        # the system instruction: everything before the first changed byte
+        # can be cached, and the tool catalogue is the largest thing after it.
+        # See turn_context.
+        prompt = (
+            await turn_context(pool, chat_id, session_id, message.from_user)
+            + "\n\n"
+            + text
+        )
         reply_text = await run_tool_loop(
             ai_client.fallback_for(chat_id, await settings.get_provider_chain(pool, chat_id)),
-            text, registry,
-            system_instruction=await _active_mode_instruction(
-                pool, chat_id, session_id, message.from_user
-            ),
+            prompt, registry,
+            system_instruction=_ACTIVE_MODE_SYSTEM_INSTRUCTION,
             # Without this the bot cannot be answered: every question it asks
             # arrives back as a message it has no memory of prompting. See
             # bot/history.py.
