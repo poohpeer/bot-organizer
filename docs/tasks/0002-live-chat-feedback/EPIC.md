@@ -136,6 +136,14 @@ Acceptance criteria:
   trip, **when** it greets the chat, **then** it says what it can see — the
   activity, the date and place if stated, and how many people are in the group
   — and still starts no session until asked.
+- **Given** a group whose title names the event and a human saying «начинай»,
+  **when** the session starts, **then** the activity, date and place the title
+  states are on the new session, and whatever came from the title is named in
+  the reply — reading it back in the greeting and then dropping it made the
+  group retype what the bot had just said out loud.
+- **Given** the message itself states an activity or a date, **when** the title
+  states a different one, **then** the message wins: the title may be months
+  old, the message is about this event now.
 - **Given** an active session and a group description that changes, **when**
   the worker next polls, **then** the bot posts what changed, once per change.
 - **Given** the title and description have not changed, **when** the worker

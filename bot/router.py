@@ -310,11 +310,7 @@ async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_
     chat = chat_member_updated.chat
     await clear_chat_command_scopes(telegram_bot, chat.id)
     await group_info.ensure_creator_known(pool, telegram_bot, chat.id)
-    info = await group_info.fetch(telegram_bot, chat.id)
-    tz = await timezones.chat_timezone(pool, chat.id)
-    event = await group_info.extract_event(
-        info.get("title"), info.get("description"), timezones.local_date(tz)
-    )
+    info, event = await _read_group_name(pool, telegram_bot, chat.id)
 
     if any(event.get(k) for k in ("activity_type", "event_date", "place")):
         text = _greeting_with_info(event, info.get("member_count"), bot_username)
@@ -328,6 +324,44 @@ async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_
         )
 
     await telegram_bot.send_message(chat_id=chat.id, text=text)
+
+
+async def _read_group_name(pool, telegram_bot, chat_id: int) -> tuple[dict, dict]:
+    """The group's own title/description/count, and what the first two say.
+
+    One reader for both callers — the greeting on being added and the start
+    of a session — so the two cannot come to different conclusions about the
+    same title, and so the title is fetched once per event rather than per
+    use.
+
+    Failure is not an error here: group_info.fetch and extract_event both
+    fail closed, so an unreadable chat yields ({}, nothing-found) and the
+    caller carries nothing over rather than refusing to act.
+    """
+    info = await group_info.fetch(telegram_bot, chat_id)
+    tz = await timezones.chat_timezone(pool, chat_id)
+    event = await group_info.extract_event(
+        info.get("title"), info.get("description"), timezones.local_date(tz)
+    )
+    return info, event
+
+
+def _from_the_title_clause(event_date, place) -> str:
+    """Says what the group's name contributed, when it contributed anything.
+
+    Named out loud because it was not typed by anybody: a date nobody in the
+    chat wrote is one the group has to be able to see and correct, and
+    silently inheriting it is how a session ends up pointing at the wrong day
+    with no idea where that came from.
+    """
+    parts = []
+    if event_date is not None:
+        parts.append(f"дата — {event_date:%d.%m.%Y}")
+    if place:
+        parts.append(f"место — {place}")
+    if not parts:
+        return ""
+    return " Из названия группы: " + ", ".join(parts) + "."
 
 
 async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_username) -> None:
@@ -365,12 +399,27 @@ async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_userna
         )
         return
 
-    activity_type = extracted.get("activity_type") or "мероприятие"
+    # Consent came from the message; what is being organized can come from
+    # the group's own name. The two were conflated once and the title decided
+    # whether to start at all (see above) — but once a human has said "начинай",
+    # dropping what the title already states means they have to retype it,
+    # which is the exact opposite of R7. Live, «ЛесаТуса» was read correctly
+    # («туса» in «лес»), reported in the greeting, and then thrown away: the
+    # session that started a minute later held "мероприятие" and no place.
+    _, from_title = await _read_group_name(pool, telegram_bot, chat.id)
+
+    activity_type = (extracted.get("activity_type") or from_title.get("activity_type")
+                     or "мероприятие")
     event_date_raw = extracted.get("event_date_raw")
-    event_date = _parse_event_date(extracted.get("event_date"))
+    # What the human wrote wins over what the group is called: they are
+    # talking about this event now, the title may be months old.
+    stated_date = _parse_event_date(extracted.get("event_date"))
+    title_date = (None if stated_date is not None
+                  else group_info.parse_iso_date(from_title.get("event_date")))
+    event_date = stated_date or title_date
 
     try:
-        await start_session(
+        started = await start_session(
             pool, chat.id, activity_type, event_date=event_date, event_date_raw=event_date_raw,
         )
     except SessionAlreadyActiveError:
@@ -381,8 +430,20 @@ async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_userna
         )
         return
 
+    # The place has nowhere to live until there is a session to hang it on, so
+    # it lands here. The date is passed only when the title is where it came
+    # from: handing the whole from_title over made this overwrite a date the
+    # human had just stated in their own message, which is the one thing the
+    # precedence above exists to prevent.
+    carried = await group_info.apply_event(pool, started["id"], {
+        "event_date": title_date.isoformat() if title_date is not None else None,
+        "place": from_title.get("place"),
+    })
+
     await telegram_bot.send_message(
-        chat_id=chat.id, text=_CONFIRM_START.format(activity_type=activity_type)
+        chat_id=chat.id,
+        text=_CONFIRM_START.format(activity_type=activity_type)
+        + _from_the_title_clause(title_date, carried.get("place")),
     )
     await decision_log.log_decision(
         pool, chat_id=chat.id, user_id=user_id, raw_text=text, stage="session_start",
@@ -390,6 +451,8 @@ async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_userna
             "confident": True, "activity_type": activity_type,
             "event_date": event_date.isoformat() if event_date else None,
             "event_date_raw": event_date_raw,
+            "from_title": {k: from_title.get(k)
+                           for k in ("activity_type", "event_date", "place")},
         },
     )
 

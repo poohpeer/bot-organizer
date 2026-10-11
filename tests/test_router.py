@@ -178,6 +178,7 @@ async def test_unaddressed_message_calls_no_model_no_db_no_reply(db_pool, monkey
 
 async def test_addressed_message_naming_activity_starts_session(db_pool, monkeypatch):
     await _ensure_chat(db_pool)
+    _no_group_info(monkeypatch)
     telegram_bot = AsyncMock()
     monkeypatch.setattr(
         router, "extract",
@@ -197,6 +198,7 @@ async def test_addressed_message_naming_activity_starts_session(db_pool, monkeyp
 async def test_addressed_message_registers_a_chat_seen_for_the_first_time(db_pool, monkeypatch):
     """sessions.chat_id is a foreign key into chats; nothing upstream of the
     router is guaranteed to have inserted that row yet."""
+    _no_group_info(monkeypatch)
     telegram_bot = AsyncMock()
     monkeypatch.setattr(
         router, "extract",
@@ -215,6 +217,7 @@ async def test_the_chat_title_never_reaches_the_start_classifier(db_pool, monkey
     while the same words in «Пикник на море 3/9» started a session. What a
     group calls itself is neither consent nor a description of the event."""
     await _ensure_chat(db_pool, title="Пикник 15 сентября")
+    _no_group_info(monkeypatch)
     telegram_bot = AsyncMock()
     extract_mock = AsyncMock(return_value={
         "confident": True, "activity_type": "picnic",
@@ -237,6 +240,7 @@ async def test_the_chat_title_never_reaches_the_start_classifier(db_pool, monkey
 
 async def test_vague_addressed_message_asks_and_starts_no_session(db_pool, monkeypatch):
     await _ensure_chat(db_pool)
+    _no_group_info(monkeypatch)
     telegram_bot = AsyncMock()
     monkeypatch.setattr(router, "extract", AsyncMock(return_value={"confident": False}))
     msg = _message("привет")
@@ -249,6 +253,7 @@ async def test_vague_addressed_message_asks_and_starts_no_session(db_pool, monke
 
 async def test_session_already_active_tells_user_and_does_not_duplicate(db_pool, monkeypatch):
     await _ensure_chat(db_pool)
+    _no_group_info(monkeypatch)
     await session.start_session(db_pool, chat_id=-100, activity_type="birthday")
     telegram_bot = AsyncMock()
     monkeypatch.setattr(
@@ -262,6 +267,136 @@ async def test_session_already_active_tells_user_and_does_not_duplicate(db_pool,
     telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text=router._ALREADY_TRACKING)
     rows = await db_pool.fetch("SELECT id FROM sessions WHERE chat_id = -100 AND status = 'active'")
     assert len(rows) == 1
+
+
+# --- what the group's own name contributes to a new session ------------------
+# Live: «ЛесаТуса» was read correctly, reported in the greeting, and then
+# thrown away. «Начинай» a minute later started a session holding
+# "мероприятие" and no place, and the human had to retype what the bot had
+# just said out loud.
+
+def _title_says(monkeypatch, **event):
+    """group_info reporting a title that names an event."""
+    monkeypatch.setattr(
+        router.group_info, "fetch",
+        AsyncMock(return_value={"title": "ЛесаТуса", "description": None, "member_count": 4}),
+    )
+    full = {"answered": True, "activity_type": None, "event_date": None,
+            "place": None, "place_kind": "нет"}
+    full.update(event)
+    monkeypatch.setattr(router.group_info, "extract_event", AsyncMock(return_value=full))
+
+
+async def test_a_session_inherits_the_activity_and_place_from_the_group_name(db_pool, monkeypatch):
+    await _ensure_chat(db_pool, title="ЛесаТуса")
+    _title_says(monkeypatch, activity_type="туса", place="лес", place_kind="природа")
+    monkeypatch.setattr(
+        router, "extract",
+        AsyncMock(return_value={"confident": True, "activity_type": "", "event_date": ""}),
+    )
+    telegram_bot = AsyncMock()
+
+    await router.handle_dormant_message(
+        db_pool, telegram_bot, _message("Начинай", chat_title="ЛесаТуса"),
+        BOT_ID, BOT_USERNAME,
+    )
+
+    active = await session.get_active_session(db_pool, -100)
+    assert active["activity_type"] == "туса"
+    assert await db_pool.fetchval(
+        "SELECT value FROM facts WHERE session_id = $1 AND key = 'place'", active["id"]
+    ) == "лес"
+    # Said out loud: a place nobody in the chat typed has to be visible to
+    # whoever can correct it.
+    assert "место — лес" in telegram_bot.send_message.await_args.kwargs["text"]
+
+
+async def test_what_the_human_wrote_beats_what_the_group_is_called(db_pool, monkeypatch):
+    """The title may be months old; they are talking about this event now."""
+    await _ensure_chat(db_pool, title="ЛесаТуса")
+    _title_says(monkeypatch, activity_type="туса", event_date="2026-10-15",
+                place="лес", place_kind="природа")
+    monkeypatch.setattr(
+        router, "extract",
+        AsyncMock(return_value={
+            "confident": True, "activity_type": "день рождения",
+            "event_date": "2026-11-20", "event_date_raw": "20 ноября",
+        }),
+    )
+    telegram_bot = AsyncMock()
+
+    await router.handle_dormant_message(
+        db_pool, telegram_bot, _message("следим за днём рождения 20 ноября"),
+        BOT_ID, BOT_USERNAME,
+    )
+
+    active = await session.get_active_session(db_pool, -100)
+    assert active["activity_type"] == "день рождения"
+    assert active["event_date"] == dt.date(2026, 11, 20)
+    text = telegram_bot.send_message.await_args.kwargs["text"]
+    # The date came from the message, so the reply must not credit the title
+    # with it — the place did come from there and is named.
+    assert "20.11.2026" not in text
+    assert "место — лес" in text
+
+
+async def test_a_date_only_the_title_states_is_taken_and_attributed(db_pool, monkeypatch):
+    await _ensure_chat(db_pool, title="ЛесаТуса 15/10")
+    _title_says(monkeypatch, activity_type="туса", event_date="2026-10-15")
+    monkeypatch.setattr(
+        router, "extract",
+        AsyncMock(return_value={"confident": True, "activity_type": "", "event_date": ""}),
+    )
+    telegram_bot = AsyncMock()
+
+    await router.handle_dormant_message(
+        db_pool, telegram_bot, _message("Начинай"), BOT_ID, BOT_USERNAME
+    )
+
+    active = await session.get_active_session(db_pool, -100)
+    assert active["event_date"] == dt.date(2026, 10, 15)
+    assert "дата — 15.10.2026" in telegram_bot.send_message.await_args.kwargs["text"]
+
+
+async def test_a_title_with_nothing_in_it_adds_nothing_to_the_reply(db_pool, monkeypatch):
+    """R7's last criterion: nothing invented, and no empty scaffold either."""
+    await _ensure_chat(db_pool)
+    _no_group_info(monkeypatch)
+    monkeypatch.setattr(
+        router, "extract",
+        AsyncMock(return_value={"confident": True, "activity_type": "пикник"}),
+    )
+    telegram_bot = AsyncMock()
+
+    await router.handle_dormant_message(
+        db_pool, telegram_bot, _message("следи за пикником"), BOT_ID, BOT_USERNAME
+    )
+
+    assert telegram_bot.send_message.await_args.kwargs["text"] == (
+        router._CONFIRM_START.format(activity_type="пикник")
+    )
+
+
+async def test_an_unreadable_group_still_starts_the_session(db_pool, monkeypatch):
+    """fetch and extract_event both fail closed. A chat whose title cannot be
+    read must not lose the session a human just asked for."""
+    await _ensure_chat(db_pool)
+    monkeypatch.setattr(router.group_info, "fetch", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        router.group_info, "extract_event",
+        AsyncMock(return_value={"answered": False, "activity_type": None,
+                                "event_date": None, "place": None, "place_kind": "нет"}),
+    )
+    monkeypatch.setattr(
+        router, "extract",
+        AsyncMock(return_value={"confident": True, "activity_type": "пикник"}),
+    )
+
+    await router.handle_dormant_message(
+        db_pool, AsyncMock(), _message("следи за пикником"), BOT_ID, BOT_USERNAME
+    )
+
+    assert await session.get_active_session(db_pool, -100) is not None
 
 
 # --- handle_bot_added --------------------------------------------------------
