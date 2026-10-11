@@ -119,7 +119,7 @@ def test_each_answer_is_spelled_out_not_left_as_an_icon():
 def test_the_strangers_line_appears_when_the_chat_is_bigger():
     text = roll_call.render_summary([_p("A", "confirmed")], [], others=4)
 
-    assert "ещё 4 человек" in text
+    assert "ещё 4 человека" in text
 
 
 def test_the_strangers_line_is_absent_when_nobody_is_unaccounted_for():

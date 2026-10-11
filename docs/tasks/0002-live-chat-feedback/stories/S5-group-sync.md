@@ -109,8 +109,14 @@ read as "here is what I can see, tag me to start" — describing the trip while
 implying nothing is being tracked. It must also not imply it knows who the
 members are: it has a number, not a roster.
 
-If the group info yields nothing, the greeting is exactly what it is today —
-no empty "Поездка: не указано" scaffolding.
+If the group info yields nothing, the greeting is otherwise exactly what it is
+today — no empty "Поездка: не указано" scaffolding — but it still states the
+member count. The count is read from Telegram rather than from the title, so
+nothing about an uninformative title justifies withholding it; live, a group
+called «ЛесаТуса» was greeted with no number at all, which read as the bot not
+being able to see the group. The count excludes the bot itself
+(`bot.people.humans`), the same rule `roll_call.unknown_others` already
+follows.
 
 **Tests must cover:** a group with a rich description producing a greeting
 naming the activity, date, place and count; a group with a bare title

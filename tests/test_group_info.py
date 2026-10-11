@@ -196,6 +196,25 @@ async def test_a_classifier_that_did_not_answer_is_distinguishable(monkeypatch):
     assert event["event_date"] is None and event["place"] is None
 
 
+async def test_the_instruction_covers_a_glued_title(monkeypatch):
+    """Live, a group called «ЛесаТуса» produced an empty answer — the model
+    read it as one meaningless word and reported no activity and no place,
+    so the greeting said nothing and nothing was ever learnt from the title.
+    With the rule spelled out the same chain answers туса/лес. Checked on our
+    side of the contract, the way the `today` test is: the resolution itself
+    happens inside a model call this test mocks."""
+    extract_mock = AsyncMock(return_value={"place_kind": "нет"})
+    monkeypatch.setattr(group_info, "extract", extract_mock)
+
+    await group_info.extract_event("ЛесаТуса", None, dt.date(2026, 10, 11))
+
+    instruction = extract_mock.await_args.args[0]
+    assert "glued" in instruction and "CamelCase" in instruction
+    # Reported in the title's own language, or a Russian group gets an
+    # English label back ('picnic' for «ПикникНаМоре», observed live).
+    assert "never translated" in instruction
+
+
 # --- apply_event ----------------------------------------------------------
 
 async def _session(db_pool, chat_id=1):
