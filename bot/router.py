@@ -1064,28 +1064,45 @@ async def _silent_capture(pool, telegram_bot, session_id: int, text: str) -> dic
     return extracted
 
 
-async def _link_sender(pool, session_id: int, from_user) -> None:
-    """Fold the sender's identity onto their roster row, if they have one.
+async def _record_sender(pool, session_id: int, from_user) -> None:
+    """Put the sender on the roster, and fold their identity onto their row.
 
-    Isolated so a failure here cannot swallow the message: this is bookkeeping
-    that improves the roster, and a chat that stops answering because a name
-    could not be tidied would be far worse than a duplicate row.
+    Two steps, in this order. link_identity first, because it is what ties a
+    row written from someone else's "@poohpeer не участвует" to the one
+    written from this person's own message — run the other way round, the
+    insert would create a second row for someone already listed under their
+    handle. record_speaker then adds anyone still missing.
+
+    Everyone who writes in the chat is recorded, whatever they wrote and
+    whoever they wrote it to: there is no way to list a group's members
+    through the Bot API, so a message is the only way somebody who was
+    already in the chat before the bot arrived ever reaches the roster.
+    They are recorded as 'unknown', never as having answered.
+
+    Isolated so a failure here cannot swallow the message: this is
+    bookkeeping that improves the roster, and a chat that stops answering
+    because a name could not be tidied would be far worse than a duplicate
+    row.
     """
     if from_user is None or getattr(from_user, "id", None) is None:
         return
+    identity = dict(
+        user_id=from_user.id,
+        username=getattr(from_user, "username", None),
+        display_name=_display_name_of(from_user),
+    )
     try:
-        result = await core_tools.link_identity(
-            pool, session_id,
-            user_id=from_user.id,
-            username=getattr(from_user, "username", None),
-            display_name=_display_name_of(from_user),
-        )
+        result = await core_tools.link_identity(pool, session_id, **identity)
+        if result.get("status") == "merged":
+            log.info("session %s: merged duplicate participant rows %s", session_id, result)
+        added = await core_tools.record_speaker(pool, session_id, **identity)
     except Exception:
-        log.warning("Could not link sender %s in session %s", from_user.id, session_id,
+        log.warning("Could not record sender %s in session %s", from_user.id, session_id,
                     exc_info=True)
         return
-    if result.get("status") == "merged":
-        log.info("session %s: merged duplicate participant rows %s", session_id, result)
+    if added.get("status") == "added":
+        log.info("session %s: added %s to the roster after they wrote in the chat",
+                 session_id, identity["display_name"])
 
 
 async def handle_active_message(pool, telegram_bot, active_session, message, bot_id, bot_username) -> None:
@@ -1093,12 +1110,13 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     text = _text_of(message)
     user_id = message.from_user.id if message.from_user else None
 
-    # Before anything else, and on every message — addressed or not. A person's
-    # own message is the only place Telegram hands over their id, their handle
-    # and their name together, so it is the only chance to tie a row written
-    # from someone else's "@poohpeer не участвует" to the row written from
-    # their own. Missing it costs a duplicate that never heals.
-    await _link_sender(pool, session_id, message.from_user)
+    # Before anything else, and on every message — addressed or not. A
+    # person's own message is the only place Telegram hands over their id,
+    # their handle and their name together: it is the only chance to tie a row
+    # written from someone else's "@poohpeer не участвует" to the row written
+    # from their own, and the only way anyone who was in the chat before the
+    # bot arrived gets onto the roster at all.
+    await _record_sender(pool, session_id, message.from_user)
 
     if not addressed_to_bot(message, bot_id, bot_username):
         # Listening is not speaking (R5 + R1): record whatever is worth

@@ -767,6 +767,49 @@ async def set_participant(pool, session_id, display_name, status, user_id=None,
     return {"status": "ok"}
 
 
+async def record_speaker(pool, session_id, *, user_id, username, display_name) -> dict:
+    """Put whoever just spoke in this chat on the roster.
+
+    Everyone in the chat belongs in the list, and the Bot API has no way to
+    enumerate a group's members (see docs/tasks/0002-live-chat-feedback/
+    EPIC.md) — so a message is the one moment a person's id, handle and name
+    are all handed over at once, and the only way the roster ever reaches
+    people who were already in the chat before the bot arrived. What they
+    wrote and who they wrote it to does not matter.
+
+    Recorded as 'unknown' with responded_at left NULL: speaking is not
+    answering, and the roll call has to keep telling "has not said whether
+    they are coming" apart from "said yes" — which is exactly what
+    set_participant's unconditional responded_at = now() would destroy.
+
+    An existing row is never touched. link_identity has already folded this
+    person's identity onto it, and writing 'unknown' over a real 'confirmed'
+    would erase an answer they gave.
+    """
+    username = people.normalise_username(username)
+    if user_id is None:
+        # Anonymous admin posts and channel-as-sender messages: nobody to
+        # record, and inventing a row for "the group" would put a non-person
+        # on the guest list.
+        return {"status": "nothing_to_record"}
+
+    row = await _find_participant(
+        pool, session_id, user_id=user_id, username=username, display_name=display_name
+    )
+    if row is not None:
+        return {"status": "known"}
+
+    await pool.execute(
+        """
+        INSERT INTO participants (session_id, user_id, username, display_name, status)
+        VALUES ($1, $2, $3, $4, 'unknown')
+        ON CONFLICT DO NOTHING
+        """,
+        session_id, user_id, username, display_name,
+    )
+    return {"status": "added"}
+
+
 async def link_identity(pool, session_id, *, user_id, username, display_name) -> dict:
     """Tie a speaker's id, handle and name together on one row.
 

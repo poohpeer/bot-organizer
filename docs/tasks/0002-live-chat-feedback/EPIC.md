@@ -149,6 +149,11 @@ Acceptance criteria:
 - **Given** a group of N members including the bot, **when** any sentence
   states the count, **then** it states N-1: getChatMemberCount counts the bot,
   and the bot is not one of the people being organized.
+- **Given** an active session and somebody writing anything at all in the
+  group, **when** the message arrives, **then** that person is on the
+  participant list — whatever they wrote and whoever they wrote it to —
+  recorded as 'unknown' rather than as having answered, and a second message
+  from them neither duplicates the row nor resets an answer they had given.
 - **Given** the bot knows fewer participants than the group has members,
   **when** someone asks how the organizing is going, **then** the answer lists
   who is recorded and adds "В чате X человек, но записаны только Y" — the gap
