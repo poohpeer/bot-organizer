@@ -360,7 +360,8 @@ async def test_bot_added_with_bare_title_sends_todays_plain_greeting(db_pool, mo
     await router.handle_bot_added(db_pool, telegram_bot, update, BOT_ID, BOT_USERNAME)
 
     telegram_bot.send_message.assert_awaited_once_with(
-        chat_id=-100, text=router._GREETING_TEMPLATE.format(mention=f"@{BOT_USERNAME}")
+        chat_id=-100,
+        text=router._GREETING_TEMPLATE.format(mention=f"@{BOT_USERNAME}", count=""),
     )
 
 
@@ -391,7 +392,7 @@ async def test_the_greeting_reads_the_title_back(db_pool, monkeypatch):
     assert "поход" in text
     assert "15.09.2026" in text
     assert "поляна Ханания" in text
-    assert "9 человек" in text
+    assert "8 человек, кроме меня" in text
     # Read back, not started.
     assert await session.get_active_session(db_pool, -100) is None
 
@@ -407,7 +408,8 @@ async def test_the_greeting_says_nothing_it_did_not_find(db_pool, monkeypatch):
     )
 
     telegram_bot.send_message.assert_awaited_once_with(
-        chat_id=-100, text=router._GREETING_TEMPLATE.format(mention=f"@{BOT_USERNAME}")
+        chat_id=-100,
+        text=router._GREETING_TEMPLATE.format(mention=f"@{BOT_USERNAME}", count=""),
     )
 
 
@@ -424,6 +426,57 @@ async def test_the_greeting_asks_whether_to_start(db_pool, monkeypatch):
     text = telegram_bot.send_message.await_args.kwargs["text"]
     assert "?" in text and f"@{BOT_USERNAME}" in text
     assert await session.get_active_session(db_pool, -100) is None
+
+
+async def test_the_greeting_always_says_how_many_people_it_sees(db_pool, monkeypatch):
+    """The count is the one thing about a group the bot can state on the way
+    in, and it used to be said only when the title happened to name a place —
+    so a group called «ЛесаТуса» was greeted with no number at all."""
+    monkeypatch.setattr(
+        router.group_info, "fetch",
+        AsyncMock(return_value={"title": "Друзья", "description": None, "member_count": 6}),
+    )
+    monkeypatch.setattr(
+        router.group_info, "extract_event",
+        AsyncMock(return_value={"activity_type": None, "event_date": None, "place": None}),
+    )
+    telegram_bot = AsyncMock()
+
+    await router.handle_bot_added(
+        db_pool, telegram_bot, _member_update("left", "member"), BOT_ID, BOT_USERNAME
+    )
+
+    text = telegram_bot.send_message.await_args.kwargs["text"]
+    # Six members, one of them the bot.
+    assert "В группе 5 человек, кроме меня." in text
+    # Still a greeting, still no roster and still nothing tracked.
+    assert "Друзья" not in text
+    assert await session.get_active_session(db_pool, -100) is None
+
+
+async def test_the_greeting_omits_a_count_it_could_not_fetch(db_pool, monkeypatch):
+    """get_chat_member_count fails closed to {} (group_info.fetch). Saying
+    "В группе 0 человек" there would state something about the group that
+    cannot be true of one that just added the bot."""
+    _no_group_info(monkeypatch)
+    telegram_bot = AsyncMock()
+
+    await router.handle_bot_added(
+        db_pool, telegram_bot, _member_update("left", "member"), BOT_ID, BOT_USERNAME
+    )
+
+    text = telegram_bot.send_message.await_args.kwargs["text"]
+    assert "В группе" not in text
+    assert "человек" not in text
+
+
+async def test_the_count_in_the_greeting_leaves_the_bot_out(db_pool, monkeypatch):
+    """getChatMemberCount counts the bot. Reported raw, the greeting would
+    name one more person than the group has."""
+    assert router._count_clause(9) == " В группе 8 человек, кроме меня."
+    assert router._count_clause(2) == " В группе 1 человек, кроме меня."
+    assert router._count_clause(1) == ""
+    assert router._count_clause(None) == ""
 
 
 # --- handle_active_message ---------------------------------------------------

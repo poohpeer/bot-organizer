@@ -119,8 +119,8 @@ def _has_visible_text(text: str) -> bool:
 # what was being organized while it had started nothing, and tied the whole
 # start flow to how a group happened to name itself.
 _GREETING_TEMPLATE = (
-    "Привет! Я помогу собраться: запомню место и дату, буду вести список "
-    "покупок, отмечать кто идёт и напоминать о чём просили.\n\n"
+    "Привет!{count} Я помогу собраться: запомню место и дату, буду вести "
+    "список покупок, отмечать кто идёт и напоминать о чём просили.\n\n"
     "Начинаем отслеживать ваше мероприятие? Упомяните {mention} или ответьте "
     "на это сообщение — скажите «начинай» или сразу опишите, что организуем."
 )
@@ -206,6 +206,25 @@ def _format_event_date(iso_date: str) -> str:
     return f"{parsed:%d.%m.%Y}" if parsed is not None else iso_date
 
 
+def _count_clause(member_count) -> str:
+    """How many people are in the group, as a sentence, or nothing.
+
+    Said on every greeting — with the title read back or not — because it is
+    the one thing about the group the bot can state on the way in, and a
+    greeting that mentions it only when the title happened to name a place
+    reads as if the bot sometimes cannot count.
+
+    The bot itself is not one of them (bot.people.humans). An empty string
+    when the count could not be fetched, and when the bot is somehow the only
+    member: "В группе 0 человек" says something about the group that cannot
+    be true of a group that just added it.
+    """
+    count = people.humans(member_count)
+    if not count:
+        return ""
+    return f" В группе {people.how_many(count)}, кроме меня."
+
+
 def _greeting_with_info(event: dict, member_count, bot_username: str) -> str:
     """What the group's own title and description already say, read back.
 
@@ -224,9 +243,8 @@ def _greeting_with_info(event: dict, member_count, bot_username: str) -> str:
         parts.append(f"дата — {_format_event_date(event['event_date'])}")
     if event.get("place"):
         parts.append(f"место — {event['place']}")
-    count_clause = f" В группе {member_count} человек." if member_count is not None else ""
     return (
-        f"Привет! Вижу: {', '.join(parts)}.{count_clause}\n\n"
+        f"Привет! Вижу: {', '.join(parts)}.{_count_clause(member_count)}\n\n"
         f"Начинаем отслеживать? Упомяните @{bot_username} или ответьте на это "
         "сообщение — скажите «начинай» или опишите, что организуем."
     )
@@ -278,10 +296,14 @@ async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_
     (bot_was_added returning False) must stay silent.
 
     Reports what the group's own title/description already say (R7) — the
-    activity, date and place if stated, plus the member count — and then asks
-    whether to begin. Reporting is not deciding: the title is no longer part
-    of the *start* decision, and reading it back here does not put it back
-    there.
+    activity, date and place if stated — plus the member count, which is
+    said whether or not the title yielded anything: it is the one fact about
+    the group the bot can state on arrival, and a greeting that reported it
+    only alongside a place left groups like «ЛесаТуса» greeted with no
+    number at all. Then asks whether to begin.
+
+    Reporting is not deciding: the title is no longer part of the *start*
+    decision, and reading it back here does not put it back there.
     """
     if not bot_was_added(chat_member_updated, bot_id):
         return
@@ -299,8 +321,11 @@ async def handle_bot_added(pool, telegram_bot, chat_member_updated, bot_id, bot_
     else:
         # Nothing was actually found — the plain greeting, not an empty
         # "Поездка: не указано" scaffold (R7's last criterion: nothing
-        # invented).
-        text = _GREETING_TEMPLATE.format(mention=f"@{bot_username}")
+        # invented). The count still goes in: it was read from Telegram, not
+        # from the title.
+        text = _GREETING_TEMPLATE.format(
+            mention=f"@{bot_username}", count=_count_clause(info.get("member_count"))
+        )
 
     await telegram_bot.send_message(chat_id=chat.id, text=text)
 

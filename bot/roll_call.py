@@ -40,7 +40,7 @@ _ANSWERED_HEAD = "Ответили:"
 _UNANSWERED_HEAD = "Не ответили:"
 _CLOSING_ASK = "Позаботьтесь, чтобы все ответили."
 _UNKNOWN_OTHERS = (
-    "Кроме них в чате ещё {count} человек, которых я не знаю — спросите их тоже."
+    "Кроме них в чате ещё {count}, которых я не знаю — спросите их тоже."
 )
 _NOBODY_ANSWERED = "Никто не ответил."
 _EVERYONE_ANSWERED = "Ответили все."
@@ -69,14 +69,15 @@ def next_interval_minutes(rounds_done: int) -> int:
 def unknown_others(chat_member_count, recorded_count: int) -> int:
     """How many people are in the chat that the roster has never heard of.
 
-    Minus one for the bot, which getChatMemberCount counts as a member. None
-    means the count has never been fetched — reporting 0 there would state as
-    fact that the bot knows everyone, which is the one thing it can never
-    know.
+    The bot is not one of them — bot.people.humans takes it out, so the rule
+    lives in one place rather than as a bare `- 1` here. None means the count
+    has never been fetched: reporting 0 there would state as fact that the
+    bot knows everyone, which is the one thing it can never know.
     """
-    if chat_member_count is None:
+    present = people.humans(chat_member_count)
+    if present is None:
         return 0
-    return max(0, chat_member_count - recorded_count - 1)
+    return max(0, present - recorded_count)
 
 
 _ANSWERED_STATUSES = ("confirmed", "maybe", "declined")
@@ -171,7 +172,7 @@ def render_summary(answered: list[dict], unanswered: list[dict], others: int = 0
 
     tail = [_CLOSING_ASK]
     if others > 0:
-        tail.append(_UNKNOWN_OTHERS.format(count=others))
+        tail.append(_UNKNOWN_OTHERS.format(count=people.how_many(others)))
     blocks.append("\n".join(tail))
 
     return "\n\n".join(blocks)

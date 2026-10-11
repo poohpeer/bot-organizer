@@ -142,6 +142,13 @@ Acceptance criteria:
   polls repeatedly, **then** the bot says nothing.
 - **Given** a title or description with no date or place in it, **when** it is
   read, **then** nothing is invented and no announcement is made.
+- **Given** a group whose title names nothing at all, **when** the bot greets
+  it, **then** it still says how many people are in the group — the count comes
+  from Telegram, not from the title, and withholding it taught the group that
+  the bot could not see them.
+- **Given** a group of N members including the bot, **when** any sentence
+  states the count, **then** it states N-1: getChatMemberCount counts the bot,
+  and the bot is not one of the people being organized.
 - **Given** the bot knows fewer participants than the group has members,
   **when** someone asks how the organizing is going, **then** the answer lists
   who is recorded and adds "В чате X человек, но записаны только Y" — the gap

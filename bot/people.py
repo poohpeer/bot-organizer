@@ -36,3 +36,32 @@ def normalise_username(raw: str | None) -> str | None:
         return None
     cleaned = raw.strip().lstrip("@").strip()
     return cleaned or None
+
+
+def humans(member_count: int | None) -> int | None:
+    """How many people are in a chat, with the bot itself taken out.
+
+    getChatMemberCount counts the bot as a member, but every sentence the bot
+    writes is about the people it is organizing — "В группе 5 человек" that
+    silently includes itself is wrong in a way the reader cannot check.
+
+    None stays None rather than becoming 0: never having fetched the count is
+    not the same as the group being empty, and the one thing the bot must
+    never claim is knowing who is in a chat when it does not.
+    """
+    if member_count is None:
+        return None
+    return max(0, member_count - 1)
+
+
+def how_many(count: int) -> str:
+    """The count with its noun: 1 человек, 2 человека, 5 человек.
+
+    Russian agreement, in one place, because the bot says this in the
+    greeting, the roll-call summary and the status report. 11-14 take the
+    same form as 5+ despite ending in 1-4, which is the case a naive
+    `count == 1` check gets wrong.
+    """
+    tail, last = count % 100, count % 10
+    plural = last in (2, 3, 4) and not 11 <= tail <= 14
+    return f"{count} {'человека' if plural else 'человек'}"
