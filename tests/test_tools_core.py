@@ -1746,8 +1746,10 @@ async def test_a_handle_only_row_learns_the_id_once_its_owner_speaks(db_pool):
     assert row["display_name"] == "Alex"
 
 
-async def test_linking_never_puts_a_stranger_on_the_roster(db_pool):
-    """Everyone who speaks is not everyone who is coming."""
+async def test_linking_itself_never_writes_a_row(db_pool):
+    """Linking repairs rows; creating one is record_speaker's job. Keeping
+    them apart is what lets the merge above run first, so a speaker who is
+    already listed under their handle is not written down twice."""
     session_id = await _new_session(db_pool, chat_id=-605)
 
     result = await core.link_identity(
@@ -1812,3 +1814,89 @@ async def test_an_hourly_repeat_is_the_fastest_allowed(db_pool):
     )
 
     assert result == {"status": "repeat_too_frequent", "minimum_minutes": 60}
+
+
+# --- record_speaker -------------------------------------------------------
+# Everyone in the chat belongs in the list, and the Bot API cannot enumerate a
+# group's members — so writing anything at all is what puts somebody who was
+# already in the chat before the bot arrived onto the roster.
+
+async def test_writing_in_the_chat_puts_you_on_the_roster(db_pool):
+    session_id = await _new_session(db_pool, chat_id=-620)
+
+    result = await core.record_speaker(
+        db_pool, session_id, user_id=42, username="passerby", display_name="Passer By"
+    )
+
+    assert result["status"] == "added"
+    row = await db_pool.fetchrow(
+        "SELECT user_id, username, display_name, status, responded_at "
+        "FROM participants WHERE session_id = $1", session_id
+    )
+    assert (row["user_id"], row["username"], row["display_name"]) == (42, "passerby", "Passer By")
+    # Speaking is not answering: the roll call still has to ask them.
+    assert row["status"] == "unknown"
+    assert row["responded_at"] is None
+
+
+async def test_speaking_again_does_not_add_a_second_row(db_pool):
+    session_id = await _new_session(db_pool, chat_id=-621)
+    await core.record_speaker(
+        db_pool, session_id, user_id=42, username="passerby", display_name="Passer By"
+    )
+
+    result = await core.record_speaker(
+        db_pool, session_id, user_id=42, username="passerby", display_name="Passer By"
+    )
+
+    assert result["status"] == "known"
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM participants WHERE session_id = $1", session_id
+    ) == 1
+
+
+async def test_speaking_never_overwrites_an_answer_already_given(db_pool):
+    """The reason this is not set_participant: that one writes status and
+    responded_at unconditionally, so every message from someone who already
+    said "иду" would reset them to "unknown"."""
+    session_id = await _new_session(db_pool, chat_id=-622)
+    await core.set_participant(db_pool, session_id, "Alex", "confirmed", user_id=91237884)
+
+    await core.record_speaker(
+        db_pool, session_id, user_id=91237884, username="poohpeer", display_name="Alex"
+    )
+
+    assert await db_pool.fetchval(
+        "SELECT status FROM participants WHERE session_id = $1", session_id
+    ) == "confirmed"
+
+
+async def test_a_speaker_known_only_by_handle_is_not_duplicated(db_pool):
+    """Someone written down from another person's "@poohpeer не участвует"
+    and then speaking themselves is one person, not two rows."""
+    session_id = await _new_session(db_pool, chat_id=-623)
+    await core.set_participant(db_pool, session_id, "@poohpeer", "declined")
+
+    result = await core.record_speaker(
+        db_pool, session_id, user_id=91237884, username="poohpeer", display_name="Alex"
+    )
+
+    assert result["status"] == "known"
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM participants WHERE session_id = $1", session_id
+    ) == 1
+
+
+async def test_a_message_with_no_sender_records_nobody(db_pool):
+    """Anonymous admin posts and channel-as-sender messages carry no user —
+    a row for "the group" would put a non-person on the guest list."""
+    session_id = await _new_session(db_pool, chat_id=-624)
+
+    result = await core.record_speaker(
+        db_pool, session_id, user_id=None, username=None, display_name="Channel"
+    )
+
+    assert result["status"] == "nothing_to_record"
+    assert await db_pool.fetchval(
+        "SELECT count(*) FROM participants WHERE session_id = $1", session_id
+    ) == 0
