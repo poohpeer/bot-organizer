@@ -28,7 +28,20 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: postgres
-          image: postgres:16
+          # pgvector, not plain postgres:16. This instance is shared: the
+          # notes-bot (a separate repository) keeps its embeddings in a
+          # `vector` column of its own database on this server, and its
+          # migrations run `CREATE EXTENSION vector`. Without the library the
+          # extension is still registered in that database's catalog, so
+          # every statement touching the table — a count, a delete, a search —
+          # fails with `could not access file "$libdir/vector"`.
+          #
+          # It was set by hand on the cluster on 2026-09-14 and left out of
+          # this file. CI applies the whole kustomization on every deploy, so
+          # the next one (2026-10-11, run #213) put plain postgres:16 back and
+          # took the notes bot down for two days before anyone noticed. The
+          # image this instance needs belongs here, where the apply reads it.
+          image: pgvector/pgvector:pg16
           ports:
             - name: postgres
               containerPort: 5432
