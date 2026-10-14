@@ -140,6 +140,12 @@ is required after changing them.
   replicas cause `409 Conflict` errors.
 - No Service or Ingress is needed for the bot or worker. PostgreSQL is
   available inside the namespace as `bot-organizer-postgres:5432`.
+- The server is shared with the notes-bot, which keeps a `vector` column in
+  its own database on it — hence the `pgvector/pgvector:pg16` image rather
+  than `postgres:16`. Anything that changes the image has to keep pgvector,
+  or that database stops answering entirely: the extension stays registered
+  in its catalog and every statement touching the table fails with
+  `could not access file "$libdir/vector"`.
 
 ## Backing the database up
 
