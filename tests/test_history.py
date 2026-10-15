@@ -38,10 +38,10 @@ async def test_another_chat_is_not_visible(db_pool):
     assert all("чужой" not in turn["content"] for turn in turns)
 
 
-async def test_the_silent_capture_path_is_left_out(db_pool):
+async def test_the_unaddressed_path_is_left_out(db_pool):
     """Those turns never replied. Including them would put the group's own
     chatter in front of the model as if the bot had been part of it."""
-    await _log(db_pool, 1, "просто болтаем", None, stage="silent_capture")
+    await _log(db_pool, 1, "просто болтаем", None, stage="unaddressed")
     await _log(db_pool, 1, "@bot покажи список", "Вот список.")
 
     turns = await history.recent_turns(db_pool, 1)

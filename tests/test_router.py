@@ -627,22 +627,30 @@ async def _new_active_session(db_pool, chat_id=-100, activity_type="picnic"):
     return dict(row)
 
 
-async def test_unaddressed_message_records_facts_and_stays_silent(db_pool, monkeypatch):
+async def test_unaddressed_message_records_only_the_sender_and_stays_silent(db_pool, monkeypatch):
+    """What the bot records is what was said to it. A line of group talk is
+    read for one thing — who wrote it — and nothing in it is interpreted.
+
+    Live, «Кастет со штопором» (a joke about what a thing looked like) went
+    onto the shopping list through the capture that used to run here."""
     active = await _new_active_session(db_pool)
     telegram_bot = AsyncMock()
-    monkeypatch.setattr(router, "extract", AsyncMock(return_value={
-        "list_items": ["помидоры"], "checked_off_items": [], "facts": [],
-    }))
+    extract_mock = AsyncMock(side_effect=AssertionError(
+        "an unaddressed message must not reach any classifier"))
+    monkeypatch.setattr(router, "extract", extract_mock)
     run_tool_loop_mock = AsyncMock()
     monkeypatch.setattr(router, "run_tool_loop", run_tool_loop_mock)
     msg = _message("нужны помидоры", addressed=False)
 
     await router.handle_active_message(db_pool, telegram_bot, active, msg, BOT_ID, BOT_USERNAME)
 
-    items = await db_pool.fetch(
-        "SELECT name FROM list_items WHERE session_id = $1", active["id"]
+    assert await db_pool.fetch("SELECT 1 FROM list_items WHERE session_id = $1", active["id"]) == []
+    assert await db_pool.fetch("SELECT 1 FROM facts WHERE session_id = $1", active["id"]) == []
+    people_rows = await db_pool.fetch(
+        "SELECT user_id, status FROM participants WHERE session_id = $1", active["id"]
     )
-    assert [r["name"] for r in items] == ["помидоры"]
+    assert [(r["user_id"], r["status"]) for r in people_rows] == [(msg.from_user.id, "unknown")]
+    extract_mock.assert_not_awaited()
     telegram_bot.send_message.assert_not_awaited()
     run_tool_loop_mock.assert_not_awaited()
 
@@ -1240,31 +1248,6 @@ def test_the_system_instruction_covers_the_roster_gap_remark():
     assert "recorded_count" in instruction
     assert "В чате" in instruction
     assert "null" in instruction.lower()
-
-
-async def test_silent_capture_skips_a_name_that_looks_like_a_participant(db_pool, monkeypatch):
-    """Reproduced live: an unaddressed message naming who is coming let the
-    silent-capture classifier confuse a person with something to bring, and
-    list_add stored the participant's own name as a bare shopping-list item.
-    This path never reacts to a tool result — it just applies whatever came
-    back — so the guard inside list_add itself is what keeps the list clean
-    here; nothing else on this path inspects the return value."""
-    import bot.tools.core as core_tools
-
-    active = await _new_active_session(db_pool)
-    await core_tools.set_participant(db_pool, active["id"], "Андрюха", "confirmed", user_id=1)
-    monkeypatch.setattr(
-        router, "extract",
-        AsyncMock(return_value={"list_items": ["Андрюха"], "checked_off_items": [], "facts": []}),
-    )
-    telegram_bot = AsyncMock()
-
-    await router.handle_active_message(
-        db_pool, telegram_bot, active, _message("андрюха тоже придёт", addressed=False), BOT_ID, BOT_USERNAME
-    )
-
-    assert (await core_tools.list_show(db_pool, active["id"]))["items"] == []
-    telegram_bot.send_message.assert_not_awaited()
 
 
 async def test_the_tool_loop_is_given_the_recent_conversation(db_pool):

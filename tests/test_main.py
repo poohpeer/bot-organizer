@@ -142,7 +142,9 @@ async def test_a_navigator_link_reaches_its_handler_and_stops_there(monkeypatch)
 
     await main.route_update(pool, telegram_bot, msg, BOT_ID, BOT_USERNAME, update_id=1)
 
-    link_handler.assert_awaited_once_with(pool, telegram_bot, active_row, msg)
+    link_handler.assert_awaited_once_with(
+        pool, telegram_bot, active_row, msg, BOT_ID, BOT_USERNAME
+    )
     active_handler.assert_not_awaited()
 
 

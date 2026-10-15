@@ -27,7 +27,7 @@ CONVERSATION_MAX_AGE_MINUTES = int(os.environ.get("CONVERSATION_MAX_AGE_MINUTES"
 async def recent_turns(pool, chat_id: int) -> list[dict]:
     """The last few exchanges in this chat, oldest first.
 
-    Only addressed turns (stage 'tool_call'): the silent-capture path never
+    Only addressed turns (stage 'tool_call'): the unaddressed path never
     replies, so those rows would put the group's messages in front of the
     model as if the bot had been part of them.
     """

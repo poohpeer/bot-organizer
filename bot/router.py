@@ -11,7 +11,6 @@ import os
 import random
 import unicodedata
 
-from bot.logging_setup import truncate
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -642,46 +641,6 @@ async def _addressed_intent(text: str, turns: list[dict], tracking: str) -> dict
         _ADDRESSED_INTENT_INSTRUCTION, _intent_input(text, turns, tracking), _INTENT_SCHEMA
     )
 
-_SILENT_CAPTURE_SCHEMA = types.Schema(
-    type=types.Type.OBJECT,
-    properties={
-        "list_items": types.Schema(
-            type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING),
-            description="Item names to add to the shared list, if this message names "
-            "things to get/buy/bring.",
-        ),
-        "checked_off_items": types.Schema(
-            type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING),
-            description="Item names to mark as already obtained, if this message says so.",
-        ),
-        "facts": types.Schema(
-            type=types.Type.ARRAY,
-            items=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "key": types.Schema(type=types.Type.STRING),
-                    "value": types.Schema(type=types.Type.STRING),
-                },
-                required=["key", "value"],
-            ),
-            description="Any other durable fact worth remembering (destination, "
-            "headcount, allergy, who brings what, etc), as key/value pairs.",
-        ),
-    },
-)
-
-_SILENT_CAPTURE_INSTRUCTION = (
-    "This message was NOT addressed to the bot — it is ordinary group chat "
-    "the bot is quietly listening to during an active organizing session. "
-    "Extract only what is worth remembering for later: items to get/buy/"
-    "bring (list_items), items already obtained (checked_off_items), and "
-    "any other durable fact (facts). Leave a field empty if this message "
-    "has nothing for it — never guess or invent. A person's name is never a "
-    "list item, even in a sentence about who is coming and what they might "
-    "bring — \"Андрюха и Витька тоже придут\" names no items at all; only an "
-    "actual thing named to get/buy/bring belongs in list_items."
-)
-
 _ACTIVE_MODE_SYSTEM_INSTRUCTION = (
     "You are a group-chat organizing assistant, currently actively tracking "
     "one event. Use the available tools to remember facts, manage the "
@@ -1011,7 +970,7 @@ LINK_ADDED = "Добавил ссылку на место."
 LINK_ADDED_WITH_NAME = "Добавил место: {name}."
 
 
-async def handle_shared_map_link(pool, telegram_bot, active, message) -> bool:
+async def handle_shared_map_link(pool, telegram_bot, active, message, bot_id, bot_username) -> bool:
     """Take a navigator link exactly as it was sent.
 
     Not resolved, not expanded, not checked against maps. Live, the model
@@ -1030,8 +989,14 @@ async def handle_shared_map_link(pool, telegram_bot, active, message) -> bool:
     anything. A name is taken only when there is none at all and the message
     said something besides the URL.
 
+    Only when addressed to the bot. A link dropped into the chat for the
+    others is read for who sent it and nothing else, like any message that
+    was not said to the bot — it neither changes the place nor gets a reply.
+
     Returns True when the message carried one, so the caller can stop.
     """
+    if not addressed_to_bot(message, bot_id, bot_username):
+        return False
     url = maps_links.find_map_url(_text_of(message))
     if url is None:
         return False
@@ -1073,33 +1038,28 @@ async def handle_shared_location(pool, active, message, bot_id, bot_username) ->
     it attaches its coordinates to the place the group already agreed on, and
     only becomes the place itself when there is none.
 
-    Not every pin is the venue. Someone shares a shop, a station, where they
-    are right now — and silently replacing a place the group confirmed by
-    conversation is the same kind of destruction as overwriting an amount
-    nobody asked to change. So a pin only names the place when it is
-    addressed to the bot, or when no place is recorded yet and there is
-    nothing to lose. Anything else is ignored, with a line in the log saying
-    which.
+    Only when addressed to the bot. Someone shares a shop, a station, where
+    they are right now — and a pin the group did not send to the bot is not
+    something to record, whether or not a place is already set. An
+    unaddressed pin returns False and goes the way of any unaddressed
+    message, which puts its sender on the roster and nothing else.
 
-    Returns True when the message was a location, so the caller can stop
-    rather than fall through to the text path with nothing to read.
+    Returns True when the message was an addressed location, so the caller
+    can stop rather than fall through to the text path with nothing to read.
     """
     venue = message.venue
     location = venue.location if venue is not None else message.location
     if location is None:
         return False
 
+    if not addressed_to_bot(message, bot_id, bot_username):
+        # Not said to the bot, so not recorded: handled like any other
+        # unaddressed message, which only puts the sender on the roster.
+        return False
+
     session_id = active["id"]
-    addressed = addressed_to_bot(message, bot_id, bot_username)
     current = await composed_tools.current_place(pool, session_id)
     name = (venue.title if venue is not None else None) or current["name"]
-
-    if not addressed and current["name"] and venue is None:
-        # A bare pin, not addressed, over a place the group already named.
-        # Ambiguous, and the destructive reading is the likelier mistake.
-        log.info("session %s: ignoring an unaddressed pin; %r is already the place",
-                 session_id, current["name"])
-        return True
 
     if name is None:
         # A pin before anyone named the place. There is nothing to call it,
@@ -1117,24 +1077,6 @@ async def handle_shared_location(pool, active, message, bot_id, bot_username) ->
     log.info("session %s: place set from a shared %s: %r",
              session_id, "venue" if venue is not None else "pin", name)
     return True
-
-
-async def _silent_capture(pool, telegram_bot, session_id: int, text: str) -> dict:
-    """Record whatever a message that wasn't addressed to the bot is worth
-    keeping, via the cheap classifier model rather than the full tool loop —
-    R1's "adds each item without announcing it" must not cost a primary-model
-    turn for every ordinary line of group chat."""
-    extracted = await extract(_SILENT_CAPTURE_INSTRUCTION, text, _SILENT_CAPTURE_SCHEMA)
-    registry = core_tools.build_core_registry(pool, telegram_bot)
-    for name in extracted.get("list_items") or []:
-        await registry["list_add"](session_id=session_id, name=name)
-    for name in extracted.get("checked_off_items") or []:
-        await registry["list_check_off"](session_id=session_id, name=name)
-    for fact in extracted.get("facts") or []:
-        key, value = fact.get("key"), fact.get("value")
-        if key and value:
-            await registry["remember_fact"](session_id=session_id, key=key, value=value)
-    return extracted
 
 
 async def _record_sender(pool, session_id: int, from_user) -> None:
@@ -1192,16 +1134,21 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
     await _record_sender(pool, session_id, message.from_user)
 
     if not addressed_to_bot(message, bot_id, bot_username):
-        # Listening is not speaking (R5 + R1): record whatever is worth
-        # keeping and touch activity, but never send_message on this path.
-        log.debug("session %s: not addressed, silent capture only", session_id)
-        extracted = await _silent_capture(pool, telegram_bot, session_id, text)
-        if any(extracted.get(k) for k in ("list_items", "checked_off_items", "facts")):
-            log.info("session %s: captured %s", session_id, truncate(extracted, 200))
+        # Read for one purpose only: the sender is on the roster (above).
+        # Nothing in the message is interpreted or written down — no items,
+        # no facts, no place — and nothing is sent. A group's talk is not
+        # addressed to the bot, and a classifier reading it cold, with no
+        # neighbouring lines, takes a joke about what a thing looks like for
+        # something to buy («Кастет со штопором» was added to the list that
+        # way). What the bot records is what was said to it.
+        #
+        # Activity is still touched: a chat that is busy is not an idle one,
+        # and the session's own timers read this.
+        log.debug("session %s: not addressed, sender recorded only", session_id)
         await session.touch_activity(pool, session_id)
         await decision_log.log_decision(
-            pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="silent_capture",
-            decision=extracted,
+            pool, chat_id=chat_id, user_id=user_id, raw_text=text, stage="unaddressed",
+            decision={"recorded": "sender"},
         )
         return
 

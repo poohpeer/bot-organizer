@@ -42,10 +42,17 @@ Docker Compose stack (bot + worker + Postgres).
 > to learn bot commands to keep a shared list.
 
 Acceptance criteria:
-- **Given** an active session, **when** someone writes a message naming one
-  or more items to get/bring, **then** the bot adds each item to that
-  session's list without announcing it in the chat (silent capture, per R3's
-  "no unsolicited chatter" spirit) unless asked.
+- **Given** an active session, **when** someone addresses the bot with a
+  message naming one or more items to get/bring, **then** the bot adds each
+  item to that session's list.
+- **Given** an active session, **when** someone writes a message that is not
+  addressed to the bot — however much it sounds like an item, a fact or a
+  place — **then** nothing is added to the list, to the facts or to the
+  place, and nothing is said in the chat; the only effect is that the sender
+  is on the participant list. (Amended 2026-10-15: this replaces "silent
+  capture". A classifier reading a line of group talk without its neighbours
+  took «Кастет со штопором», a joke about what a thing looked like, for
+  something to bring.)
 - **Given** items already on the list, **when** someone asks "what's on the
   list" (in their own words), **then** the bot replies with the current
   list, showing which items are outstanding and which are checked off.

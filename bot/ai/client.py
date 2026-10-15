@@ -53,7 +53,7 @@ PROXY_MODELS = [m.strip() for m in os.environ.get(
     DEFAULT_PROXY_MODELS,
 ).split(",") if m.strip()]
 # What the cheap structured-JSON calls may use — the session start/stop
-# decision, the topic guard, the silent capture, the title/description
+# decision, the topic guard, the title/description
 # extraction.
 #
 # Never a CLI-backed adapter. They are driven through a command-line tool
