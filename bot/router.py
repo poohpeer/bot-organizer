@@ -15,6 +15,7 @@ from bot.logging_setup import truncate
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import httpx
 from google.genai import types
 from telegram import BotCommandScopeChat, BotCommandScopeChatAdministrators
 
@@ -66,6 +67,15 @@ _AI_UNAVAILABLE_MESSAGES = (
 # wrong. Live, this failure said nothing at all — a provider accepted a
 # request and never answered it, and the person watched an empty chat.
 _TOOK_TOO_LONG = "Что-то я задумался и не успел. Повторите, пожалуйста."
+# Said instead of the line above once the turn had already written something.
+# "Повторите" would be wrong there: the repeat is the thing that adds the same
+# items twice. Live, «Я буду около 6» marked the sender as coming, the model
+# then went quiet past the HTTP timeout, and the chat was told «Не понял,
+# переформулируй» about a message that had been understood and recorded.
+_TOOK_TOO_LONG_AFTER_CHANGES = (
+    "Часть уже записал, но договорить не успел. Проверьте список, "
+    "повторять не нужно."
+)
 
 
 def _ai_unavailable_message() -> str:
@@ -1387,9 +1397,15 @@ async def handle_active_message(pool, telegram_bot, active_session, message, bot
         # into a bot that cannot answer any of them.
         log.warning("Every model refused for chat_id=%s session_id=%s", chat_id, session_id)
         reply_text = _ai_unavailable_message()
-    except TurnTooSlow:
-        log.warning("Turn outran its deadline for chat_id=%s session_id=%s", chat_id, session_id)
-        reply_text = _TOOK_TOO_LONG
+    except (TurnTooSlow, httpx.TimeoutException) as exc:
+        # A transport timeout is the same fact as the deadline, only earlier:
+        # the model did not answer in time. It used to fall into the generic
+        # branch below and be reported as "не понял".
+        log.warning("Turn ran out of time (%s) for chat_id=%s session_id=%s",
+                    type(exc).__name__, chat_id, session_id)
+        reply_text = (
+            _TOOK_TOO_LONG_AFTER_CHANGES if record.changed_something() else _TOOK_TOO_LONG
+        )
     except Exception:
         log.exception("Tool loop failed for chat_id=%s session_id=%s", chat_id, session_id)
         reply_text = _FALLBACK_MESSAGE

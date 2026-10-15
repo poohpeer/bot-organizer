@@ -2,6 +2,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock
 
+import httpx
 from telegram import (
     Chat,
     ChatMemberAdministrator,
@@ -1828,6 +1829,53 @@ async def test_a_turn_that_never_answers_still_says_something(db_pool, monkeypat
     telegram_bot.send_message.assert_awaited_once_with(
         chat_id=active["chat_id"], text=router._TOOK_TOO_LONG
     )
+
+
+async def test_a_transport_timeout_is_answered_as_too_slow_not_as_not_understood(
+    db_pool, monkeypatch,
+):
+    """ai-proxy took the request and never answered inside the HTTP timeout.
+    That raised httpx.ReadTimeout, which fell into the catch-all and was
+    reported as «Не понял, переформулируй» — about a message the model had
+    understood."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(
+        return_value={"stop": False, "off_topic": False, "new_event": False}))
+    monkeypatch.setattr(router, "run_tool_loop", AsyncMock(
+        side_effect=httpx.ReadTimeout("timed out")))
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot я буду около 6"), BOT_ID, BOT_USERNAME
+    )
+
+    telegram_bot.send_message.assert_awaited_once_with(
+        chat_id=active["chat_id"], text=router._TOOK_TOO_LONG
+    )
+
+
+async def test_a_timeout_after_a_change_does_not_ask_for_a_repeat(db_pool, monkeypatch):
+    """The turn recorded the sender before it went quiet. «Повторите» would be
+    the wrong thing to say: the repeat is what adds a list item twice."""
+    active = await _new_active_session(db_pool)
+    monkeypatch.setattr(router, "_addressed_intent", AsyncMock(
+        return_value={"stop": False, "off_topic": False, "new_event": False}))
+
+    async def _wrote_then_timed_out(*args, record=None, **kwargs):
+        record.record("set_participant", {"status": "updated"})
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(router, "run_tool_loop", _wrote_then_timed_out)
+    telegram_bot = AsyncMock()
+
+    await router.handle_active_message(
+        db_pool, telegram_bot, active, _message("@orgbot я буду около 6"), BOT_ID, BOT_USERNAME
+    )
+
+    telegram_bot.send_message.assert_awaited_once_with(
+        chat_id=active["chat_id"], text=router._TOOK_TOO_LONG_AFTER_CHANGES
+    )
+    assert "повторять не нужно" in router._TOOK_TOO_LONG_AFTER_CHANGES
 
 
 async def test_the_deadline_message_is_not_the_refusal_one():

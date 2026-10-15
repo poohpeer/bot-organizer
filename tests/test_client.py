@@ -8,11 +8,12 @@ types, which is how a real gap stayed hidden — see
 test_a_proxy_error_is_what_the_chain_actually_sees.
 """
 
+import httpx
 import pytest
 
 from bot.ai.client import AllModelsUnavailable, ModelFallback
 from bot.ai.providers import Reply
-from bot.ai.proxy import ProxyError, is_retryable
+from bot.ai.proxy import ProxyError, is_retryable, is_transport_timeout
 
 
 def _proxy_error(status):
@@ -234,3 +235,53 @@ async def test_a_hung_provider_is_cut_off_at_the_deadline(monkeypatch):
 
     with pytest.raises(tool_loop.TurnTooSlow):
         await tool_loop.run_tool_loop(_NeverAnswers(), "привет", {})
+
+
+# --- a request that timed out ---------------------------------------------
+# Live, 2026-10-15: codex took the request, wrote «Я буду около 6» to the
+# roster over MCP, and then outlived the 35 s HTTP timeout. httpx.ReadTimeout
+# is not a ProxyError, so the chain did not move, the exception went up as an
+# unknown failure and the chat was told «Не понял, переформулируй».
+
+def test_a_timeout_is_not_a_refusal():
+    """is_retryable stays about refusals. A timeout is retryable only when the
+    caller can say nothing was changed, so it is a separate question."""
+    timeout = httpx.ReadTimeout("timed out")
+
+    assert is_retryable(timeout) is False
+    assert is_transport_timeout(timeout) is True
+    assert is_transport_timeout(httpx.ConnectTimeout("no route")) is True
+    assert is_transport_timeout(_proxy_error(503)) is False
+    assert is_transport_timeout(ValueError("x")) is False
+
+
+async def test_a_timeout_moves_on_while_nothing_has_changed():
+    provider = _FakeProvider("ai-proxy", {"a": httpx.ReadTimeout("timed out")})
+    chain = [(provider, "a"), (provider, "b")]
+
+    _, model, _ = await ModelFallback(chain).start("привет", nothing_changed=lambda: True)
+
+    assert model == "b"
+
+
+async def test_a_timeout_does_not_move_on_once_something_changed():
+    """The model that went quiet may already have written to the roster, and
+    putting the same message to the next one would write it again."""
+    provider = _FakeProvider("ai-proxy", {"a": httpx.ReadTimeout("timed out")})
+    chain = [(provider, "a"), (provider, "b")]
+
+    with pytest.raises(httpx.ReadTimeout):
+        await ModelFallback(chain).start("привет", nothing_changed=lambda: False)
+
+    assert provider.started == ["a"], "must not have asked the next model"
+
+
+async def test_a_refusal_still_moves_on_after_a_change():
+    """The guard is only for timeouts. A 429 is a refusal — nothing ran — so
+    the next model is asked whatever the turn had already done."""
+    provider = _FakeProvider("ai-proxy", {"a": _proxy_error(429)})
+    chain = [(provider, "a"), (provider, "b")]
+
+    _, model, _ = await ModelFallback(chain).start("привет", nothing_changed=lambda: False)
+
+    assert model == "b"
