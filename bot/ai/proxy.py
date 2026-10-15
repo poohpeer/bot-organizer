@@ -165,3 +165,17 @@ def is_retryable(exc) -> bool:
     nothing about the request being wrong.
     """
     return isinstance(exc, ProxyError) and (exc.status == 429 or exc.status >= 500)
+
+
+def is_transport_timeout(exc) -> bool:
+    """ai-proxy took the request and did not answer inside the HTTP timeout.
+
+    Not folded into is_retryable, because the two are different in the one
+    way that matters: a 429 or a 5xx is a refusal, so nothing happened and
+    the next model may be asked freely. A timeout says nothing about what
+    happened. A CLI-backed model drives its tools over MCP while the request
+    is open, so the request can time out *after* it changed the roster — and
+    putting the same message to another model would do it twice. Callers
+    that may retry on this have to know that nothing was changed.
+    """
+    return isinstance(exc, httpx.TimeoutException)

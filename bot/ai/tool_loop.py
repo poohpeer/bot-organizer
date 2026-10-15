@@ -4,7 +4,7 @@ import os
 import time
 
 from bot.ai.client import AllModelsUnavailable
-from bot.ai.proxy import is_retryable
+from bot.ai.proxy import is_retryable, is_transport_timeout
 from bot.ai.tool_schema_openai import openai_tools
 from bot.logging_setup import truncate
 from bot.turn_outcome import (
@@ -93,6 +93,7 @@ async def _run_tool_loop(fallback, prompt, registry: dict, *, history=None,
     provider, model, chat = await fallback.start(
         prompt, tools=tools, system_instruction=system_instruction, history=history,
         mcp_url=mcp_url,
+        nothing_changed=(lambda: not record.changed_something()) if record is not None else None,
     )
     log.debug("tool loop: first turn answered by %s/%s", provider.name, model)
     reply = chat.reply
@@ -152,7 +153,10 @@ async def _run_tool_loop(fallback, prompt, registry: dict, *, history=None,
             # turn is if anything more likely — quota runs out mid-conversation
             # — so re-drive what has been said so far on the next model rather
             # than losing the whole exchange.
-            if not is_retryable(e):
+            # A timeout is safe to re-drive here, unlike on the opening
+            # call: what the tools did is already in the history handed to
+            # the next model, so it is told rather than asked to do it again.
+            if not (is_retryable(e) or is_transport_timeout(e)):
                 raise
             log.warning("Tool loop turn failed (%s), re-driving on the next model", e)
             fallback.index += 1

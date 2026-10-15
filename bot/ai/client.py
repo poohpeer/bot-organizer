@@ -1,7 +1,9 @@
 import logging
 import os
 
-from bot.ai.proxy import ProxyProvider, is_cli_backed, is_retryable, proxy
+from bot.ai.proxy import (
+    ProxyProvider, is_cli_backed, is_retryable, is_transport_timeout, proxy,
+)
 
 log = logging.getLogger(__name__)
 
@@ -117,10 +119,18 @@ class ModelFallback:
     def model(self) -> str:
         return self.current[1]
 
-    async def start(self, prompt, *, tools=None, system_instruction=None, history=None, mcp_url=None):
+    async def start(self, prompt, *, tools=None, system_instruction=None, history=None,
+                    mcp_url=None, nothing_changed=None):
         """Open a conversation on the best model that will accept it.
 
         Raises AllModelsUnavailable once every remaining entry has refused.
+
+        A request that timed out moves on to the next model only while
+        `nothing_changed()` is true (None means nothing could have been: no
+        tool has run yet). A refusal is safe to put to another model; a
+        timeout is not, because the model that went quiet may already have
+        written to the roster over MCP, and asking the next one would write
+        it again.
         """
         last_error = None
         while self.index < len(self.chain):
@@ -133,7 +143,10 @@ class ModelFallback:
                 )
                 return provider, model, chat
             except Exception as e:
-                if not is_retryable(e):
+                timed_out_safely = is_transport_timeout(e) and (
+                    nothing_changed is None or nothing_changed()
+                )
+                if not is_retryable(e) and not timed_out_safely:
                     raise
                 last_error = e
                 log.warning("%s/%s unavailable (%s), trying the next model", provider.name, model, e)

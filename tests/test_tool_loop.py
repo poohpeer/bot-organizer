@@ -1,11 +1,13 @@
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from bot.ai.client import AllModelsUnavailable, ModelFallback
 from bot.ai.providers import Reply, ToolCall
 from bot.ai.proxy import ProxyError
 from bot.ai.tool_loop import MAX_TOOL_ITERATIONS, run_tool_loop
+from bot.turn_outcome import TurnRecord
 
 
 def _rate_limited():
@@ -145,6 +147,67 @@ async def test_a_rate_limit_on_a_later_turn_re_drives_on_the_next_model():
 
     assert result == "досказал"
     assert gemini_provider.calls[0][1] is None, "re-drive carries history, not a new prompt"
+
+
+async def test_a_timeout_on_a_later_turn_re_drives_on_the_next_model():
+    """What the tools did is already in the history handed over, so the next
+    model is told about it rather than asked to do it again."""
+    class _TimesOut(_ScriptedChat):
+        async def send_tool_results(self, results):
+            raise httpx.ReadTimeout("timed out")
+
+    failing = _TimesOut([Reply(text="", tool_calls=[ToolCall(name="t", args={}, id="c1")])])
+    first = _ScriptedProvider("codex", [failing])
+    second = _ScriptedProvider("gemini", [_ScriptedChat([Reply(text="досказал")])])
+
+    result = await run_tool_loop(
+        _fallback((first, "a"), (second, "b")), "?", {"t": AsyncMock(return_value={})},
+    )
+
+    assert result == "досказал"
+
+
+async def test_an_opening_timeout_after_a_cli_wrote_is_not_put_to_the_next_model():
+    """A CLI-backed model drives its tools over MCP while the request is open,
+    so it can change the roster and then outlive the HTTP timeout. The record
+    shows what it did; asking another model would do it twice."""
+    record = TurnRecord()
+
+    class _WroteThenHung:
+        name = "codex"
+        calls = 0
+
+        async def start(self, model, prompt, **kwargs):
+            _WroteThenHung.calls += 1
+            record.record("set_participant", {"status": "updated"})
+            raise httpx.ReadTimeout("timed out")
+
+    next_model = _ScriptedProvider("gemini", [_ScriptedChat([Reply(text="второй раз")])])
+
+    with pytest.raises(httpx.ReadTimeout):
+        await run_tool_loop(
+            _fallback((_WroteThenHung(), "a"), (next_model, "b")), "?", {}, record=record,
+        )
+
+    assert next_model.calls == []
+
+
+async def test_an_opening_timeout_with_nothing_written_moves_on():
+    record = TurnRecord()
+
+    class _Hung:
+        name = "codex"
+
+        async def start(self, model, prompt, **kwargs):
+            raise httpx.ReadTimeout("timed out")
+
+    next_model = _ScriptedProvider("gemini", [_ScriptedChat([Reply(text="ответил")])])
+
+    result = await run_tool_loop(
+        _fallback((_Hung(), "a"), (next_model, "b")), "?", {}, record=record,
+    )
+
+    assert result == "ответил"
 
 
 async def test_a_rate_limit_with_no_model_left_propagates():
