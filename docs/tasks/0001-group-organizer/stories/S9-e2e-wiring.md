@@ -17,8 +17,9 @@ that drives it.
 1. **The bot acts only when addressed** (R5). `bot.addressing` decides that,
    with no model involved. In a dormant chat an unaddressed message is
    dropped before any model call. In an *active* session an unaddressed
-   message is still read and its facts recorded (R1's silent capture), but
-   the bot does not reply.
+   message is read only to put its sender on the participant list (amended
+   2026-10-15; R1's "silent capture" is gone): no item, fact or place is
+   taken from it, and the bot does not reply.
 2. **Stopping is understood, never matched** (R3). There is no keyword list
    or regular expression for "we're done" anywhere in the router. An
    addressed message goes to the model, which decides among: answer, start,

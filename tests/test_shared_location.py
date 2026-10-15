@@ -35,7 +35,7 @@ async def _active(db_pool, chat_id=-100):
     return await session.start_session(db_pool, chat_id=chat_id, activity_type="picnic")
 
 
-def _location_message(*, venue=None, addressed=False, lat=LAT, lon=LON):
+def _location_message(*, venue=None, addressed=True, lat=LAT, lon=LON):
     location = SimpleNamespace(latitude=lat, longitude=lon)
     return SimpleNamespace(
         chat=SimpleNamespace(id=-100, type="supergroup"),
@@ -99,13 +99,29 @@ async def test_an_unaddressed_pin_does_not_replace_a_named_place(db_pool):
     await core_tools.remember_fact(db_pool, active["id"], "place", "Маленькая прага")
 
     handled = await router.handle_shared_location(
-        db_pool, active, _location_message(lat=1.0, lon=2.0), BOT_ID, BOT_USERNAME
+        db_pool, active, _location_message(lat=1.0, lon=2.0, addressed=False),
+        BOT_ID, BOT_USERNAME,
     )
 
-    assert handled is True, "still a location — it must not fall through to the text path"
+    assert handled is False, "it falls through so the sender still reaches the roster"
     assert await _place_fact(db_pool, active["id"]) == "Маленькая прага"
     place = await composed.current_place(db_pool, active["id"])
     assert place["lat"] is None, "and its coordinates must not be borrowed either"
+
+
+async def test_an_unaddressed_pin_is_not_recorded_even_with_no_place_yet(db_pool):
+    """What the bot records is what was said to it. A pin is not an exception
+    because nothing is set yet — the group may simply be showing each other
+    where they are."""
+    active = await _active(db_pool)
+
+    handled = await router.handle_shared_location(
+        db_pool, active, _location_message(addressed=False), BOT_ID, BOT_USERNAME
+    )
+
+    assert handled is False
+    assert await _place_fact(db_pool, active["id"]) is None
+    assert (await composed.current_place(db_pool, active["id"]))["lat"] is None
 
 
 async def test_a_pin_addressed_to_the_bot_does_replace_it(db_pool):

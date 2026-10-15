@@ -31,12 +31,29 @@ from bot.maps_links import find_map_url
 SHORT = "https://maps.app.goo.gl/aBcD1234"
 WAZE = "https://waze.com/ul/hsv8k7dz4h"
 
+BOT_ID = 999
+BOT_USERNAME = "orgbot"
 
-def _message(text, chat_id=-100):
+
+def _message(text, chat_id=-100, addressed=True):
+    """Addressed by default: a link is only taken when it was said to the bot,
+    and what these tests are about is what happens to one that was."""
     return SimpleNamespace(
         chat=SimpleNamespace(id=chat_id, type="supergroup"),
         from_user=SimpleNamespace(id=7, is_bot=False, full_name="Alex"),
         text=text, caption=None,
+        entities=(), caption_entities=(),
+        parse_entity=lambda entity: "",
+        parse_caption_entity=lambda entity: "",
+        reply_to_message=SimpleNamespace(
+            from_user=SimpleNamespace(id=BOT_ID)
+        ) if addressed else None,
+    )
+
+
+async def _handle(pool, telegram_bot, active, message):
+    return await router.handle_shared_map_link(
+        pool, telegram_bot, active, message, BOT_ID, BOT_USERNAME
     )
 
 
@@ -81,7 +98,7 @@ async def test_the_link_is_stored_exactly_as_sent(db_pool):
     active = await _active(db_pool)
     telegram_bot = AsyncMock()
 
-    handled = await router.handle_shared_map_link(
+    handled = await _handle(
         db_pool, telegram_bot, active, _message(SHORT)
     )
 
@@ -95,7 +112,7 @@ async def test_it_says_it_added_and_asks_nothing(db_pool):
     active = await _active(db_pool)
     telegram_bot = AsyncMock()
 
-    await router.handle_shared_map_link(db_pool, telegram_bot, active, _message(SHORT))
+    await _handle(db_pool, telegram_bot, active, _message(SHORT))
 
     text = telegram_bot.send_message.await_args.kwargs["text"]
     assert text == router.LINK_ADDED
@@ -112,7 +129,7 @@ async def test_no_lookup_is_made(db_pool, monkeypatch):
     monkeypatch.setattr(external, "maps_lookup", boom)
     active = await _active(db_pool)
 
-    await router.handle_shared_map_link(db_pool, AsyncMock(), active, _message(SHORT))
+    await _handle(db_pool, AsyncMock(), active, _message(SHORT))
 
 
 async def test_an_existing_place_keeps_its_name(db_pool):
@@ -120,7 +137,7 @@ async def test_an_existing_place_keeps_its_name(db_pool):
     active = await _active(db_pool)
     await core_tools.remember_fact(db_pool, active["id"], "place", "Бен шемен")
 
-    await router.handle_shared_map_link(db_pool, AsyncMock(), active, _message(SHORT))
+    await _handle(db_pool, AsyncMock(), active, _message(SHORT))
 
     place = await composed.current_place(db_pool, active["id"])
     assert place["name"] == "Бен шемен"
@@ -134,7 +151,7 @@ async def test_text_beside_the_link_does_not_rename_an_existing_place(db_pool):
     active = await _active(db_pool)
     await core_tools.remember_fact(db_pool, active["id"], "place", "Бен шемен")
 
-    await router.handle_shared_map_link(
+    await _handle(
         db_pool, AsyncMock(), active, _message(f"давайте лучше сюда {WAZE}")
     )
 
@@ -147,7 +164,7 @@ async def test_a_name_is_taken_only_when_there_is_none(db_pool):
     active = await _active(db_pool)
     telegram_bot = AsyncMock()
 
-    await router.handle_shared_map_link(
+    await _handle(
         db_pool, telegram_bot, active, _message(f"Бен шемен {SHORT}")
     )
 
@@ -161,7 +178,7 @@ async def test_a_name_is_taken_only_when_there_is_none(db_pool):
 async def test_a_bare_link_with_no_place_yet_invents_no_name(db_pool):
     active = await _active(db_pool)
 
-    await router.handle_shared_map_link(db_pool, AsyncMock(), active, _message(SHORT))
+    await _handle(db_pool, AsyncMock(), active, _message(SHORT))
 
     place = await composed.current_place(db_pool, active["id"])
     assert place["name"] is None
@@ -172,7 +189,7 @@ async def test_an_ordinary_message_falls_through(db_pool):
     active = await _active(db_pool)
     telegram_bot = AsyncMock()
 
-    handled = await router.handle_shared_map_link(
+    handled = await _handle(
         db_pool, telegram_bot, active, _message("а во сколько встречаемся?")
     )
 
@@ -185,7 +202,7 @@ async def test_an_ordinary_message_falls_through(db_pool):
 async def test_the_report_links_the_url_that_was_sent(db_pool):
     active = await _active(db_pool)
     await core_tools.remember_fact(db_pool, active["id"], "place", "Бен шемен")
-    await router.handle_shared_map_link(db_pool, AsyncMock(), active, _message(WAZE))
+    await _handle(db_pool, AsyncMock(), active, _message(WAZE))
 
     report = (await composed.event_status(db_pool, active["id"]))["report"]
 
@@ -204,7 +221,7 @@ async def test_a_sent_link_beats_one_built_from_coordinates(db_pool):
         active["id"],
     )
 
-    await router.handle_shared_map_link(db_pool, AsyncMock(), active, _message(WAZE))
+    await _handle(db_pool, AsyncMock(), active, _message(WAZE))
 
     report = (await composed.event_status(db_pool, active["id"]))["report"]
     assert telegram_text.link(WAZE, status_render.MAP_LABEL) in report
@@ -213,9 +230,25 @@ async def test_a_sent_link_beats_one_built_from_coordinates(db_pool):
 
 async def test_a_second_link_replaces_the_first(db_pool):
     active = await _active(db_pool)
-    await router.handle_shared_map_link(db_pool, AsyncMock(), active, _message(SHORT))
+    await _handle(db_pool, AsyncMock(), active, _message(SHORT))
 
-    await router.handle_shared_map_link(db_pool, AsyncMock(), active, _message(WAZE))
+    await _handle(db_pool, AsyncMock(), active, _message(WAZE))
 
     place = await composed.current_place(db_pool, active["id"])
     assert place["url"] == WAZE
+
+
+# --- not said to the bot ----------------------------------------------------
+
+async def test_a_link_not_addressed_to_the_bot_is_left_alone(db_pool):
+    """The group talks to itself. A link dropped there is read for who sent it
+    and for nothing else: no place is set and nobody is told anything."""
+    active = await _active(db_pool)
+    telegram_bot = AsyncMock()
+
+    handled = await _handle(db_pool, telegram_bot, active, _message(WAZE, addressed=False))
+
+    assert handled is False, "it must fall through, so the sender still reaches the roster"
+    row = await db_pool.fetchrow("SELECT place_url FROM sessions WHERE id = $1", active["id"])
+    assert row["place_url"] is None
+    telegram_bot.send_message.assert_not_awaited()
