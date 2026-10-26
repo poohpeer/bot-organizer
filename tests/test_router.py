@@ -134,6 +134,16 @@ def _message(text, chat_id=-100, chat_title=None, addressed=True, reply_to=None)
     )
 
 
+def _bot_message(text="Договорились, закрываю. Было здорово!"):
+    return Message(
+        message_id=99,
+        date=dt.datetime.now(dt.timezone.utc),
+        chat=Chat(id=-100, type="group"),
+        from_user=_BOT,
+        text=text,
+    )
+
+
 def _member_update(old_status, new_status, chat_id=-100, user=_BOT):
     classes = {"left": ChatMemberLeft, "member": ChatMemberMember}
 
@@ -244,12 +254,51 @@ async def test_vague_addressed_message_asks_and_starts_no_session(db_pool, monke
     _no_group_info(monkeypatch)
     telegram_bot = AsyncMock()
     monkeypatch.setattr(router, "extract", AsyncMock(return_value={"confident": False}))
+    # An explicit @mention: somebody typed the bot's name, so the question is
+    # the right answer even when the model made nothing of the message.
     msg = _message("привет")
 
     await router.handle_dormant_message(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME)
 
     assert await session.get_active_session(db_pool, -100) is None
     telegram_bot.send_message.assert_awaited_once_with(chat_id=-100, text=router._ASK_WHAT_TO_TRACK)
+
+
+async def test_vague_reply_to_the_bot_is_ignored(db_pool, monkeypatch):
+    """The bot's own messages stay repliable forever. A farewell on a closed
+    session used to draw "Что отслеживаем?" out of every comment made under
+    it — live, twice, half an hour after the session closed."""
+    await _ensure_chat(db_pool)
+    _no_group_info(monkeypatch)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(router, "extract", AsyncMock(return_value={"confident": False}))
+    msg = _message("😂😂😂", reply_to=_bot_message())
+
+    await router.handle_dormant_message(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME)
+
+    assert await session.get_active_session(db_pool, -100) is None
+    telegram_bot.send_message.assert_not_awaited()
+    # Silent, not invisible: the decision still has to be greppable.
+    assert await _decision_log_count(db_pool) == 1
+
+
+async def test_reply_that_starts_an_event_still_starts_one(db_pool, monkeypatch):
+    """The greeting asks to be replied to, so the reply path has to keep
+    working when the reply does ask for a session."""
+    await _ensure_chat(db_pool)
+    _no_group_info(monkeypatch)
+    telegram_bot = AsyncMock()
+    monkeypatch.setattr(
+        router, "extract",
+        AsyncMock(return_value={"confident": True, "activity_type": "picnic"}),
+    )
+    msg = _message("начинай", reply_to=_bot_message())
+
+    await router.handle_dormant_message(db_pool, telegram_bot, msg, BOT_ID, BOT_USERNAME)
+
+    active = await session.get_active_session(db_pool, -100)
+    assert active is not None and active["activity_type"] == "picnic"
+    telegram_bot.send_message.assert_awaited_once()
 
 
 async def test_session_already_active_tells_user_and_does_not_duplicate(db_pool, monkeypatch):

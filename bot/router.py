@@ -32,7 +32,7 @@ import bot.timezones as timezones
 import bot.tools.composed as composed_tools
 import bot.tools.core as core_tools
 import bot.tools.external as external_tools
-from bot.addressing import addressed_to_bot, bot_was_added
+from bot.addressing import REPLY, addressed_to_bot, bot_was_added, how_addressed
 from bot.ai.classify import extract
 import bot.ai.client as ai_client
 import bot.settings as settings
@@ -374,7 +374,8 @@ def _from_the_title_clause(event_date, place) -> str:
 
 
 async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_username) -> None:
-    if not addressed_to_bot(message, bot_id, bot_username):
+    how = how_addressed(message, bot_id, bot_username)
+    if how is None:
         # No model call, no DB write, no reply — R5's gate stops right here.
         return
 
@@ -401,6 +402,19 @@ async def handle_dormant_message(pool, telegram_bot, message, bot_id, bot_userna
     extracted = await extract(_START_INSTRUCTION, f"Message: {text}", _START_SCHEMA)
 
     if not extracted.get("confident"):
+        # A reply that asks for nothing gets nothing back. The bot's own
+        # messages stay repliable forever, so a farewell on a closed session
+        # is a standing invitation to comment — and every comment used to be
+        # met with "Что отслеживаем?" (live: two replies to a sign-off, half
+        # an hour after it). An explicit @mention still gets the question:
+        # somebody typed the bot's name on purpose, and a classifier that
+        # misreads «@bot давай организуем» must not turn that into silence.
+        if how == REPLY:
+            await decision_log.log_decision(
+                pool, chat_id=chat.id, user_id=user_id, raw_text=text, stage="session_start",
+                decision={"confident": False, "ignored": "reply_without_start_intent"},
+            )
+            return
         await telegram_bot.send_message(chat_id=chat.id, text=_ASK_WHAT_TO_TRACK)
         await decision_log.log_decision(
             pool, chat_id=chat.id, user_id=user_id, raw_text=text, stage="session_start",
