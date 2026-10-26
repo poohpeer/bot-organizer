@@ -19,12 +19,25 @@ _PRESENT = frozenset({
 })
 
 
-def addressed_to_bot(message, bot_id: int, bot_username: str) -> bool:
-    """True when this message is directed at the bot: an @mention of its exact
-    username, or a reply to something the bot itself said."""
+# How a message reached the bot. Kept apart from the yes/no answer because the
+# two forms do not carry the same weight: an @mention is unambiguous, while a
+# reply can be an aside about what the bot just said. Live, the bot signed off
+# on a closed session and two replies to that farewell half an hour later —
+# «😂😂😂» and «Обсуждаем поход героя закат» — were each answered with "Что
+# отслеживаем?".
+MENTION = "mention"
+REPLY = "reply"
+
+
+def how_addressed(message, bot_id: int, bot_username: str) -> str | None:
+    """REPLY, MENTION, or None when the message is not directed at the bot.
+
+    REPLY wins when a message is both, matching the order the check has always
+    run in; no caller distinguishes the two cases.
+    """
     reply = message.reply_to_message
     if reply is not None and reply.from_user is not None and reply.from_user.id == bot_id:
-        return True
+        return REPLY
 
     handle = f"@{bot_username}".lower()
     # Text and caption entities need different parsers — parse_entity raises
@@ -42,14 +55,20 @@ def addressed_to_bot(message, bot_id: int, bot_username: str) -> bool:
                 # earlier in the message shifts a naive slice by one and the
                 # comparison silently stops matching.
                 if parse(entity).lower() == handle:
-                    return True
+                    return MENTION
             elif entity.type == MessageEntity.TEXT_MENTION:
                 # A mention of a user without a public username, carrying the
                 # user object directly — the form that still resolves if the
                 # bot is renamed.
                 if entity.user is not None and entity.user.id == bot_id:
-                    return True
-    return False
+                    return MENTION
+    return None
+
+
+def addressed_to_bot(message, bot_id: int, bot_username: str) -> bool:
+    """True when this message is directed at the bot: an @mention of its exact
+    username, or a reply to something the bot itself said."""
+    return how_addressed(message, bot_id, bot_username) is not None
 
 
 def bot_was_added(chat_member_updated, bot_id: int) -> bool:

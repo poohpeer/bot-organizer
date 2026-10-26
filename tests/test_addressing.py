@@ -3,7 +3,7 @@ import datetime as dt
 import pytest
 from telegram import Chat, ChatMemberAdministrator, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, Message, MessageEntity, User
 
-from bot.addressing import addressed_to_bot, bot_was_added
+from bot.addressing import MENTION, REPLY, addressed_to_bot, bot_was_added, how_addressed
 
 BOT_ID = 4242
 BOT_USERNAME = "orgbot"
@@ -29,6 +29,13 @@ def _message(text=None, entities=(), reply_to=None, caption=None, caption_entiti
         caption=caption,
         caption_entities=list(caption_entities),
         reply_to_message=reply_to,
+    )
+
+
+def _bot_message(text="Что берём с собой?"):
+    return Message(
+        message_id=99, date=dt.datetime.now(dt.timezone.utc),
+        chat=Chat(id=-100, type="group"), from_user=_BOT, text=text,
     )
 
 
@@ -68,6 +75,33 @@ def test_reply_to_another_person_is_not_addressed():
         chat=Chat(id=-100, type="group"), from_user=_HUMAN, text="я возьму мангал",
     )
     assert addressed_to_bot(_message(text="отлично", reply_to=someone_else), BOT_ID, BOT_USERNAME) is False
+
+
+def test_how_addressed_names_a_mention():
+    assert how_addressed(_mention("@orgbot помоги с пикником"), BOT_ID, BOT_USERNAME) == MENTION
+
+
+def test_how_addressed_names_a_text_mention():
+    """A mention of a bot with no public username carries the user object."""
+    msg = _mention("орг помоги", handle="орг", entity_type=MessageEntity.TEXT_MENTION, user=_BOT)
+    assert how_addressed(msg, BOT_ID, BOT_USERNAME) == MENTION
+
+
+def test_how_addressed_names_a_reply():
+    assert how_addressed(_message(text="я возьму мангал", reply_to=_bot_message()),
+                         BOT_ID, BOT_USERNAME) == REPLY
+
+
+def test_how_addressed_calls_a_reply_that_also_mentions_us_a_reply():
+    """The caller that cares about the difference treats a reply as the weaker
+    form, so the stricter answer has to be the one it gets."""
+    msg = _mention("@orgbot ну ок")
+    both = _message(text=msg.text, entities=msg.entities, reply_to=_bot_message())
+    assert how_addressed(both, BOT_ID, BOT_USERNAME) == REPLY
+
+
+def test_how_addressed_is_none_for_ordinary_chatter():
+    assert how_addressed(_message(text="надо купить помидоры"), BOT_ID, BOT_USERNAME) is None
 
 
 def test_a_similarly_named_bot_is_not_us():
